@@ -999,7 +999,10 @@ def test_get_task_timing_summary_prefers_earliest_active_run(tmp_path: Path) -> 
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     container = Container(tmp_path)
     with TestClient(app) as client:
-        created = client.post("/api/tasks", json={"title": "Timing active run selection"}).json()["task"]
+        created = client.post(
+            "/api/tasks",
+            json={"title": "Timing active run selection", "status": "backlog"},
+        ).json()["task"]
         task = container.tasks.get(created["id"])
         assert task is not None
 
