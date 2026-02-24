@@ -28,6 +28,7 @@ from ..domain.models import (
     now_iso,
 )
 from ..events.bus import EventBus
+from ..orchestrator.live_worker_adapter import get_configurable_step_prompt_defaults
 from ..orchestrator.service import OrchestratorService
 from ..storage.container import Container
 from ..terminal.service import TerminalService
@@ -246,6 +247,7 @@ class LanguageCommandsRequest(BaseModel):
 class ProjectSettingsRequest(BaseModel):
     """Patch payload for project-level lint/test/typecheck command overrides."""
     commands: Optional[dict[str, LanguageCommandsRequest]] = None
+    prompt_overrides: Optional[dict[str, str]] = None
 
 
 class UpdateSettingsRequest(BaseModel):
@@ -380,6 +382,22 @@ def _normalize_str_map(value: Any) -> dict[str, str]:
         v = str(raw or "").strip()
         if k and v:
             out[k] = v
+    return out
+
+
+def _normalize_prompt_overrides(value: Any) -> dict[str, str]:
+    """Normalize per-step prompt overrides from runtime config."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for raw_step, raw_prompt in value.items():
+        step = str(raw_step or "").strip().lower()
+        if not step:
+            continue
+        prompt = raw_prompt if isinstance(raw_prompt, str) else str(raw_prompt)
+        if not prompt.strip():
+            continue
+        out[step] = prompt
     return out
 
 
@@ -798,6 +816,9 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
         workers_heartbeat_grace_seconds = workers_heartbeat_seconds
     if workers_default not in workers_providers:
         workers_default = "codex"
+    project_cfg = dict(cfg.get("project") or {})
+    prompt_defaults = get_configurable_step_prompt_defaults()
+    prompt_overrides = _normalize_prompt_overrides(project_cfg.get("prompt_overrides"))
     return {
         "orchestrator": {
             "concurrency": _coerce_int(orchestrator.get("concurrency"), 2, minimum=1, maximum=128),
@@ -827,7 +848,9 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
             "providers": workers_providers,
         },
         "project": {
-            "commands": dict((cfg.get("project") or {}).get("commands") or {}),
+            "commands": dict(project_cfg.get("commands") or {}),
+            "prompt_overrides": prompt_overrides,
+            "prompt_defaults": prompt_defaults,
         },
     }
 

@@ -734,6 +734,13 @@ a:focus-visible {
   border-bottom-right-radius: 0;
 }
 
+.settings-prompt-textarea {
+  min-height: 10rem;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
 .provider-grid {
   display: grid;
   grid-template-columns: 1fr;

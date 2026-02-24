@@ -1000,6 +1000,45 @@ def test_project_commands_empty_language_key_ignored(tmp_path: Path) -> None:
         assert cmds["python"]["lint"] == "ruff check ."
 
 
+def test_project_prompt_overrides_round_trip(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        baseline = client.get("/api/settings")
+        assert baseline.status_code == 200
+        project = baseline.json()["project"]
+        assert project["prompt_overrides"] == {}
+        assert "implement" in project["prompt_defaults"]
+
+        updated = client.patch(
+            "/api/settings",
+            json={
+                "project": {
+                    "prompt_overrides": {
+                        "IMPLEMENT": "Custom implement injection",
+                        "verify": "Custom verify injection",
+                    }
+                }
+            },
+        )
+        assert updated.status_code == 200
+        overrides = updated.json()["project"]["prompt_overrides"]
+        assert overrides["implement"] == "Custom implement injection"
+        assert overrides["verify"] == "Custom verify injection"
+
+        removed = client.patch(
+            "/api/settings",
+            json={"project": {"prompt_overrides": {"verify": ""}}},
+        )
+        assert removed.status_code == 200
+        overrides_after_remove = removed.json()["project"]["prompt_overrides"]
+        assert "verify" not in overrides_after_remove
+        assert overrides_after_remove["implement"] == "Custom implement injection"
+
+        reloaded = client.get("/api/settings")
+        assert reloaded.status_code == 200
+        assert reloaded.json()["project"]["prompt_overrides"] == overrides_after_remove
+
+
 def test_claim_lock_prevents_double_claim(tmp_path: Path) -> None:
     container = Container(tmp_path)
     task = Task(title="Concurrent claim", status="queued")
