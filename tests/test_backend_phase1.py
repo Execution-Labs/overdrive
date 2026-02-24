@@ -917,6 +917,79 @@ def test_get_task_timing_summary_handles_mixed_timezone_formats(tmp_path: Path) 
         assert timing["last_finished_at"] == "2026-02-21T10:02:00+00:00"
 
 
+def test_task_logs_step_query_does_not_fallback_to_other_step_logs(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Step-scoped logs"}).json()["task"]
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        logs_dir = container.state_root / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        plan_stdout = logs_dir / "plan.stdout.log"
+        plan_stdout.write_text("plan output\n", encoding="utf-8")
+
+        run = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at=now_iso(),
+            steps=[
+                {
+                    "step": "plan",
+                    "status": "ok",
+                    "stdout_path": str(plan_stdout),
+                    "started_at": now_iso(),
+                    "ts": now_iso(),
+                }
+            ],
+        )
+        container.runs.upsert(run)
+        task.run_ids = [run.id]
+        task.status = "in_progress"
+        task.current_step = "implement"
+        task.pending_gate = "before_implement"
+        task.metadata["last_logs"] = {"step": "plan", "stdout_path": str(plan_stdout)}
+        container.tasks.upsert(task)
+
+        scoped = client.get(f"/api/tasks/{task.id}/logs?step=implement")
+        assert scoped.status_code == 200
+        body = scoped.json()
+        assert body["mode"] == "none"
+        assert body["step"] == "implement"
+        assert body["stdout"] == ""
+        assert body["available_steps"] == ["plan"]
+
+
+def test_task_logs_step_query_reads_active_logs_for_requested_step(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Active step logs"}).json()["task"]
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        logs_dir = container.state_root / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        implement_stdout = logs_dir / "implement.stdout.log"
+        implement_stdout.write_text("implement output\n", encoding="utf-8")
+
+        task.status = "in_progress"
+        task.current_step = "implement"
+        task.metadata["active_logs"] = {"step": "implement", "stdout_path": str(implement_stdout)}
+        container.tasks.upsert(task)
+
+        scoped = client.get(f"/api/tasks/{task.id}/logs?step=implement")
+        assert scoped.status_code == 200
+        body = scoped.json()
+        assert body["mode"] == "active"
+        assert body["step"] == "implement"
+        assert body["stdout"] == "implement output\n"
+        assert body["available_steps"] == ["implement"]
+
+
 def test_project_commands_settings_round_trip(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
