@@ -2379,6 +2379,17 @@ textarea {
   color: var(--color-text-inverse);
 }
 
+.plan-font-size-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.plan-font-size-controls .field-label {
+  margin: 0;
+}
+
 .plan-tab-commit-bar {
   display: flex;
   gap: 0.5rem;
