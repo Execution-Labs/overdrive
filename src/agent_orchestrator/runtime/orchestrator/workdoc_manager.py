@@ -1242,6 +1242,7 @@ _Pending: will be populated by the report step._
 
     @classmethod
     def clear_sync_diagnostics(cls, task: Task) -> None:
+        """Remove workdoc sync diagnostic metadata from a task."""
         if not isinstance(task.metadata, dict):
             task.metadata = {}
         for key in cls._SYNC_DIAGNOSTIC_KEYS:
@@ -1257,6 +1258,7 @@ _Pending: will be populated by the report step._
         step: str,
         attempt: int | None,
     ) -> None:
+        """Persist normalized sync diagnostic metadata on a task."""
         if not isinstance(task.metadata, dict):
             task.metadata = {}
         task.metadata["workdoc_sync_error_type"] = error_type
