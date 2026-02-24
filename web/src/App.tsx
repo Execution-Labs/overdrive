@@ -268,6 +268,9 @@ type SystemSettings = {
   }
   project: {
     commands: Record<string, LanguageCommandSettings>
+    prompt_overrides: Record<string, string>
+    prompt_injections: Record<string, string>
+    prompt_defaults: Record<string, string>
   }
 }
 
@@ -447,6 +450,9 @@ const DEFAULT_SETTINGS: SystemSettings = {
   },
   project: {
     commands: {},
+    prompt_overrides: {},
+    prompt_injections: {},
+    prompt_defaults: {},
   },
 }
 
@@ -660,6 +666,19 @@ function formatProjectCommandsField(input: string): string {
   return serializeProjectCommandsYaml(parsed)
 }
 
+function normalizePromptMap(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {}
+  }
+  const out: Record<string, string> = {}
+  for (const [rawStep, rawPrompt] of Object.entries(value as Record<string, unknown>)) {
+    const step = String(rawStep || '').trim().toLowerCase()
+    if (!step || typeof rawPrompt !== 'string' || !rawPrompt.trim()) continue
+    out[step] = rawPrompt
+  }
+  return out
+}
+
 function formatJsonObjectInput(input: string, label: string): string {
   const trimmed = input.trim()
   if (!trimmed) return ''
@@ -805,6 +824,9 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
   const qualityGate: Partial<SystemSettings['defaults']['quality_gate']> = defaults.quality_gate || {}
   const workers = normalizeWorkers(payload?.workers)
   const projectCommandsRaw = payload?.project?.commands
+  const projectPromptOverrides = normalizePromptMap(payload?.project?.prompt_overrides)
+  const projectPromptInjections = normalizePromptMap(payload?.project?.prompt_injections)
+  const projectPromptDefaults = normalizePromptMap(payload?.project?.prompt_defaults)
   const projectCommands: Record<string, LanguageCommandSettings> = {}
   if (projectCommandsRaw && typeof projectCommandsRaw === 'object') {
     for (const [rawLanguage, rawCommands] of Object.entries(projectCommandsRaw)) {
@@ -852,6 +874,9 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
     workers,
     project: {
       commands: projectCommands,
+      prompt_overrides: projectPromptOverrides,
+      prompt_injections: projectPromptInjections,
+      prompt_defaults: projectPromptDefaults,
     },
   }
 }
@@ -1602,6 +1627,14 @@ export default function App() {
   const [settingsOllamaTemperature, setSettingsOllamaTemperature] = useState('')
   const [settingsOllamaNumCtx, setSettingsOllamaNumCtx] = useState('')
   const [settingsProjectCommands, setSettingsProjectCommands] = useState('')
+  const [settingsPromptOverrides, setSettingsPromptOverrides] = useState<Record<string, string>>({})
+  const [settingsPromptOverridesBaseline, setSettingsPromptOverridesBaseline] = useState<Record<string, string>>({})
+  const [settingsPromptOverrideClears, setSettingsPromptOverrideClears] = useState<Record<string, true>>({})
+  const [settingsPromptInjections, setSettingsPromptInjections] = useState<Record<string, string>>({})
+  const [settingsPromptInjectionsBaseline, setSettingsPromptInjectionsBaseline] = useState<Record<string, string>>({})
+  const [settingsPromptInjectionClears, setSettingsPromptInjectionClears] = useState<Record<string, true>>({})
+  const [settingsPromptDefaults, setSettingsPromptDefaults] = useState<Record<string, string>>({})
+  const [settingsPromptStep, setSettingsPromptStep] = useState('')
   const [settingsGateCritical, setSettingsGateCritical] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.critical))
   const [settingsGateHigh, setSettingsGateHigh] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.high))
   const [settingsGateMedium, setSettingsGateMedium] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.medium))
@@ -1721,6 +1754,14 @@ export default function App() {
     }
     settingsLoadedRef.current = false
     setSettingsProjectCommands('')
+    setSettingsPromptOverrides({})
+    setSettingsPromptOverridesBaseline({})
+    setSettingsPromptOverrideClears({})
+    setSettingsPromptInjections({})
+    setSettingsPromptInjectionsBaseline({})
+    setSettingsPromptInjectionClears({})
+    setSettingsPromptDefaults({})
+    setSettingsPromptStep('')
     void loadProjectIdentity()
   }, [projectDir])
 
@@ -1856,6 +1897,23 @@ export default function App() {
     setSettingsProjectCommands(
       Object.keys(projectCommands).length > 0 ? serializeProjectCommandsYaml(projectCommands) : ''
     )
+    const promptOverrides = payload.project.prompt_overrides || {}
+    const promptInjections = payload.project.prompt_injections || {}
+    const promptDefaults = payload.project.prompt_defaults || {}
+    setSettingsPromptOverrides(promptOverrides)
+    setSettingsPromptOverridesBaseline(promptOverrides)
+    setSettingsPromptOverrideClears({})
+    setSettingsPromptInjections(promptInjections)
+    setSettingsPromptInjectionsBaseline(promptInjections)
+    setSettingsPromptInjectionClears({})
+    setSettingsPromptDefaults(promptDefaults)
+    const promptSteps = Array.from(
+      new Set([...Object.keys(promptDefaults), ...Object.keys(promptOverrides), ...Object.keys(promptInjections)])
+    ).sort()
+    setSettingsPromptStep((previous) => {
+      if (previous && promptSteps.includes(previous)) return previous
+      return promptSteps[0] || ''
+    })
     setSettingsGateCritical(String(payload.defaults.quality_gate.critical))
     setSettingsGateHigh(String(payload.defaults.quality_gate.high))
     setSettingsGateMedium(String(payload.defaults.quality_gate.medium))
@@ -3574,7 +3632,47 @@ export default function App() {
       }
       const workerProviders = buildWorkerProvidersPayload(advancedWorkerProviders)
       const projectCommands = parseProjectCommands(settingsProjectCommands)
-      const payload: SystemSettings = {
+      const promptOverridesPayload: Record<string, string> = {}
+      for (const [rawStep, rawPrompt] of Object.entries(settingsPromptOverrides)) {
+        const step = String(rawStep || '').trim().toLowerCase()
+        if (!step || typeof rawPrompt !== 'string' || !rawPrompt.trim()) continue
+        promptOverridesPayload[step] = rawPrompt
+      }
+      const removedOverrideSteps = new Set(
+        Object.keys(settingsPromptOverridesBaseline)
+          .map((step) => step.trim().toLowerCase())
+          .filter((step) => step && !(step in promptOverridesPayload))
+      )
+      for (const rawStep of Object.keys(settingsPromptOverrideClears)) {
+        const step = rawStep.trim().toLowerCase()
+        if (!step) continue
+        removedOverrideSteps.add(step)
+      }
+      for (const step of removedOverrideSteps) {
+        if (!step || (step in promptOverridesPayload)) continue
+        promptOverridesPayload[step] = ''
+      }
+      const promptInjectionsPayload: Record<string, string> = {}
+      for (const [rawStep, rawPrompt] of Object.entries(settingsPromptInjections)) {
+        const step = String(rawStep || '').trim().toLowerCase()
+        if (!step || typeof rawPrompt !== 'string' || !rawPrompt.trim()) continue
+        promptInjectionsPayload[step] = rawPrompt
+      }
+      const removedInjectionSteps = new Set(
+        Object.keys(settingsPromptInjectionsBaseline)
+          .map((step) => step.trim().toLowerCase())
+          .filter((step) => step && !(step in promptInjectionsPayload))
+      )
+      for (const rawStep of Object.keys(settingsPromptInjectionClears)) {
+        const step = rawStep.trim().toLowerCase()
+        if (!step) continue
+        removedInjectionSteps.add(step)
+      }
+      for (const step of removedInjectionSteps) {
+        if (!step || (step in promptInjectionsPayload)) continue
+        promptInjectionsPayload[step] = ''
+      }
+      const payload = {
         orchestrator: {
           concurrency: Math.max(1, parseNonNegativeInt(settingsConcurrency, DEFAULT_SETTINGS.orchestrator.concurrency)),
           auto_deps: settingsAutoDeps,
@@ -3602,6 +3700,8 @@ export default function App() {
         },
         project: {
           commands: projectCommands,
+          prompt_overrides: promptOverridesPayload,
+          prompt_injections: promptInjectionsPayload,
         },
       }
       const updated = await requestJson<Partial<SystemSettings>>(buildApiUrl('/api/settings', projectDir), {
@@ -5088,6 +5188,20 @@ export default function App() {
 
   function renderSettings(): JSX.Element {
     const filteredProjects = projects.filter((project) => project.path.toLowerCase().includes(projectSearch.toLowerCase()))
+    const promptSteps = Array.from(
+      new Set([
+        ...Object.keys(settingsPromptDefaults),
+        ...Object.keys(settingsPromptOverrides),
+        ...Object.keys(settingsPromptInjections),
+      ])
+    ).sort()
+    const activePromptStep = promptSteps.includes(settingsPromptStep)
+      ? settingsPromptStep
+      : (promptSteps[0] || '')
+    const defaultPromptText = activePromptStep ? (settingsPromptDefaults[activePromptStep] || '') : ''
+    const overridePromptText = activePromptStep ? (settingsPromptOverrides[activePromptStep] || '') : ''
+    const injectionPromptText = activePromptStep ? (settingsPromptInjections[activePromptStep] || '') : ''
+    const effectivePromptText = overridePromptText || defaultPromptText
     return (
       <section className="panel">
         <header className="panel-head">
@@ -5389,6 +5503,142 @@ export default function App() {
                   </button>
                 </div>
               </div>
+              <p className="settings-subheading">Step Prompt Injections</p>
+              <p className="field-label">
+                Review and override per-step instruction prompts, and optionally append additional project-specific prompt injection text.
+              </p>
+              <label className="field-label" htmlFor="settings-step-prompt-step">Pipeline step</label>
+              <select
+                id="settings-step-prompt-step"
+                value={activePromptStep}
+                onChange={(event) => setSettingsPromptStep(event.target.value)}
+                disabled={promptSteps.length === 0}
+              >
+                {promptSteps.length === 0 ? <option value="">No configurable steps</option> : null}
+                {promptSteps.map((step) => (
+                  <option key={step} value={step}>{step}</option>
+                ))}
+              </select>
+              <label className="field-label" htmlFor="settings-step-prompt-default">Default prompt</label>
+              <textarea
+                id="settings-step-prompt-default"
+                className="settings-prompt-textarea"
+                rows={10}
+                value={defaultPromptText}
+                readOnly
+                placeholder="No default prompt available for this step."
+              />
+              <label className="field-label" htmlFor="settings-step-prompt-override">Override prompt (optional)</label>
+              <div className="json-editor-group">
+                <textarea
+                  id="settings-step-prompt-override"
+                  className="json-editor-textarea settings-prompt-textarea"
+                  rows={10}
+                  value={overridePromptText}
+                  onChange={(event) => {
+                    const nextValue = event.target.value
+                    setSettingsPromptOverrides((prev) => {
+                      if (!activePromptStep) return prev
+                      const next = { ...prev }
+                      if (nextValue.trim()) {
+                        next[activePromptStep] = nextValue
+                      } else {
+                        delete next[activePromptStep]
+                      }
+                      return next
+                    })
+                    if (!activePromptStep) return
+                    setSettingsPromptOverrideClears((prev) => {
+                      const next = { ...prev }
+                      if (nextValue.trim()) {
+                        delete next[activePromptStep]
+                      } else {
+                        next[activePromptStep] = true
+                      }
+                      return next
+                    })
+                  }}
+                  placeholder="Leave blank to use default prompt."
+                />
+                <div className="inline-actions json-editor-actions">
+                  <button
+                    className="button"
+                    type="button"
+                    onClick={() => {
+                      if (!activePromptStep) return
+                      setSettingsPromptOverrides((prev) => {
+                        const next = { ...prev }
+                        delete next[activePromptStep]
+                        return next
+                      })
+                      setSettingsPromptOverrideClears((prev) => ({ ...prev, [activePromptStep]: true }))
+                    }}
+                    disabled={!activePromptStep || !overridePromptText}
+                  >
+                    Clear override
+                  </button>
+                </div>
+              </div>
+              <label className="field-label" htmlFor="settings-step-prompt-injection">Additional injection (optional)</label>
+              <div className="json-editor-group">
+                <textarea
+                  id="settings-step-prompt-injection"
+                  className="json-editor-textarea settings-prompt-textarea"
+                  rows={6}
+                  value={injectionPromptText}
+                  onChange={(event) => {
+                    const nextValue = event.target.value
+                    setSettingsPromptInjections((prev) => {
+                      if (!activePromptStep) return prev
+                      const next = { ...prev }
+                      if (nextValue.trim()) {
+                        next[activePromptStep] = nextValue
+                      } else {
+                        delete next[activePromptStep]
+                      }
+                      return next
+                    })
+                    if (!activePromptStep) return
+                    setSettingsPromptInjectionClears((prev) => {
+                      const next = { ...prev }
+                      if (nextValue.trim()) {
+                        delete next[activePromptStep]
+                      } else {
+                        next[activePromptStep] = true
+                      }
+                      return next
+                    })
+                  }}
+                  placeholder="Optional extra instructions appended for this step."
+                />
+                <div className="inline-actions json-editor-actions">
+                  <button
+                    className="button"
+                    type="button"
+                    onClick={() => {
+                      if (!activePromptStep) return
+                      setSettingsPromptInjections((prev) => {
+                        const next = { ...prev }
+                        delete next[activePromptStep]
+                        return next
+                      })
+                      setSettingsPromptInjectionClears((prev) => ({ ...prev, [activePromptStep]: true }))
+                    }}
+                    disabled={!activePromptStep || !injectionPromptText}
+                  >
+                    Clear injection
+                  </button>
+                </div>
+              </div>
+              <label className="field-label" htmlFor="settings-step-prompt-effective">Effective prompt</label>
+              <textarea
+                id="settings-step-prompt-effective"
+                className="settings-prompt-textarea"
+                rows={10}
+                value={effectivePromptText}
+                readOnly
+                placeholder="No effective prompt available for this step."
+              />
               <p className="settings-subheading">Quality Gate</p>
               <p className="field-label">
                 Define how many unresolved findings can remain before a task can pass the quality gate. Use `0` to require all findings at that severity to be fixed.

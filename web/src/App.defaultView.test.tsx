@@ -106,6 +106,10 @@ describe('App default route', () => {
                   test: '/Users/gan/Documents/agent-orchestrator-dogfood/.venv/bin/pytest -n auto',
                 },
               },
+              prompt_overrides: {},
+              prompt_defaults: {
+                implement: 'Implement the task completely and safely.',
+              },
             },
           }),
         })
@@ -168,6 +172,10 @@ describe('App default route', () => {
                 python: {
                   test: '/Users/gan/Documents/agent-orchestrator-dogfood/.venv/bin/pytest -n auto',
                 },
+              },
+              prompt_overrides: {},
+              prompt_defaults: {
+                implement: 'Implement the task completely and safely.',
               },
             },
           }),
