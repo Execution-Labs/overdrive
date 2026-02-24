@@ -925,7 +925,10 @@ def test_get_task_timing_summary_handles_mixed_timezone_formats(tmp_path: Path) 
 def test_task_logs_step_query_does_not_fallback_to_other_step_logs(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        created = client.post("/api/tasks", json={"title": "Step-scoped logs"}).json()["task"]
+        created = client.post(
+            "/api/tasks",
+            json={"title": "Step-scoped logs", "status": "backlog"},
+        ).json()["task"]
 
         container = app.state.containers[str(tmp_path.resolve())]
         task = container.tasks.get(created["id"])
