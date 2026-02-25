@@ -302,19 +302,19 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
 
         if body.orchestrator is not None:
             orchestrator_cfg = dict(cfg.get("orchestrator") or {})
-            orchestrator_cfg.update(body.orchestrator.model_dump())
+            orchestrator_cfg.update(body.orchestrator.model_dump(exclude_unset=True))
             cfg["orchestrator"] = orchestrator_cfg
             touched_sections.append("orchestrator")
 
         if body.agent_routing is not None:
             routing_cfg = dict(cfg.get("agent_routing") or {})
-            routing_cfg.update(body.agent_routing.model_dump())
+            routing_cfg.update(body.agent_routing.model_dump(exclude_unset=True))
             cfg["agent_routing"] = routing_cfg
             touched_sections.append("agent_routing")
 
         if body.defaults is not None:
             defaults_cfg = dict(cfg.get("defaults") or {})
-            incoming_defaults = body.defaults.model_dump()
+            incoming_defaults = body.defaults.model_dump(exclude_unset=True)
             incoming_quality_gate = dict(incoming_defaults.get("quality_gate") or {})
             quality_gate_cfg = dict(defaults_cfg.get("quality_gate") or {})
             quality_gate_cfg.update(incoming_quality_gate)

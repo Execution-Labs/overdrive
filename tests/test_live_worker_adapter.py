@@ -298,6 +298,39 @@ def test_timeout_defaults_from_pipeline_template(adapter: LiveWorkerAdapter) -> 
     assert run_worker_mock.call_args.kwargs["timeout_seconds"] == 300
 
 
+def test_timeout_defaults_from_orchestrator_settings_when_step_has_no_template(
+    container: Container, adapter: LiveWorkerAdapter
+) -> None:
+    run_result = _make_run_result(exit_code=0)
+    cfg = container.config.load()
+    orchestrator_cfg = dict(cfg.get("orchestrator") or {})
+    orchestrator_cfg["step_timeout_seconds"] = 321
+    cfg["orchestrator"] = orchestrator_cfg
+    container.config.save(cfg)
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ) as run_worker_mock,
+    ):
+        result = adapter.run_step(task=_make_task(), step="plan_refine", attempt=1)
+
+    assert result.status == "ok"
+    assert run_worker_mock.call_args.kwargs["timeout_seconds"] == 321
+
+
 def test_heartbeat_defaults_are_forwarded(adapter: LiveWorkerAdapter) -> None:
     run_result = _make_run_result(exit_code=0)
 

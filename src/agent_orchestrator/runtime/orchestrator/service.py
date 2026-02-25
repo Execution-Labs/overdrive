@@ -7,6 +7,7 @@ import re
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional, cast
 
@@ -49,6 +50,12 @@ class OrchestratorService:
         "implement": "before_implement",
         "review": "after_implement",
         "commit": "before_commit",
+    }
+    _GATE_RESUME_STEP: dict[str, str] = {
+        "before_plan": "plan",
+        "before_implement": "implement",
+        "after_implement": "review",
+        "before_commit": "commit",
     }
     _HUMAN_INTERVENTION_GATE = "human_intervention"
 
@@ -93,6 +100,185 @@ class OrchestratorService:
         self._plan_manager = PlanManager(self)
         self._worktree_manager = WorktreeManager(self)
         self._task_executor = TaskExecutor(self)
+
+    @staticmethod
+    def _execution_checkpoint(task: Task) -> dict[str, Any]:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        raw = task.metadata.get("execution_checkpoint")
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    @staticmethod
+    def _save_execution_checkpoint(task: Task, checkpoint: dict[str, Any]) -> None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        if checkpoint:
+            task.metadata["execution_checkpoint"] = checkpoint
+        else:
+            task.metadata.pop("execution_checkpoint", None)
+
+    def _is_resume_requested(self, task: Task) -> bool:
+        if task.status != "in_progress" or task.pending_gate:
+            return False
+        checkpoint = self._execution_checkpoint(task)
+        return bool(str(checkpoint.get("resume_requested_at") or "").strip())
+
+    def _clear_resume_request(self, task: Task) -> None:
+        checkpoint = self._execution_checkpoint(task)
+        if not checkpoint:
+            return
+        checkpoint.pop("resume_requested_at", None)
+        self._save_execution_checkpoint(task, checkpoint)
+
+    def _consume_gate_resume_approval(self, task: Task, gate_name: str) -> bool:
+        checkpoint = self._execution_checkpoint(task)
+        approved_gate = str(checkpoint.get("approved_gate") or "").strip()
+        if approved_gate != gate_name:
+            return False
+        checkpoint.pop("approved_gate", None)
+        checkpoint.pop("resume_requested_at", None)
+        checkpoint["resumed_at"] = now_iso()
+        self._save_execution_checkpoint(task, checkpoint)
+        self.container.tasks.upsert(task)
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.gate_resumed",
+            entity_id=task.id,
+            payload={"gate": gate_name},
+        )
+        return True
+
+    def _mark_gate_waiting(self, task: Task, gate_name: str) -> None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        resume_step = self._GATE_RESUME_STEP.get(gate_name, task.current_step or "")
+        checkpoint = self._execution_checkpoint(task)
+        checkpoint.update(
+            {
+                "gate": gate_name,
+                "resume_step": resume_step or None,
+                "run_id": task.run_ids[-1] if task.run_ids else None,
+                "paused_at": now_iso(),
+                "resume_requested_at": None,
+                "approved_gate": None,
+            }
+        )
+        task.metadata["retry_from_step"] = resume_step
+        self._save_execution_checkpoint(task, checkpoint)
+
+    @staticmethod
+    def _parse_iso_epoch(value: Any) -> float | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+
+    @staticmethod
+    def _coerce_nonnegative_int(value: Any, default: int, *, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        if parsed < 0:
+            return 0
+        if parsed > maximum:
+            return maximum
+        return parsed
+
+    def _apply_gate_wait_policies(self, orchestrator_cfg: dict[str, Any]) -> None:
+        reminder_minutes = self._coerce_nonnegative_int(
+            orchestrator_cfg.get("gate_reminder_minutes"), 30, maximum=10080
+        )
+        stale_minutes = self._coerce_nonnegative_int(
+            orchestrator_cfg.get("gate_stale_minutes"), 0, maximum=10080
+        )
+        max_wait_minutes = self._coerce_nonnegative_int(
+            orchestrator_cfg.get("gate_max_wait_minutes"), 0, maximum=43200
+        )
+        timeout_action = str(orchestrator_cfg.get("gate_timeout_action") or "none").strip().lower()
+        if timeout_action not in {"none", "block"}:
+            timeout_action = "none"
+        if reminder_minutes <= 0 and stale_minutes <= 0 and (max_wait_minutes <= 0 or timeout_action == "none"):
+            return
+
+        now_ts = time.time()
+        for task in self.container.tasks.list():
+            if task.status != "in_progress" or not task.pending_gate:
+                continue
+            checkpoint = self._execution_checkpoint(task)
+            gate = str(task.pending_gate or "").strip()
+            changed = False
+
+            paused_epoch = self._parse_iso_epoch(checkpoint.get("paused_at"))
+            if paused_epoch is None:
+                checkpoint["paused_at"] = now_iso()
+                paused_epoch = self._parse_iso_epoch(checkpoint.get("paused_at")) or now_ts
+                changed = True
+            elapsed_seconds = max(0.0, now_ts - paused_epoch)
+            elapsed_minutes = int(elapsed_seconds // 60)
+
+            if reminder_minutes > 0:
+                last_reminder_epoch = self._parse_iso_epoch(checkpoint.get("last_reminder_at"))
+                should_remind = last_reminder_epoch is None or (now_ts - last_reminder_epoch) >= reminder_minutes * 60
+                if should_remind and elapsed_seconds >= reminder_minutes * 60:
+                    checkpoint["last_reminder_at"] = now_iso()
+                    changed = True
+                    self.bus.emit(
+                        channel="tasks",
+                        event_type="task.gate_reminder",
+                        entity_id=task.id,
+                        payload={"gate": gate, "elapsed_minutes": elapsed_minutes},
+                    )
+
+            if stale_minutes > 0 and elapsed_seconds >= stale_minutes * 60 and not checkpoint.get("stale_emitted_at"):
+                checkpoint["stale_emitted_at"] = now_iso()
+                changed = True
+                self.bus.emit(
+                    channel="tasks",
+                    event_type="task.gate_stale",
+                    entity_id=task.id,
+                    payload={"gate": gate, "elapsed_minutes": elapsed_minutes},
+                )
+
+            if timeout_action == "block" and max_wait_minutes > 0 and elapsed_seconds >= max_wait_minutes * 60:
+                checkpoint["timed_out_at"] = now_iso()
+                checkpoint["timed_out_gate"] = gate
+                self._save_execution_checkpoint(task, checkpoint)
+                task.status = "blocked"
+                task.error = f"Gate '{gate}' exceeded max wait policy ({max_wait_minutes}m)"
+                task.pending_gate = None
+                task.current_agent_id = None
+                task.updated_at = now_iso()
+                self.container.tasks.upsert(task)
+                for run_id in reversed(task.run_ids):
+                    run = self.container.runs.get(run_id)
+                    if run is None:
+                        continue
+                    if run.status in {"waiting_gate", "in_progress"}:
+                        run.status = "blocked"
+                        run.finished_at = task.updated_at
+                        run.summary = task.error
+                        self.container.runs.upsert(run)
+                        break
+                self.bus.emit(
+                    channel="tasks",
+                    event_type="task.blocked",
+                    entity_id=task.id,
+                    payload={"error": task.error, "gate": gate, "policy": "gate_max_wait"},
+                )
+                continue
+
+            if changed:
+                self._save_execution_checkpoint(task, checkpoint)
+                task.updated_at = now_iso()
+                self.container.tasks.upsert(task)
 
     def _get_pool(self, desired_workers: int | None = None) -> ThreadPoolExecutor:
         if desired_workers is None:
@@ -199,12 +385,22 @@ class OrchestratorService:
 
     def _recover_in_progress_tasks(self) -> None:
         tasks = self.container.tasks.list()
+        task_by_id = {task.id: task for task in tasks}
         in_progress_ids = {task.id for task in tasks if task.status == "in_progress"}
         if not in_progress_ids:
             return
 
         for run in self.container.runs.list():
             if run.task_id in in_progress_ids and run.status == "in_progress" and not run.finished_at:
+                task = task_by_id.get(run.task_id)
+                if task and task.pending_gate:
+                    run.status = "waiting_gate"
+                    run.finished_at = now_iso()
+                    run.summary = run.summary or f"Paused at gate: {task.pending_gate}"
+                    self.container.runs.upsert(run)
+                    continue
+                if task and self._is_resume_requested(task):
+                    continue
                 run.status = "interrupted"
                 run.finished_at = now_iso()
                 run.summary = run.summary or "Interrupted by orchestrator restart"
@@ -212,6 +408,16 @@ class OrchestratorService:
 
         for task in tasks:
             if task.id not in in_progress_ids:
+                continue
+            if task.pending_gate or self._is_resume_requested(task):
+                task.current_agent_id = None
+                self.container.tasks.upsert(task)
+                self.bus.emit(
+                    channel="tasks",
+                    event_type="task.recovered",
+                    entity_id=task.id,
+                    payload={"reason": "orchestrator_restart_waiting_gate"},
+                )
                 continue
             task.status = "queued"
             task.current_step = None
@@ -251,6 +457,7 @@ class OrchestratorService:
         if orchestrator_cfg.get("status", "running") != "running":
             return False
 
+        self._apply_gate_wait_policies(orchestrator_cfg)
         self._maybe_analyze_dependencies()
 
         max_in_progress = int(orchestrator_cfg.get("concurrency", 2) or 2)
@@ -274,6 +481,7 @@ class OrchestratorService:
             Task: Result produced by this call.
         """
         wait_existing = False
+        existing_future: Future[Any] | None = None
         with self._lock:
             task = self.container.tasks.get(task_id)
             if not task:
@@ -285,7 +493,17 @@ class OrchestratorService:
             if task.status in {"in_review", "done"}:
                 return task
             if task.status == "in_progress":
-                wait_existing = True
+                with self._futures_lock:
+                    existing_future = self._futures.get(task_id)
+                if existing_future:
+                    wait_existing = True
+                elif self._is_resume_requested(task):
+                    wait_existing = False
+                    self._clear_resume_request(task)
+                    task.updated_at = now_iso()
+                    self.container.tasks.upsert(task)
+                else:
+                    wait_existing = True
             if task.status in {"cancelled"}:
                 raise ValueError(f"Task {task_id} cannot be run from status={task.status}")
 
@@ -295,12 +513,11 @@ class OrchestratorService:
                     dep = self.container.tasks.get(dep_id)
                     if dep is None or dep.status not in terminal:
                         raise ValueError(f"Task {task_id} has unresolved blocker {dep_id}")
-                task.status = "queued"
-                self.container.tasks.upsert(task)
+                if task.status != "in_progress":
+                    task.status = "queued"
+                    self.container.tasks.upsert(task)
 
         if wait_existing:
-            with self._futures_lock:
-                existing_future = self._futures.get(task_id)
             if existing_future:
                 existing_future.result()
             updated = self.container.tasks.get(task_id)
@@ -1179,48 +1396,35 @@ class OrchestratorService:
         )
 
     def _wait_for_gate(self, task: Task, gate_name: str, timeout: int = 3600) -> bool:
-        """Block until ``pending_gate`` is cleared (via approve-gate API).
+        """Park execution at a gate and resume only after explicit approval.
 
-        Returns True if gate was approved, False on timeout/stop/cancel.
+        Returns:
+            bool: ``True`` when this gate was already approved and execution can
+            continue immediately, otherwise ``False`` after persisting wait state.
         """
+        if self._consume_gate_resume_approval(task, gate_name):
+            return True
+
         task.pending_gate = gate_name
+        task.status = "in_progress"
+        task.current_agent_id = None
+        self._mark_gate_waiting(task, gate_name)
         task.updated_at = now_iso()
         self.container.tasks.upsert(task)
+        if task.run_ids:
+            run = self.container.runs.get(task.run_ids[-1])
+            if run and run.status == "in_progress" and not run.finished_at:
+                run.status = "waiting_gate"
+                run.finished_at = task.updated_at
+                run.summary = f"Paused at gate: {gate_name}"
+                self.container.runs.upsert(run)
         self.bus.emit(
             channel="tasks",
             event_type="task.gate_waiting",
             entity_id=task.id,
-            payload={"gate": gate_name},
+            payload={"gate": gate_name, "timeout_seconds": timeout},
         )
-
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if self._stop.is_set():
-                return False
-            fresh = self.container.tasks.get(task.id)
-            if fresh is None or fresh.status == "cancelled":
-                return False
-            if fresh.pending_gate is None:
-                return True
-            time.sleep(1)
         return False
-
-    def _abort_for_gate(self, task: Task, run: RunRecord, gate_name: str) -> None:
-        """Mark task as blocked because a gate was not approved."""
-        task.status = "blocked"
-        task.error = f"Gate '{gate_name}' was not approved in time"
-        task.pending_gate = None
-        self.container.tasks.upsert(task)
-        run.status = "blocked"
-        run.finished_at = now_iso()
-        run.summary = f"Blocked at gate: {gate_name}"
-        self.container.runs.upsert(run)
-        self.bus.emit(
-            channel="tasks",
-            event_type="task.blocked",
-            entity_id=task.id,
-            payload={"error": task.error},
-        )
 
     def _run_summarize_step(self, task: Task, run: RunRecord) -> None:
         """Auto-inject a summarize step using a lightweight LLM call."""

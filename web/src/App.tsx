@@ -10,7 +10,15 @@ import './styles/orchestrator.css'
 type RouteKey = 'board' | 'planning' | 'execution' | 'agents' | 'settings'
 type CreateTab = 'task' | 'import'
 type TaskDetailTab = 'overview' | 'plan' | 'workdoc' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
-type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear'
+type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate'
+
+type TaskGateContext = {
+  is_waiting: boolean
+  gate: string | null
+  display: string | null
+  step: string | null
+  status_kind: 'approval_wait' | 'intervention_wait' | null
+}
 
 type TaskRecord = {
   id: string
@@ -20,6 +28,7 @@ type TaskRecord = {
   current_step?: string | null
   current_agent_id?: string | null
   worker_model?: string | null
+  step_timeout_seconds?: number | null
   priority: string
   status: string
   labels?: string[]
@@ -34,6 +43,7 @@ type TaskRecord = {
   hitl_mode?: string
   dependency_policy?: 'permissive' | 'prudent' | 'strict'
   pending_gate?: string | null
+  gate_context?: TaskGateContext | null
   quality_gate?: Record<string, number>
   metadata?: Record<string, unknown>
   human_blocking_issues?: HumanBlockingIssue[]
@@ -245,6 +255,7 @@ type SystemSettings = {
     concurrency: number
     auto_deps: boolean
     max_review_attempts: number
+    step_timeout_seconds?: number
   }
   agent_routing: {
     default_role: string
@@ -425,6 +436,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
     concurrency: 2,
     auto_deps: true,
     max_review_attempts: 10,
+    step_timeout_seconds: 600,
   },
   agent_routing: {
     default_role: 'general',
@@ -521,6 +533,38 @@ function statusPillClass(status: string): string {
     case 'cancelled': return 'status-failed'
     default: return 'status-paused'
   }
+}
+
+const GATE_DISPLAY_MAP: Record<string, string> = {
+  before_implement: 'Approve plan to start implementation',
+  after_implement: 'Approve review to continue',
+  before_commit: 'Approve before commit',
+  human_intervention: 'Human intervention required',
+}
+
+function gateDisplayLabel(task: TaskRecord | null | undefined): string {
+  const fromContext = String(task?.gate_context?.display || '').trim()
+  if (fromContext) return fromContext
+  const gate = String(task?.pending_gate || '').trim()
+  if (!gate) return 'approval gate'
+  return GATE_DISPLAY_MAP[gate] || humanizeLabel(gate)
+}
+
+function gateApprovalButtonLabel(gate: string | null | undefined): string {
+  const normalized = String(gate || '').trim()
+  if (normalized === 'before_implement') return 'Approve plan and start implementation'
+  if (normalized === 'after_implement') return 'Approve review and continue'
+  if (normalized === 'before_commit') return 'Approve commit'
+  if (normalized === 'human_intervention') return 'Mark human intervention resolved'
+  return 'Approve gate'
+}
+
+function gateApprovalHelperText(task: TaskRecord | null | undefined): string {
+  const gate = String(task?.pending_gate || '').trim()
+  if (gate === 'human_intervention') {
+    return 'Task remains blocked after acknowledgement. Retry when ready.'
+  }
+  return 'Agent resumes automatically after approval.'
 }
 
 function routeFromHash(hash: string): RouteKey {
@@ -757,6 +801,15 @@ function parseNonNegativeInt(input: string, fallback: number): number {
   return Math.max(0, Math.floor(parsed))
 }
 
+function parseOptionalPositiveInt(input: string): number | null {
+  const trimmed = input.trim()
+  if (!trimmed) return null
+  const parsed = Number(trimmed)
+  if (!Number.isFinite(parsed)) return null
+  const normalized = Math.floor(parsed)
+  return normalized > 0 ? normalized : null
+}
+
 function normalizeWorkers(payload: Partial<SystemSettings['workers']> | null | undefined): SystemSettings['workers'] {
   const defaultWorker = String(payload?.default || DEFAULT_SETTINGS.workers.default).trim() || 'codex'
   const defaultModel = String(payload?.default_model || '').trim()
@@ -846,6 +899,7 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
 
   const maybeConcurrency = Number(orchestrator.concurrency)
   const maybeMaxReviewAttempts = Number(orchestrator.max_review_attempts)
+  const maybeStepTimeoutSeconds = Number(orchestrator.step_timeout_seconds)
   const maybeCritical = Number(qualityGate.critical)
   const maybeHigh = Number(qualityGate.high)
   const maybeMedium = Number(qualityGate.medium)
@@ -856,6 +910,9 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
       concurrency: Number.isFinite(maybeConcurrency) ? Math.max(1, Math.floor(maybeConcurrency)) : DEFAULT_SETTINGS.orchestrator.concurrency,
       auto_deps: typeof orchestrator.auto_deps === 'boolean' ? orchestrator.auto_deps : DEFAULT_SETTINGS.orchestrator.auto_deps,
       max_review_attempts: Number.isFinite(maybeMaxReviewAttempts) ? Math.max(1, Math.floor(maybeMaxReviewAttempts)) : DEFAULT_SETTINGS.orchestrator.max_review_attempts,
+      step_timeout_seconds: Number.isFinite(maybeStepTimeoutSeconds)
+        ? Math.min(7200, Math.max(1, Math.floor(maybeStepTimeoutSeconds)))
+        : DEFAULT_SETTINGS.orchestrator.step_timeout_seconds,
     },
     agent_routing: {
       default_role: String(routing.default_role || DEFAULT_SETTINGS.agent_routing.default_role),
@@ -1506,6 +1563,7 @@ export default function App() {
   const [editTaskApprovalMode, setEditTaskApprovalMode] = useState<'human_review' | 'auto_approve'>('human_review')
   const [editTaskHitlMode, setEditTaskHitlMode] = useState('autopilot')
   const [editTaskDependencyPolicy, setEditTaskDependencyPolicy] = useState<'permissive' | 'prudent' | 'strict'>('prudent')
+  const [editTaskStepTimeout, setEditTaskStepTimeout] = useState('')
   const [editTaskProjectCommands, setEditTaskProjectCommands] = useState('')
 
   const [isSubmittingTask, setIsSubmittingTask] = useState(false)
@@ -1527,6 +1585,7 @@ export default function App() {
   const [newTaskDependencyPolicy, setNewTaskDependencyPolicy] = useState<'permissive' | 'prudent' | 'strict'>('prudent')
   const [newTaskParentId, setNewTaskParentId] = useState('')
   const [newTaskPipelineTemplate, setNewTaskPipelineTemplate] = useState('')
+  const [newTaskStepTimeout, setNewTaskStepTimeout] = useState('')
   const [newTaskMetadata, setNewTaskMetadata] = useState('')
   const [newTaskProjectCommands, setNewTaskProjectCommands] = useState('')
   const [newTaskWorkerModel, setNewTaskWorkerModel] = useState('')
@@ -1609,6 +1668,7 @@ export default function App() {
   const [settingsConcurrency, setSettingsConcurrency] = useState(String(DEFAULT_SETTINGS.orchestrator.concurrency))
   const [settingsAutoDeps, setSettingsAutoDeps] = useState(DEFAULT_SETTINGS.orchestrator.auto_deps)
   const [settingsMaxReviewAttempts, setSettingsMaxReviewAttempts] = useState(String(DEFAULT_SETTINGS.orchestrator.max_review_attempts))
+  const [settingsStepTimeoutSeconds, setSettingsStepTimeoutSeconds] = useState(String(DEFAULT_SETTINGS.orchestrator.step_timeout_seconds))
   const [settingsDefaultRole, setSettingsDefaultRole] = useState(DEFAULT_SETTINGS.agent_routing.default_role)
   const [settingsTaskTypeRoles, setSettingsTaskTypeRoles] = useState('')
   const [settingsRoleProviderOverrides, setSettingsRoleProviderOverrides] = useState('')
@@ -1830,6 +1890,7 @@ export default function App() {
     setSettingsConcurrency(String(payload.orchestrator.concurrency))
     setSettingsAutoDeps(payload.orchestrator.auto_deps)
     setSettingsMaxReviewAttempts(String(payload.orchestrator.max_review_attempts))
+    setSettingsStepTimeoutSeconds(String(payload.orchestrator.step_timeout_seconds))
     setSettingsDefaultRole(payload.agent_routing.default_role || 'general')
     const taskTypeRoles = payload.agent_routing.task_type_roles || {}
     setSettingsTaskTypeRoles(Object.keys(taskTypeRoles).length > 0 ? JSON.stringify(taskTypeRoles, null, 2) : '')
@@ -2000,6 +2061,8 @@ export default function App() {
       setEditTaskApprovalMode(task.approval_mode || 'human_review')
       setEditTaskHitlMode(task.hitl_mode || 'autopilot')
       setEditTaskDependencyPolicy(task.dependency_policy || 'prudent')
+      const perTaskTimeout = Number(task.step_timeout_seconds)
+      setEditTaskStepTimeout(Number.isFinite(perTaskTimeout) && perTaskTimeout > 0 ? String(Math.floor(perTaskTimeout)) : '')
       setEditTaskProjectCommands(task.project_commands && Object.keys(task.project_commands).length > 0 ? serializeProjectCommandsYaml(task.project_commands) : '')
       if (task.status === 'blocked' && task.current_step) {
         setRetryFromStep(task.current_step)
@@ -3011,6 +3074,11 @@ export default function App() {
         return
       }
     }
+    const parsedStepTimeout = parseOptionalPositiveInt(newTaskStepTimeout)
+    if (newTaskStepTimeout.trim() && parsedStepTimeout === null) {
+      setError('Task timeout must be a positive number of seconds')
+      return
+    }
     let parsedProjectCommands: Record<string, Record<string, string>> | undefined
     if (newTaskProjectCommands.trim()) {
       try {
@@ -3104,6 +3172,7 @@ export default function App() {
           hitl_mode: newTaskHitlMode,
           dependency_policy: newTaskDependencyPolicy,
           worker_model: newTaskWorkerModel.trim() || undefined,
+          step_timeout_seconds: parsedStepTimeout ?? undefined,
           parent_id: newTaskParentId.trim() || undefined,
           pipeline_template: parsedPipelineTemplate.length > 0 ? parsedPipelineTemplate : undefined,
           metadata: parsedMetadata,
@@ -3133,6 +3202,7 @@ export default function App() {
     setNewTaskDependencyPolicy('prudent')
     setNewTaskParentId('')
     setNewTaskPipelineTemplate('')
+    setNewTaskStepTimeout('')
     setNewTaskMetadata('')
     setNewTaskProjectCommands('')
     setNewTaskWorkerModel('')
@@ -3362,18 +3432,92 @@ export default function App() {
   }
 
   async function approveGate(taskId: string, gate?: string | null): Promise<void> {
+    const previousBoardTask = Object.values(board.columns || {})
+      .flat()
+      .find((task) => task.id === taskId) || null
+    const previousSelectedTask = selectedTaskDetail && selectedTaskDetail.id === taskId ? selectedTaskDetail : null
+
+    setTaskActionPending('approve_gate')
+    setTaskActionDetail(String(gate || ''))
+    setTaskActionError('')
     try {
-      await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/approve-gate`, projectDir), {
+      setBoard((prev) => {
+        const nextColumns: Record<string, TaskRecord[]> = {}
+        for (const [column, items] of Object.entries(prev.columns || {})) {
+          nextColumns[column] = (items || []).map((item) => (
+            item.id === taskId
+              ? {
+                  ...item,
+                  pending_gate: null,
+                  gate_context: item.gate_context
+                    ? { ...item.gate_context, is_waiting: false, gate: null, display: null, status_kind: null }
+                    : null,
+                }
+              : item
+          ))
+        }
+        return { ...prev, columns: nextColumns }
+      })
+      setSelectedTaskDetail((prev) => (
+        prev && prev.id === taskId
+          ? {
+              ...prev,
+              pending_gate: null,
+              gate_context: prev.gate_context
+                ? { ...prev.gate_context, is_waiting: false, gate: null, display: null, status_kind: null }
+                : null,
+            }
+          : prev
+      ))
+
+      const payload = await requestJson<{ task: TaskRecord; message?: string }>(buildApiUrl(`/api/tasks/${taskId}/approve-gate`, projectDir), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ gate: gate || undefined }),
       })
+      setTaskActionMessage(payload.message || 'Gate approved. Task will resume shortly.')
       await reloadAll()
       if (selectedTaskIdRef.current === taskId) {
         await loadTaskDetail(taskId)
       }
     } catch (err) {
-      setTaskActionError(err instanceof Error ? err.message : 'Failed to approve gate')
+      const detail = err instanceof Error ? err.message : 'Failed to approve gate'
+      if (String(detail).toLowerCase().includes('no pending gate')) {
+        setTaskActionMessage('Gate already approved.')
+      } else {
+        if (previousBoardTask) {
+          setBoard((prev) => {
+            const nextColumns: Record<string, TaskRecord[]> = {}
+            for (const [column, items] of Object.entries(prev.columns || {})) {
+              nextColumns[column] = (items || []).map((item) => (
+                item.id === taskId
+                  ? {
+                      ...item,
+                      pending_gate: previousBoardTask.pending_gate,
+                      gate_context: previousBoardTask.gate_context || null,
+                    }
+                  : item
+              ))
+            }
+            return { ...prev, columns: nextColumns }
+          })
+        }
+        if (previousSelectedTask) {
+          setSelectedTaskDetail((prev) => (
+            prev && prev.id === taskId
+              ? {
+                  ...prev,
+                  pending_gate: previousSelectedTask.pending_gate,
+                  gate_context: previousSelectedTask.gate_context || null,
+                }
+              : prev
+          ))
+        }
+        setTaskActionError(detail)
+      }
+    } finally {
+      setTaskActionPending(null)
+      setTaskActionDetail('')
     }
   }
 
@@ -3513,6 +3657,11 @@ export default function App() {
   }
 
   async function saveTaskEdits(taskId: string): Promise<void> {
+    const parsedStepTimeout = parseOptionalPositiveInt(editTaskStepTimeout)
+    if (editTaskStepTimeout.trim() && parsedStepTimeout === null) {
+      setError('Task timeout must be a positive number of seconds')
+      return
+    }
     let pcPayload: Record<string, Record<string, string>> | undefined
     if (editTaskProjectCommands.trim()) {
       try {
@@ -3541,6 +3690,7 @@ export default function App() {
             approval_mode: editTaskApprovalMode,
             hitl_mode: editTaskHitlMode,
             dependency_policy: editTaskDependencyPolicy,
+            step_timeout_seconds: parsedStepTimeout,
             project_commands: pcPayload,
           }),
         })
@@ -3677,6 +3827,10 @@ export default function App() {
           concurrency: Math.max(1, parseNonNegativeInt(settingsConcurrency, DEFAULT_SETTINGS.orchestrator.concurrency)),
           auto_deps: settingsAutoDeps,
           max_review_attempts: Math.max(1, parseNonNegativeInt(settingsMaxReviewAttempts, DEFAULT_SETTINGS.orchestrator.max_review_attempts)),
+          step_timeout_seconds: Math.min(
+            7200,
+            Math.max(1, parseNonNegativeInt(settingsStepTimeoutSeconds, DEFAULT_SETTINGS.orchestrator.step_timeout_seconds)),
+          ),
         },
         agent_routing: {
           default_role: settingsDefaultRole.trim() || 'general',
@@ -4219,26 +4373,20 @@ export default function App() {
                 </div>
               )
             })() : null}
-            {selectedTaskView.pending_gate === 'before_implement' ? (
-              <div className="preview-box plan-gate-banner">
-                <p className="field-label">
-                  Plan ready for review.{' '}
-                  <button className="link-button" onClick={() => setTaskDetailTab('plan')}>
-                    View and edit the plan
-                  </button>{' '}
-                  before approving.
-                </p>
-                <button className="button button-primary" onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}>
-                  Approve gate
-                </button>
-              </div>
-            ) : selectedTaskView.pending_gate ? (
+            {selectedTaskView.pending_gate && selectedTaskView.pending_gate !== 'before_implement' ? (
               <div className="preview-box">
                 <p className="field-label">
-                  Pending gate: <strong>{humanizeLabel(selectedTaskView.pending_gate)}</strong>
+                  Pending gate: <strong>{gateDisplayLabel(selectedTaskView)}</strong>
                 </p>
-                <button className="button button-primary" onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}>
-                  Approve gate
+                <p className="field-label">{gateApprovalHelperText(selectedTaskView)}</p>
+                <button
+                  className="button button-primary"
+                  onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}
+                  disabled={taskActionPending === 'approve_gate'}
+                >
+                  {taskActionPending === 'approve_gate'
+                    ? 'Approving...'
+                    : gateApprovalButtonLabel(selectedTaskView.pending_gate)}
                 </button>
               </div>
             ) : null}
@@ -4285,8 +4433,15 @@ export default function App() {
               {selectedTaskView.pending_gate === 'before_implement' ? (
                 <div className="preview-box plan-gate-banner">
                   <p className="field-label">Plan ready for review. Approve to proceed with implementation.</p>
-                  <button className="button button-primary" onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}>
-                    Approve gate
+                  <p className="field-label">{gateApprovalHelperText(selectedTaskView)}</p>
+                  <button
+                    className="button button-primary"
+                    onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}
+                    disabled={taskActionPending === 'approve_gate'}
+                  >
+                    {taskActionPending === 'approve_gate'
+                      ? 'Approving...'
+                      : gateApprovalButtonLabel(selectedTaskView.pending_gate)}
                   </button>
                 </div>
               ) : null}
@@ -4504,6 +4659,19 @@ export default function App() {
                   {(configLocked ? (selectedTaskView.dependency_policy || 'prudent') : editTaskDependencyPolicy) === 'prudent' && 'Prefer existing deps. Only add new ones when manual implementation would be unreliable or complex.'}
                   {(configLocked ? (selectedTaskView.dependency_policy || 'prudent') : editTaskDependencyPolicy) === 'strict' && 'No new dependencies allowed. Work only with what is already installed.'}
                 </p>
+                <label className="field-label" htmlFor="edit-task-step-timeout">Task timeout for implement step (seconds)</label>
+                <input
+                  id="edit-task-step-timeout"
+                  value={configLocked
+                    ? ((selectedTaskView.step_timeout_seconds && selectedTaskView.step_timeout_seconds > 0)
+                      ? String(selectedTaskView.step_timeout_seconds)
+                      : '')
+                    : editTaskStepTimeout}
+                  onChange={(event) => setEditTaskStepTimeout(event.target.value)}
+                  inputMode="numeric"
+                  placeholder="Use global default"
+                  disabled={configLocked || taskActionPending === 'save'}
+                />
                 <label className="field-label">Project commands override</label>
                 {configLocked ? (
                   selectedTaskView.project_commands && Object.keys(selectedTaskView.project_commands).length > 0 ? (
@@ -4834,6 +5002,9 @@ export default function App() {
     )
 
   function renderBoard(): JSX.Element {
+    const inProgressTasks = board.columns.in_progress || []
+    const waitingApprovalCount = inProgressTasks.filter((task) => !!task.pending_gate).length
+    const runningNowCount = inProgressTasks.length - waitingApprovalCount
     return (
       <section className="panel">
         <header className="panel-head">
@@ -4853,9 +5024,22 @@ export default function App() {
               <h3>{humanizeLabel(column)}</h3>
               <div className="card-list">
                 {(board.columns[column] || []).map((task) => (
-                  <button className={`task-card task-card-button${boardCompact ? ' task-card-compact' : ''}`} key={task.id} onClick={() => handleTaskSelect(task.id)}>
+                  <button
+                    className={`task-card task-card-button${boardCompact ? ' task-card-compact' : ''}${task.pending_gate ? ' task-card-awaiting-gate' : ''}`}
+                    key={task.id}
+                    onClick={() => handleTaskSelect(task.id, task.pending_gate === 'before_implement' ? 'plan' : undefined)}
+                  >
                     <p className="task-title">{task.title}</p>
                     {!boardCompact && <p className="task-meta">{task.priority} · {task.id.replace(/^task-/, '')}{task.parent_id ? ' · from plan' : ''}</p>}
+                    {!boardCompact && task.pending_gate ? (
+                      <p className="task-meta">
+                        <span className="status-pill status-pill-inline status-review">Awaiting approval</span>
+                        {' · '}
+                        {gateDisplayLabel(task)}
+                        {' · '}
+                        <span className="link-button">Review &amp; Approve</span>
+                      </p>
+                    ) : null}
                     {!boardCompact && task.description ? <p className="task-desc">{task.description}</p> : null}
                   </button>
                 ))}
@@ -4866,6 +5050,8 @@ export default function App() {
         <div className="board-summary">
           <span className="field-label">Queue: {orchestrator?.queue_depth ?? 0}</span>
           <span className="field-label">In progress: {orchestrator?.in_progress ?? 0}</span>
+          <span className="field-label">Running now: {runningNowCount}</span>
+          <span className="field-label">Waiting approval: {waitingApprovalCount}</span>
           <span className="field-label">Workers: {agents.length}</span>
         </div>
       </section>
@@ -4880,6 +5066,9 @@ export default function App() {
       }
     }
     const blockedCount = (board.columns.blocked || []).length
+    const inProgressTasks = board.columns.in_progress || []
+    const waitingApprovalCount = inProgressTasks.filter((task) => !!task.pending_gate).length
+    const runningNowCount = inProgressTasks.length - waitingApprovalCount
     return (
       <section className="panel">
         <header className="panel-head">
@@ -4899,6 +5088,14 @@ export default function App() {
           <button className={`status-card status-card-clickable${pipelineHighlightStatus === 'in_progress' ? ' status-card-active' : ''}`} onClick={() => setPipelineHighlightStatus((prev) => prev === 'in_progress' ? '' : 'in_progress')}>
             <span>In Progress</span>
             <strong>{orchestrator?.in_progress ?? 0}</strong>
+          </button>
+          <button className="status-card">
+            <span>Running now</span>
+            <strong>{runningNowCount}</strong>
+          </button>
+          <button className="status-card">
+            <span>Waiting approval</span>
+            <strong>{waitingApprovalCount}</strong>
           </button>
           <button className={`status-card status-card-clickable${pipelineHighlightStatus === 'blocked' ? ' status-card-active' : ''}`} onClick={() => setPipelineHighlightStatus((prev) => prev === 'blocked' ? '' : 'blocked')}>
             <span>Blocked</span>
@@ -5295,6 +5492,13 @@ export default function App() {
                 id="settings-review-attempts"
                 value={settingsMaxReviewAttempts}
                 onChange={(event) => setSettingsMaxReviewAttempts(event.target.value)}
+                inputMode="numeric"
+              />
+              <label className="field-label" htmlFor="settings-step-timeout-seconds">Default task timeout (seconds)</label>
+              <input
+                id="settings-step-timeout-seconds"
+                value={settingsStepTimeoutSeconds}
+                onChange={(event) => setSettingsStepTimeoutSeconds(event.target.value)}
                 inputMode="numeric"
               />
               <p className="settings-subheading">Role Routing</p>
@@ -6390,6 +6594,14 @@ export default function App() {
                         value={newTaskPipelineTemplate}
                         onChange={(event) => setNewTaskPipelineTemplate(event.target.value)}
                         placeholder="plan, implement, verify, review"
+                      />
+                      <label className="field-label" htmlFor="task-step-timeout">Task timeout for implement step (seconds, optional)</label>
+                      <input
+                        id="task-step-timeout"
+                        value={newTaskStepTimeout}
+                        onChange={(event) => setNewTaskStepTimeout(event.target.value)}
+                        inputMode="numeric"
+                        placeholder="600"
                       />
                       <label className="field-label" htmlFor="task-worker-model">Worker model override (optional)</label>
                       <input

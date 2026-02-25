@@ -1171,7 +1171,14 @@ class LiveWorkerAdapter:
             return default
         return timeout if timeout > 0 else default
 
+    def _default_step_timeout_seconds(self) -> int:
+        cfg = self._container.config.load()
+        orchestrator_cfg = cfg.get("orchestrator") if isinstance(cfg, dict) else {}
+        orchestrator_cfg = orchestrator_cfg if isinstance(orchestrator_cfg, dict) else {}
+        return self._coerce_timeout(orchestrator_cfg.get("step_timeout_seconds"), _DEFAULT_STEP_TIMEOUT_SECONDS)
+
     def _timeout_for_step(self, task: Task, step: str) -> int:
+        default_timeout = self._default_step_timeout_seconds()
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
         overrides = metadata.get("step_timeouts")
         if isinstance(overrides, dict):
@@ -1179,18 +1186,18 @@ class LiveWorkerAdapter:
                 if not key:
                     continue
                 if key in overrides:
-                    return self._coerce_timeout(overrides.get(key))
+                    return self._coerce_timeout(overrides.get(key), default_timeout)
 
         try:
             template = PipelineRegistry().resolve_for_task_type(task.task_type)
         except Exception:
-            return _DEFAULT_STEP_TIMEOUT_SECONDS
+            return default_timeout
 
-        step_timeouts = {sd.name: self._coerce_timeout(sd.timeout_seconds) for sd in template.steps}
+        step_timeouts = {sd.name: self._coerce_timeout(sd.timeout_seconds, default_timeout) for sd in template.steps}
         for key in (step, _STEP_TIMEOUT_ALIASES.get(step)):
             if key and key in step_timeouts:
                 return step_timeouts[key]
-        return _DEFAULT_STEP_TIMEOUT_SECONDS
+        return default_timeout
 
     @staticmethod
     def _heartbeat_settings(cfg: dict[str, Any]) -> tuple[int, int]:

@@ -38,6 +38,7 @@ UpdateTaskRequest = impl.UpdateTaskRequest
 VALID_TRANSITIONS = impl.VALID_TRANSITIONS
 _canonical_task_type_for_pipeline = impl._canonical_task_type_for_pipeline
 _execution_batches = impl._execution_batches
+_gate_display_label = impl._gate_display_label
 _has_unresolved_blockers = impl._has_unresolved_blockers
 _logs_snapshot_id = impl._logs_snapshot_id
 _normalize_pipeline_classification_output = impl._normalize_pipeline_classification_output
@@ -46,6 +47,40 @@ _read_from_offset = impl._read_from_offset
 _read_tail = impl._read_tail
 _safe_state_path = impl._safe_state_path
 _task_payload = impl._task_payload
+
+
+def _gate_approved_message(gate: str | None, *, will_resume: bool) -> str:
+    normalized = str(gate or "").strip()
+    if will_resume:
+        if normalized == "before_implement":
+            return "Plan approved. Task will resume shortly."
+        if normalized == "after_implement":
+            return "Review approved. Task will resume shortly."
+        if normalized == "before_commit":
+            return "Commit approved. Task will resume shortly."
+        if normalized == "human_intervention":
+            return "Intervention acknowledged. Task will resume shortly."
+        gate_label = _gate_display_label(normalized)
+        if gate_label:
+            return f"{gate_label} approved. Task will resume shortly."
+        return "Gate approved. Task will resume shortly."
+
+    if normalized == "human_intervention":
+        return "Intervention acknowledged. Task is still blocked; retry when ready."
+    gate_label = _gate_display_label(normalized)
+    if gate_label:
+        return f"{gate_label} approved."
+    return "Gate approved."
+
+
+def _resume_step_for_gate(gate: str | None) -> str | None:
+    mapping = {
+        "before_plan": "plan",
+        "before_implement": "implement",
+        "after_implement": "review",
+        "before_commit": "commit",
+    }
+    return mapping.get(str(gate or "").strip())
 
 
 def _timestamp_sort_value(value: Any, *, descending: bool) -> float:
@@ -103,6 +138,25 @@ def _remove_task_relationship_refs(*, task_id: str, container: Any) -> None:
         if changed:
             existing.updated_at = now_iso()
             container.tasks.upsert(existing)
+
+
+def _set_task_step_timeout(task: Task, timeout_seconds: int | None) -> None:
+    """Set or clear per-task implement timeout metadata."""
+    if not isinstance(task.metadata, dict):
+        task.metadata = {}
+    metadata = task.metadata
+    existing = metadata.get("step_timeouts")
+    step_timeouts: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    if timeout_seconds is None:
+        step_timeouts.pop("implement", None)
+        step_timeouts.pop("implement_fix", None)
+        if step_timeouts:
+            metadata["step_timeouts"] = step_timeouts
+        else:
+            metadata.pop("step_timeouts", None)
+        return
+    step_timeouts["implement"] = int(timeout_seconds)
+    metadata["step_timeouts"] = step_timeouts
 
 
 def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
@@ -173,6 +227,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         )
         if not isinstance(task.metadata, dict):
             task.metadata = {}
+        if body.step_timeout_seconds is not None:
+            _set_task_step_timeout(task, body.step_timeout_seconds)
         if classifier_pipeline_valid and classifier_confidence_valid:
             task.metadata["classifier_pipeline_id"] = classifier_pipeline_id
             task.metadata["classifier_confidence"] = classifier_confidence
@@ -635,7 +691,9 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        updates = body.model_dump(exclude_none=True)
+        if "step_timeout_seconds" in body.model_fields_set:
+            _set_task_step_timeout(task, body.step_timeout_seconds)
+        updates = body.model_dump(exclude_none=True, exclude={"step_timeout_seconds"})
         if "status" in updates:
             raise HTTPException(
                 status_code=400,
@@ -735,6 +793,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.error = None
         task.pending_gate = None
         task.metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        task.metadata.pop("execution_checkpoint", None)
         task.metadata.pop("human_blocking_issues", None)
         task.metadata.pop("invalid_workdoc_path", None)
         task.metadata.pop("invalid_workdoc_error", None)
@@ -822,7 +881,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task is missing or no matching pending gate exists.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -831,11 +890,33 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if body.gate and body.gate != task.pending_gate:
             raise HTTPException(status_code=400, detail=f"Gate mismatch: pending={task.pending_gate}, requested={body.gate}")
         cleared_gate = task.pending_gate
+        approved_at = now_iso()
+        should_resume = task.status == "in_progress"
+        if should_resume:
+            checkpoint = task.metadata.get("execution_checkpoint") if isinstance(task.metadata, dict) else None
+            checkpoint_payload = dict(checkpoint) if isinstance(checkpoint, dict) else {}
+            checkpoint_payload["gate"] = cleared_gate
+            checkpoint_payload["resume_step"] = (
+                str(checkpoint_payload.get("resume_step") or "").strip() or _resume_step_for_gate(cleared_gate)
+            )
+            checkpoint_payload["approved_gate"] = cleared_gate
+            checkpoint_payload["resume_requested_at"] = approved_at
+            if not isinstance(task.metadata, dict):
+                task.metadata = {}
+            task.metadata["execution_checkpoint"] = checkpoint_payload
         task.pending_gate = None
-        task.updated_at = now_iso()
+        task.updated_at = approved_at
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.gate_approved", entity_id=task.id, payload={"gate": cleared_gate})
-        return {"task": _task_payload(task, container), "cleared_gate": cleared_gate}
+        if should_resume:
+            bus.emit(channel="tasks", event_type="task.resume_requested", entity_id=task.id, payload={"gate": cleared_gate})
+            orchestrator.ensure_worker()
+        return {
+            "task": _task_payload(task, container),
+            "cleared_gate": cleared_gate,
+            "message": _gate_approved_message(cleared_gate, will_resume=should_resume),
+            "approved_at": approved_at,
+        }
 
     @router.post("/tasks/{task_id}/dependencies")
     async def add_dependency(task_id: str, body: AddDependencyRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:

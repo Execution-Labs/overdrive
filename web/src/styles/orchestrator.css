@@ -456,6 +456,11 @@ a:focus-visible {
   box-shadow: 0 8px 18px rgba(18, 35, 26, 0.08);
 }
 
+.task-card-awaiting-gate {
+  border-color: #d09a39;
+  background: #fff9eb;
+}
+
 .task-card-button:active {
   transform: translateY(1px) scale(0.995);
 }

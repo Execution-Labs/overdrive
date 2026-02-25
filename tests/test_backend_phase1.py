@@ -679,6 +679,11 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert baseline.json()["orchestrator"]["concurrency"] == 2
         assert baseline.json()["orchestrator"]["auto_deps"] is True
         assert baseline.json()["orchestrator"]["max_review_attempts"] == 10
+        assert baseline.json()["orchestrator"]["step_timeout_seconds"] == 600
+        assert baseline.json()["orchestrator"]["gate_reminder_minutes"] == 30
+        assert baseline.json()["orchestrator"]["gate_stale_minutes"] == 0
+        assert baseline.json()["orchestrator"]["gate_max_wait_minutes"] == 0
+        assert baseline.json()["orchestrator"]["gate_timeout_action"] == "none"
         assert baseline.json()["agent_routing"]["default_role"] == "general"
         assert baseline.json()["defaults"]["quality_gate"]["high"] == 0
         assert baseline.json()["workers"]["default"] == "codex"
@@ -689,7 +694,16 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         updated = client.patch(
             "/api/settings",
             json={
-                "orchestrator": {"concurrency": 5, "auto_deps": False, "max_review_attempts": 4},
+                "orchestrator": {
+                    "concurrency": 5,
+                    "auto_deps": False,
+                    "max_review_attempts": 4,
+                    "step_timeout_seconds": 900,
+                    "gate_reminder_minutes": 15,
+                    "gate_stale_minutes": 120,
+                    "gate_max_wait_minutes": 240,
+                    "gate_timeout_action": "block",
+                },
                 "agent_routing": {
                     "default_role": "reviewer",
                     "task_type_roles": {"bug": "debugger"},
@@ -731,6 +745,11 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert body["orchestrator"]["concurrency"] == 5
         assert body["orchestrator"]["auto_deps"] is False
         assert body["orchestrator"]["max_review_attempts"] == 4
+        assert body["orchestrator"]["step_timeout_seconds"] == 900
+        assert body["orchestrator"]["gate_reminder_minutes"] == 15
+        assert body["orchestrator"]["gate_stale_minutes"] == 120
+        assert body["orchestrator"]["gate_max_wait_minutes"] == 240
+        assert body["orchestrator"]["gate_timeout_action"] == "block"
         assert body["agent_routing"]["default_role"] == "reviewer"
         assert body["agent_routing"]["task_type_roles"]["bug"] == "debugger"
         assert body["agent_routing"]["role_provider_overrides"]["reviewer"] == "openai"
@@ -759,6 +778,39 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert reloaded.json() == body
 
 
+def test_settings_patch_preserves_unspecified_orchestrator_fields(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        seeded = client.patch(
+            "/api/settings",
+            json={
+                "orchestrator": {
+                    "concurrency": 3,
+                    "auto_deps": True,
+                    "max_review_attempts": 10,
+                    "step_timeout_seconds": 600,
+                    "gate_reminder_minutes": 5,
+                    "gate_stale_minutes": 7,
+                    "gate_max_wait_minutes": 9,
+                    "gate_timeout_action": "block",
+                }
+            },
+        )
+        assert seeded.status_code == 200
+
+        partial = client.patch(
+            "/api/settings",
+            json={"orchestrator": {"concurrency": 4}},
+        )
+        assert partial.status_code == 200
+        orch = partial.json()["orchestrator"]
+        assert orch["concurrency"] == 4
+        assert orch["gate_reminder_minutes"] == 5
+        assert orch["gate_stale_minutes"] == 7
+        assert orch["gate_max_wait_minutes"] == 9
+        assert orch["gate_timeout_action"] == "block"
+
+
 def test_create_task_worker_model_round_trip(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
@@ -770,6 +822,54 @@ def test_create_task_worker_model_round_trip(tmp_path: Path) -> None:
         loaded = client.get(f"/api/tasks/{task['id']}")
         assert loaded.status_code == 200
         assert loaded.json()["task"]["worker_model"] == "gpt-5-codex"
+
+
+def test_task_step_timeout_round_trip(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Timeout override", "step_timeout_seconds": 777})
+        assert created.status_code == 200
+        task = created.json()["task"]
+        assert task["step_timeout_seconds"] == 777
+        assert task["metadata"]["step_timeouts"]["implement"] == 777
+
+        updated = client.patch(
+            f"/api/tasks/{task['id']}",
+            json={"step_timeout_seconds": 333},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["task"]["step_timeout_seconds"] == 333
+        assert updated.json()["task"]["metadata"]["step_timeouts"]["implement"] == 333
+
+        cleared = client.patch(
+            f"/api/tasks/{task['id']}",
+            json={"step_timeout_seconds": None},
+        )
+        assert cleared.status_code == 200
+        assert cleared.json()["task"]["step_timeout_seconds"] is None
+        assert "step_timeouts" not in (cleared.json()["task"]["metadata"] or {})
+
+
+def test_task_payload_includes_gate_context(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Gate context task", "status": "backlog"}).json()["task"]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+        task.status = "in_progress"
+        task.current_step = "plan"
+        task.pending_gate = "before_implement"
+        container.tasks.upsert(task)
+
+        loaded = client.get(f"/api/tasks/{task.id}")
+        assert loaded.status_code == 200
+        gate_context = loaded.json()["task"]["gate_context"]
+        assert gate_context["is_waiting"] is True
+        assert gate_context["gate"] == "before_implement"
+        assert gate_context["display"] == "Approve plan to start implementation"
+        assert gate_context["step"] == "plan"
+        assert gate_context["status_kind"] == "approval_wait"
 
 
 def test_get_task_includes_timing_summary_for_completed_runs(tmp_path: Path) -> None:

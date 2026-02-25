@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from agent_orchestrator.runtime.domain.models import Task
+from agent_orchestrator.runtime.domain.models import Task, now_iso
 from agent_orchestrator.runtime.events import EventBus
 from agent_orchestrator.runtime.orchestrator import OrchestratorService
 from agent_orchestrator.runtime.storage.container import Container
@@ -41,7 +41,7 @@ def test_autopilot_no_gates(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Supervised — blocks at every gate
+# Supervised — gates pause/resume flow
 # ---------------------------------------------------------------------------
 
 
@@ -75,8 +75,8 @@ def test_supervised_blocks_at_gates(tmp_path: Path) -> None:
     assert "before_commit" in gates_seen
 
 
-def test_supervised_keeps_previous_step_visible_until_gate_approval(tmp_path: Path) -> None:
-    """Current step should not advance to a gated step before approval."""
+def test_supervised_keeps_previous_step_visible_until_gate_pause(tmp_path: Path) -> None:
+    """Current step should not advance to the gated step before parking."""
     container, service, _ = _service(tmp_path)
     task = Task(
         title="Gate visibility task",
@@ -86,24 +86,13 @@ def test_supervised_keeps_previous_step_visible_until_gate_approval(tmp_path: Pa
     )
     container.tasks.upsert(task)
 
-    snapshots: list[tuple[str, str | None, str | None]] = []
+    result = service.run_task(task.id)
 
-    def _mock_wait(t: Task, gate_name: str, timeout: int = 3600) -> bool:
-        phase = t.metadata.get("pipeline_phase") if isinstance(t.metadata, dict) else None
-        snapshots.append((gate_name, t.current_step, str(phase) if phase is not None else None))
-        t.pending_gate = None
-        container.tasks.upsert(t)
-        return gate_name != "before_commit"
-
-    with patch.object(service, "_wait_for_gate", side_effect=_mock_wait):
-        result = service.run_task(task.id)
-
-    assert result.status == "blocked"
-    assert snapshots[0] == ("before_implement", "plan", "plan")
-    assert snapshots[-1] == ("before_commit", "review", "review")
-    assert snapshots[1][0] == "after_implement"
-    assert snapshots[1][1] not in {"review", "commit"}
-    assert snapshots[1][2] == snapshots[1][1]
+    assert result.status == "in_progress"
+    assert result.pending_gate == "before_implement"
+    assert result.current_step == "plan"
+    phase = result.metadata.get("pipeline_phase") if isinstance(result.metadata, dict) else None
+    assert phase == "plan"
 
 
 # ---------------------------------------------------------------------------
@@ -174,12 +163,12 @@ def test_collaborative_gates(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Gate timeout — blocks the task
+# Gate pause — parks the task
 # ---------------------------------------------------------------------------
 
 
-def test_gate_timeout_blocks_task(tmp_path: Path) -> None:
-    """If nobody approves the gate, _wait_for_gate returns False → blocked."""
+def test_gate_wait_parks_task(tmp_path: Path) -> None:
+    """If nobody approves the gate, task remains paused at pending gate."""
     container, service, _ = _service(tmp_path)
     task = Task(
         title="Timeout task",
@@ -189,15 +178,58 @@ def test_gate_timeout_blocks_task(tmp_path: Path) -> None:
     )
     container.tasks.upsert(task)
 
-    def _mock_wait_reject(t: Task, gate_name: str, timeout: int = 3600) -> bool:
-        # Simulate gate not being approved
-        return False
+    result = service.run_task(task.id)
 
-    with patch.object(service, "_wait_for_gate", side_effect=_mock_wait_reject):
-        result = service.run_task(task.id)
+    assert result.status == "in_progress"
+    assert result.pending_gate == "before_implement"
+    assert not result.error
 
-    assert result.status == "blocked"
-    assert "gate" in (result.error or "").lower()
+
+def test_approved_gate_resumes_to_next_gate(tmp_path: Path) -> None:
+    """Gate resume should continue the same run without retry semantics."""
+    container, service, _ = _service(tmp_path)
+    task = Task(
+        title="Resume task",
+        status="queued",
+        approval_mode="auto_approve",
+        hitl_mode="supervised",
+    )
+    container.tasks.upsert(task)
+
+    parked = service.run_task(task.id)
+    assert parked.pending_gate == "before_implement"
+    assert parked.status == "in_progress"
+    assert len(parked.run_ids) == 1
+    first_run_id = parked.run_ids[-1]
+
+    checkpoint = dict(parked.metadata.get("execution_checkpoint") or {})
+    checkpoint["approved_gate"] = "before_implement"
+    checkpoint["resume_requested_at"] = now_iso()
+    parked.pending_gate = None
+    parked.metadata["execution_checkpoint"] = checkpoint
+    container.tasks.upsert(parked)
+
+    result = service.run_task(task.id)
+
+    assert result.status == "in_progress"
+    assert result.pending_gate == "after_implement"
+    assert result.run_ids == [first_run_id]
+
+    runs = [run for run in container.runs.list() if run.task_id == task.id]
+    assert len(runs) == 1
+    assert runs[0].id == first_run_id
+
+    started_events = [
+        event
+        for event in container.events.list_recent(limit=2000)
+        if event.get("type") == "task.started" and event.get("entity_id") == task.id
+    ]
+    assert len(started_events) >= 2
+    latest_payload = started_events[-1].get("payload") or {}
+    assert latest_payload.get("is_retry") is False
+    assert latest_payload.get("run_attempt") == 1
+    workdoc = service.get_workdoc(task.id).get("content") or ""
+    assert "## Retry Attempt 2" not in workdoc
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +270,13 @@ def test_gate_approve_api(tmp_path: Path) -> None:
     data = resp.json()
     assert data["cleared_gate"] == "before_plan"
     assert data["task"]["pending_gate"] is None
+    checkpoint = data["task"]["metadata"].get("execution_checkpoint") or {}
+    assert checkpoint.get("approved_gate") == "before_plan"
+    assert checkpoint.get("resume_requested_at")
+    assert checkpoint.get("resume_step") == "plan"
+    assert "approved" in data["message"].lower()
+    assert "task will resume shortly." in data["message"].lower()
+    assert data["approved_at"]
 
 
 def test_gate_approve_api_no_pending(tmp_path: Path) -> None:
@@ -302,7 +341,42 @@ def test_gate_approve_api_mismatch(tmp_path: Path) -> None:
 
     resp = client.post(f"/api/tasks/{task.id}/approve-gate", json={"gate": "before_commit"})
     assert resp.status_code == 400
-    assert "mismatch" in resp.json()["detail"].lower()
+
+
+def test_gate_approve_human_intervention_keeps_blocked_status(tmp_path: Path) -> None:
+    """Approving intervention gate should clear gate without auto-resuming blocked task."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from agent_orchestrator.runtime.api.router import create_router
+
+    container = Container(tmp_path)
+
+    def resolve_container(_: Any = None) -> Container:
+        return container
+
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus)
+
+    def resolve_orchestrator(_: Any = None) -> OrchestratorService:
+        return service
+
+    router = create_router(resolve_container, resolve_orchestrator, {})
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    task = Task(title="Needs intervention", status="blocked", pending_gate="human_intervention")
+    container.tasks.upsert(task)
+
+    resp = client.post(f"/api/tasks/{task.id}/approve-gate", json={"gate": "human_intervention"})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["task"]["status"] == "blocked"
+    assert payload["task"]["pending_gate"] is None
+    assert "still blocked" in payload["message"].lower()
+    checkpoint = payload["task"]["metadata"].get("execution_checkpoint") or {}
+    assert checkpoint.get("resume_requested_at") in (None, "")
 
 
 # ---------------------------------------------------------------------------

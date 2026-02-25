@@ -55,6 +55,7 @@ class CreateTaskRequest(BaseModel):
     dependency_policy: str = ""
     source: str = "manual"
     worker_model: Optional[str] = None
+    step_timeout_seconds: Optional[int] = Field(None, ge=1, le=7200)
     metadata: dict[str, Any] = Field(default_factory=dict)
     project_commands: Optional[dict[str, dict[str, str]]] = None
     classifier_pipeline_id: Optional[str] = None
@@ -92,6 +93,7 @@ class UpdateTaskRequest(BaseModel):
     hitl_mode: Optional[str] = None
     dependency_policy: Optional[str] = None
     worker_model: Optional[str] = None
+    step_timeout_seconds: Optional[int] = Field(None, ge=1, le=7200)
     metadata: Optional[dict[str, Any]] = None
     project_commands: Optional[dict[str, dict[str, str]]] = None
 
@@ -187,6 +189,11 @@ class OrchestratorSettingsRequest(BaseModel):
     concurrency: int = Field(2, ge=1, le=128)
     auto_deps: bool = True
     max_review_attempts: int = Field(10, ge=1, le=50)
+    step_timeout_seconds: int = Field(600, ge=1, le=7200)
+    gate_reminder_minutes: int = Field(30, ge=0, le=10080)
+    gate_stale_minutes: int = Field(0, ge=0, le=10080)
+    gate_max_wait_minutes: int = Field(0, ge=0, le=43200)
+    gate_timeout_action: Literal["none", "block"] = "none"
 
 
 class AgentRoutingSettingsRequest(BaseModel):
@@ -310,6 +317,19 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
 
 IMPORT_JOB_TTL_SECONDS = 60 * 60 * 24
 IMPORT_JOB_MAX_RECORDS = 200
+_GATE_DISPLAY_LABELS: dict[str, str] = {
+    "before_implement": "Approve plan to start implementation",
+    "after_implement": "Approve review to continue",
+    "before_commit": "Approve before commit",
+    "human_intervention": "Human intervention required",
+}
+
+
+def humanize_label(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return raw.replace("_", " ").strip().capitalize()
 
 
 def _priority_rank(priority: str) -> int:
@@ -606,6 +626,33 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
 def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[str, Any]:
     payload = task.to_dict()
     metadata = task.metadata if isinstance(task.metadata, dict) else {}
+    step_timeout_seconds: int | None = None
+    raw_step_timeouts = metadata.get("step_timeouts")
+    if isinstance(raw_step_timeouts, dict):
+        for key in ("implement", "implement_fix"):
+            if key not in raw_step_timeouts:
+                continue
+            try:
+                candidate = int(raw_step_timeouts.get(key))
+            except (TypeError, ValueError):
+                continue
+            if candidate > 0:
+                step_timeout_seconds = candidate
+                break
+    payload["step_timeout_seconds"] = step_timeout_seconds
+    pending_gate = str(task.pending_gate or "").strip() or None
+    gate_display = _GATE_DISPLAY_LABELS.get(pending_gate or "", humanize_label(pending_gate) if pending_gate else None)
+    payload["gate_context"] = {
+        "is_waiting": bool(pending_gate),
+        "gate": pending_gate,
+        "display": gate_display,
+        "step": str(task.current_step or metadata.get("pipeline_phase") or "").strip() or None,
+        "status_kind": (
+            "intervention_wait"
+            if pending_gate == "human_intervention"
+            else ("approval_wait" if pending_gate else None)
+        ),
+    }
     payload["human_blocking_issues"] = _normalize_human_blocking_issues(metadata.get("human_blocking_issues"))
     raw_actions = metadata.get("human_review_actions")
     payload["human_review_actions"] = list(raw_actions) if isinstance(raw_actions, list) else []
@@ -617,6 +664,14 @@ def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[s
         if summary is not None:
             payload["execution_summary"] = summary
     return payload
+
+
+def _gate_display_label(gate: str | None) -> str:
+    """Return a user-facing gate label for API/UI messages."""
+    raw = str(gate or "").strip()
+    if not raw:
+        return "approval gate"
+    return _GATE_DISPLAY_LABELS.get(raw, humanize_label(raw))
 
 
 def _safe_state_path(raw_path: Any, state_root: Path) -> Optional[Path]:
@@ -834,6 +889,23 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
             "concurrency": _coerce_int(orchestrator.get("concurrency"), 2, minimum=1, maximum=128),
             "auto_deps": _coerce_bool(orchestrator.get("auto_deps"), True),
             "max_review_attempts": _coerce_int(orchestrator.get("max_review_attempts"), 10, minimum=1, maximum=50),
+            "step_timeout_seconds": _coerce_int(
+                orchestrator.get("step_timeout_seconds"), 600, minimum=1, maximum=7200
+            ),
+            "gate_reminder_minutes": _coerce_int(
+                orchestrator.get("gate_reminder_minutes"), 30, minimum=0, maximum=10080
+            ),
+            "gate_stale_minutes": _coerce_int(
+                orchestrator.get("gate_stale_minutes"), 0, minimum=0, maximum=10080
+            ),
+            "gate_max_wait_minutes": _coerce_int(
+                orchestrator.get("gate_max_wait_minutes"), 0, minimum=0, maximum=43200
+            ),
+            "gate_timeout_action": (
+                str(orchestrator.get("gate_timeout_action") or "none").strip().lower()
+                if str(orchestrator.get("gate_timeout_action") or "none").strip().lower() in {"none", "block"}
+                else "none"
+            ),
         },
         "agent_routing": {
             "default_role": str(routing.get("default_role") or "general"),
