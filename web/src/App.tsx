@@ -255,7 +255,7 @@ type SystemSettings = {
     concurrency: number
     auto_deps: boolean
     max_review_attempts: number
-    step_timeout_seconds?: number
+    step_timeout_seconds: number
   }
   agent_routing: {
     default_role: string
