@@ -747,7 +747,7 @@ describe('App action coverage', () => {
     })
   })
 
-  it('shows informational message when gate was already approved', async () => {
+  it('treats already-approved gate as silent no-op', async () => {
     const jsonResponse = (payload: unknown) => Promise.resolve({ ok: true, json: async () => payload })
     const mockedFetch = vi.fn().mockImplementation((url, init) => {
       const u = String(url)
@@ -815,7 +815,8 @@ describe('App action coverage', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: /Approve gate/i }))
     await waitFor(() => {
-      expect(screen.getAllByText('Gate already approved.').length).toBeGreaterThan(0)
+      expect(screen.queryByRole('button', { name: /Approve gate/i })).not.toBeInTheDocument()
+      expect(screen.queryByText('Gate already approved.')).not.toBeInTheDocument()
     })
   })
 
