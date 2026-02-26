@@ -3457,12 +3457,11 @@ export default function App() {
           : prev
       ))
 
-      const payload = await requestJson<{ task: TaskRecord; message?: string }>(buildApiUrl(`/api/tasks/${taskId}/approve-gate`, projectDir), {
+      await requestJson<{ task: TaskRecord; message?: string }>(buildApiUrl(`/api/tasks/${taskId}/approve-gate`, projectDir), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ gate: gate || undefined }),
       })
-      setTaskActionMessage(payload.message || 'Gate approved. Task will resume shortly.')
       await reloadAll()
       if (selectedTaskIdRef.current === taskId) {
         await loadTaskDetail(taskId)
@@ -3470,7 +3469,7 @@ export default function App() {
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'Failed to approve gate'
       if (String(detail).toLowerCase().includes('no pending gate')) {
-        setTaskActionMessage('Gate already approved.')
+        // Treat stale double-approve as a no-op.
       } else {
         if (previousBoardTask) {
           setBoard((prev) => {
