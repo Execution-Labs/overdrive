@@ -1786,9 +1786,7 @@ export default function App() {
   const [settingsPromptOverrides, setSettingsPromptOverrides] = useState<Record<string, string>>({})
   const [settingsPromptOverridesBaseline, setSettingsPromptOverridesBaseline] = useState<Record<string, string>>({})
   const [settingsPromptOverrideClears, setSettingsPromptOverrideClears] = useState<Record<string, true>>({})
-  const [settingsPromptInjections, setSettingsPromptInjections] = useState<Record<string, string>>({})
-  const [settingsPromptInjectionsBaseline, setSettingsPromptInjectionsBaseline] = useState<Record<string, string>>({})
-  const [settingsPromptInjectionClears, setSettingsPromptInjectionClears] = useState<Record<string, true>>({})
+  const [settingsLegacyPromptInjections, setSettingsLegacyPromptInjections] = useState<Record<string, string>>({})
   const [settingsPromptDefaults, setSettingsPromptDefaults] = useState<Record<string, string>>({})
   const [settingsPromptStep, setSettingsPromptStep] = useState('')
   const [settingsGateCritical, setSettingsGateCritical] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.critical))
@@ -1918,9 +1916,7 @@ export default function App() {
     setSettingsPromptOverrides({})
     setSettingsPromptOverridesBaseline({})
     setSettingsPromptOverrideClears({})
-    setSettingsPromptInjections({})
-    setSettingsPromptInjectionsBaseline({})
-    setSettingsPromptInjectionClears({})
+    setSettingsLegacyPromptInjections({})
     setSettingsPromptDefaults({})
     setSettingsPromptStep('')
     void loadProjectIdentity()
@@ -2065,9 +2061,7 @@ export default function App() {
     setSettingsPromptOverrides(promptOverrides)
     setSettingsPromptOverridesBaseline(promptOverrides)
     setSettingsPromptOverrideClears({})
-    setSettingsPromptInjections(promptInjections)
-    setSettingsPromptInjectionsBaseline(promptInjections)
-    setSettingsPromptInjectionClears({})
+    setSettingsLegacyPromptInjections(promptInjections)
     setSettingsPromptDefaults(promptDefaults)
     const promptSteps = Array.from(
       new Set([...Object.keys(promptDefaults), ...Object.keys(promptOverrides), ...Object.keys(promptInjections)])
@@ -4017,23 +4011,20 @@ export default function App() {
         promptOverridesPayload[step] = ''
       }
       const promptInjectionsPayload: Record<string, string> = {}
-      for (const [rawStep, rawPrompt] of Object.entries(settingsPromptInjections)) {
+      for (const [rawStep, rawPrompt] of Object.entries(settingsLegacyPromptInjections)) {
         const step = String(rawStep || '').trim().toLowerCase()
-        if (!step || typeof rawPrompt !== 'string' || !rawPrompt.trim()) continue
-        promptInjectionsPayload[step] = rawPrompt
-      }
-      const removedInjectionSteps = new Set(
-        Object.keys(settingsPromptInjectionsBaseline)
-          .map((step) => step.trim().toLowerCase())
-          .filter((step) => step && !(step in promptInjectionsPayload))
-      )
-      for (const rawStep of Object.keys(settingsPromptInjectionClears)) {
-        const step = rawStep.trim().toLowerCase()
         if (!step) continue
-        removedInjectionSteps.add(step)
-      }
-      for (const step of removedInjectionSteps) {
-        if (!step || (step in promptInjectionsPayload)) continue
+        if (typeof rawPrompt !== 'string') continue
+        const trimmedInjection = rawPrompt.trim()
+        if (!trimmedInjection) continue
+        const existingOverride = promptOverridesPayload[step]
+        if (!removedOverrideSteps.has(step)) {
+          if (!existingOverride || !existingOverride.trim()) {
+            promptOverridesPayload[step] = rawPrompt
+          } else if (!existingOverride.includes(trimmedInjection)) {
+            promptOverridesPayload[step] = `${existingOverride.trimEnd()}\n\n${rawPrompt}`
+          }
+        }
         promptInjectionsPayload[step] = ''
       }
       const payload = {
@@ -5766,7 +5757,7 @@ export default function App() {
       new Set([
         ...Object.keys(settingsPromptDefaults),
         ...Object.keys(settingsPromptOverrides),
-        ...Object.keys(settingsPromptInjections),
+        ...Object.keys(settingsLegacyPromptInjections),
       ])
     ).sort()
     const activePromptStep = promptSteps.includes(settingsPromptStep)
@@ -5774,8 +5765,6 @@ export default function App() {
       : (promptSteps[0] || '')
     const defaultPromptText = activePromptStep ? (settingsPromptDefaults[activePromptStep] || '') : ''
     const overridePromptText = activePromptStep ? (settingsPromptOverrides[activePromptStep] || '') : ''
-    const injectionPromptText = activePromptStep ? (settingsPromptInjections[activePromptStep] || '') : ''
-    const effectivePromptText = overridePromptText || defaultPromptText
     return (
       <section className="panel">
         <header className="panel-head">
@@ -5849,6 +5838,141 @@ export default function App() {
           <article className="settings-card settings-card-routing">
             <h3>Execution & Routing</h3>
             <form id="settings-main-form" className="form-stack" onSubmit={(event) => void saveSettings(event)}>
+              <p className="settings-subheading">Task Defaults</p>
+              <p className="field-label">
+                Applied to newly created tasks. You can still override these per task.
+              </p>
+              <p className="field-label">Default HITL mode</p>
+              <div className="toggle-group" role="group" aria-label="Default HITL mode">
+                {(['autopilot', 'supervised', 'review_only'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={`toggle-button ${settingsDefaultHitlMode === mode ? 'is-active' : ''}`}
+                    aria-pressed={settingsDefaultHitlMode === mode}
+                    onClick={() => setSettingsDefaultHitlMode(mode)}
+                  >
+                    {humanizeLabel(mode)}
+                  </button>
+                ))}
+              </div>
+
+              <p className="field-label">
+                Controls whether workers may install new dependencies.
+              </p>
+              <div className="toggle-group" role="group" aria-label="Default dependency policy">
+                {(['permissive', 'prudent', 'strict'] as const).map((level) => (
+                  <button
+                    key={level}
+                    type="button"
+                    className={`toggle-button ${settingsDependencyPolicy === level ? 'is-active' : ''}`}
+                    aria-pressed={settingsDependencyPolicy === level}
+                    onClick={() => setSettingsDependencyPolicy(level)}
+                  >
+                    {humanizeLabel(level)}
+                  </button>
+                ))}
+              </div>
+              <p className="field-label">
+                {settingsDependencyPolicy === 'permissive' && 'Workers will prefer well-maintained libraries over manual implementation and install what they need.'}
+                {settingsDependencyPolicy === 'prudent' && 'Workers will prefer existing dependencies but may install new ones when manual implementation would be unreliable or disproportionately complex.'}
+                {settingsDependencyPolicy === 'strict' && 'Workers must not install any new dependencies. All solutions must use only what is already in the project.'}
+              </p>
+
+              <label className="field-label" htmlFor="settings-step-timeout-seconds">Default task timeout (seconds)</label>
+              <input
+                id="settings-step-timeout-seconds"
+                value={settingsStepTimeoutSeconds}
+                onChange={(event) => setSettingsStepTimeoutSeconds(event.target.value)}
+                inputMode="numeric"
+              />
+
+              <p className="field-label">
+                Quality gate thresholds: unresolved findings allowed before a task can pass quality checks.
+              </p>
+              <div className="quality-gate-grid">
+                <div className="quality-gate-row">
+                  <div>
+                    <p className="quality-gate-label">
+                      <span className="quality-severity-badge severity-critical">Critical</span>
+                    </p>
+                    <p className="field-label">Release-blocking or security-critical issues.</p>
+                  </div>
+                  <div className="quality-gate-input-wrap">
+                    <label className="field-label" htmlFor="quality-gate-critical-input">Allowed unresolved</label>
+                    <input
+                      id="quality-gate-critical-input"
+                      aria-label="Quality gate critical"
+                      value={settingsGateCritical}
+                      onChange={(event) => setSettingsGateCritical(event.target.value)}
+                      inputMode="numeric"
+                    />
+                  </div>
+                </div>
+                <div className="quality-gate-row">
+                  <div>
+                    <p className="quality-gate-label">
+                      <span className="quality-severity-badge severity-high">High</span>
+                    </p>
+                    <p className="field-label">Major correctness or reliability problems.</p>
+                  </div>
+                  <div className="quality-gate-input-wrap">
+                    <label className="field-label" htmlFor="quality-gate-high-input">Allowed unresolved</label>
+                    <input
+                      id="quality-gate-high-input"
+                      aria-label="Quality gate high"
+                      value={settingsGateHigh}
+                      onChange={(event) => setSettingsGateHigh(event.target.value)}
+                      inputMode="numeric"
+                    />
+                  </div>
+                </div>
+                <div className="quality-gate-row">
+                  <div>
+                    <p className="quality-gate-label">
+                      <span className="quality-severity-badge severity-medium">Medium</span>
+                    </p>
+                    <p className="field-label">Important issues that should be addressed soon.</p>
+                  </div>
+                  <div className="quality-gate-input-wrap">
+                    <label className="field-label" htmlFor="quality-gate-medium-input">Allowed unresolved</label>
+                    <input
+                      id="quality-gate-medium-input"
+                      aria-label="Quality gate medium"
+                      value={settingsGateMedium}
+                      onChange={(event) => setSettingsGateMedium(event.target.value)}
+                      inputMode="numeric"
+                    />
+                  </div>
+                </div>
+                <div className="quality-gate-row">
+                  <div>
+                    <p className="quality-gate-label">
+                      <span className="quality-severity-badge severity-low">Low</span>
+                    </p>
+                    <p className="field-label">Minor issues, cleanup, and polish improvements.</p>
+                  </div>
+                  <div className="quality-gate-input-wrap">
+                    <label className="field-label" htmlFor="quality-gate-low-input">Allowed unresolved</label>
+                    <input
+                      id="quality-gate-low-input"
+                      aria-label="Quality gate low"
+                      value={settingsGateLow}
+                      onChange={(event) => setSettingsGateLow(event.target.value)}
+                      inputMode="numeric"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <p className="settings-subheading">Execution Controls</p>
+              <label className="field-label" htmlFor="settings-review-attempts">Max review attempts</label>
+              <input
+                id="settings-review-attempts"
+                value={settingsMaxReviewAttempts}
+                onChange={(event) => setSettingsMaxReviewAttempts(event.target.value)}
+                inputMode="numeric"
+              />
               <label className="field-label" htmlFor="settings-concurrency">Orchestrator concurrency</label>
               <input
                 id="settings-concurrency"
@@ -5864,77 +5988,8 @@ export default function App() {
                 />
                 Auto dependency analysis
               </label>
-              <label className="field-label" htmlFor="settings-review-attempts">Max review attempts</label>
-              <input
-                id="settings-review-attempts"
-                value={settingsMaxReviewAttempts}
-                onChange={(event) => setSettingsMaxReviewAttempts(event.target.value)}
-                inputMode="numeric"
-              />
-              <label className="field-label" htmlFor="settings-step-timeout-seconds">Default task timeout (seconds)</label>
-              <input
-                id="settings-step-timeout-seconds"
-                value={settingsStepTimeoutSeconds}
-                onChange={(event) => setSettingsStepTimeoutSeconds(event.target.value)}
-                inputMode="numeric"
-              />
-              <p className="settings-subheading">Role Routing</p>
-              <label className="field-label" htmlFor="settings-default-role">Default role</label>
-              <input
-                id="settings-default-role"
-                value={settingsDefaultRole}
-                onChange={(event) => setSettingsDefaultRole(event.target.value)}
-                placeholder="general"
-              />
-              <label className="field-label" htmlFor="settings-task-type-roles">Task type role map (JSON object)</label>
-              <p className="field-label">Maps <code>task_type</code> {'->'} <code>role</code>. Unmapped task types use Default role.</p>
-              <div className="json-editor-group">
-                <textarea
-                  id="settings-task-type-roles"
-                  className="json-editor-textarea"
-                  rows={4}
-                  value={settingsTaskTypeRoles}
-                  onChange={(event) => setSettingsTaskTypeRoles(event.target.value)}
-                  placeholder={TASK_TYPE_ROLE_MAP_EXAMPLE}
-                />
-                <div className="inline-actions json-editor-actions">
-                  <button
-                    className="button"
-                    type="button"
-                    onClick={() => handleFormatJsonField('Task type role map', settingsTaskTypeRoles, setSettingsTaskTypeRoles)}
-                  >
-                    Format
-                  </button>
-                  <button className="button" type="button" onClick={() => setSettingsTaskTypeRoles('')}>
-                    Clear
-                  </button>
-                </div>
-              </div>
-              <label className="field-label" htmlFor="settings-role-overrides">Role provider overrides (JSON object)</label>
-              <p className="field-label">Maps <code>role</code> {'->'} <code>provider</code> when that role executes.</p>
-              <div className="json-editor-group">
-                <textarea
-                  id="settings-role-overrides"
-                  className="json-editor-textarea"
-                  rows={4}
-                  value={settingsRoleProviderOverrides}
-                  onChange={(event) => setSettingsRoleProviderOverrides(event.target.value)}
-                  placeholder={ROLE_PROVIDER_OVERRIDES_EXAMPLE}
-                />
-                <div className="inline-actions json-editor-actions">
-                  <button
-                    className="button"
-                    type="button"
-                    onClick={() => handleFormatJsonField('Role provider overrides', settingsRoleProviderOverrides, setSettingsRoleProviderOverrides)}
-                  >
-                    Format
-                  </button>
-                  <button className="button" type="button" onClick={() => setSettingsRoleProviderOverrides('')}>
-                    Clear
-                  </button>
-                </div>
-              </div>
-              <p className="settings-subheading">Worker Routing</p>
+
+              <p className="settings-subheading">Worker Selection</p>
               <label className="field-label" htmlFor="settings-worker-default">Default worker provider</label>
               <select
                 id="settings-worker-default"
@@ -5945,6 +6000,7 @@ export default function App() {
                 <option value="ollama">ollama</option>
                 <option value="claude">claude</option>
               </select>
+              <p className="settings-subheading">Provider Configuration</p>
               <label className="field-label" htmlFor="settings-provider-view">Configure provider</label>
               <select
                 id="settings-provider-view"
@@ -6050,6 +6106,7 @@ export default function App() {
                   </div>
                 ) : null}
               </div>
+
               <p className="settings-subheading">Project Commands</p>
               <label className="field-label" htmlFor="settings-project-commands">Project commands by language (YAML format)</label>
               <p className="field-label">
@@ -6084,9 +6141,10 @@ export default function App() {
                   </button>
                 </div>
               </div>
-              <p className="settings-subheading">Step Prompt Injections</p>
+
+              <p className="settings-subheading">Advanced Prompting</p>
               <p className="field-label">
-                Review and override per-step instruction prompts, and optionally append additional project-specific prompt injection text.
+                Review per-step built-in instructions and optionally define an override.
               </p>
               <label className="field-label" htmlFor="settings-step-prompt-step">Pipeline step</label>
               <select
@@ -6160,182 +6218,64 @@ export default function App() {
                   </button>
                 </div>
               </div>
-              <label className="field-label" htmlFor="settings-step-prompt-injection">Additional injection (optional)</label>
+
+              <p className="settings-subheading">Advanced Role Routing</p>
+              <label className="field-label" htmlFor="settings-default-role">Default role</label>
+              <input
+                id="settings-default-role"
+                value={settingsDefaultRole}
+                onChange={(event) => setSettingsDefaultRole(event.target.value)}
+                placeholder="general"
+              />
+              <label className="field-label" htmlFor="settings-task-type-roles">Task type role map (JSON object)</label>
+              <p className="field-label">Maps <code>task_type</code> {'->'} <code>role</code>. Unmapped task types use Default role.</p>
               <div className="json-editor-group">
                 <textarea
-                  id="settings-step-prompt-injection"
-                  className="json-editor-textarea settings-prompt-textarea"
-                  rows={6}
-                  value={injectionPromptText}
-                  onChange={(event) => {
-                    const nextValue = event.target.value
-                    setSettingsPromptInjections((prev) => {
-                      if (!activePromptStep) return prev
-                      const next = { ...prev }
-                      if (nextValue.trim()) {
-                        next[activePromptStep] = nextValue
-                      } else {
-                        delete next[activePromptStep]
-                      }
-                      return next
-                    })
-                    if (!activePromptStep) return
-                    setSettingsPromptInjectionClears((prev) => {
-                      const next = { ...prev }
-                      if (nextValue.trim()) {
-                        delete next[activePromptStep]
-                      } else {
-                        next[activePromptStep] = true
-                      }
-                      return next
-                    })
-                  }}
-                  placeholder="Optional extra instructions appended for this step."
+                  id="settings-task-type-roles"
+                  className="json-editor-textarea"
+                  rows={4}
+                  value={settingsTaskTypeRoles}
+                  onChange={(event) => setSettingsTaskTypeRoles(event.target.value)}
+                  placeholder={TASK_TYPE_ROLE_MAP_EXAMPLE}
                 />
                 <div className="inline-actions json-editor-actions">
                   <button
                     className="button"
                     type="button"
                     onClick={() => {
-                      if (!activePromptStep) return
-                      setSettingsPromptInjections((prev) => {
-                        const next = { ...prev }
-                        delete next[activePromptStep]
-                        return next
-                      })
-                      setSettingsPromptInjectionClears((prev) => ({ ...prev, [activePromptStep]: true }))
+                      handleFormatJsonField('Task type role map', settingsTaskTypeRoles, setSettingsTaskTypeRoles)
                     }}
-                    disabled={!activePromptStep || !injectionPromptText}
                   >
-                    Clear injection
+                    Format
+                  </button>
+                  <button className="button" type="button" onClick={() => setSettingsTaskTypeRoles('')}>
+                    Clear
                   </button>
                 </div>
               </div>
-              <label className="field-label" htmlFor="settings-step-prompt-effective">Effective prompt</label>
-              <textarea
-                id="settings-step-prompt-effective"
-                className="settings-prompt-textarea"
-                rows={10}
-                value={effectivePromptText}
-                readOnly
-                placeholder="No effective prompt available for this step."
-              />
-              <p className="settings-subheading">Quality Gate</p>
-              <p className="field-label">
-                Define how many unresolved findings can remain before a task can pass the quality gate. Use `0` to require all findings at that severity to be fixed.
-              </p>
-              <div className="quality-gate-grid">
-                <div className="quality-gate-row">
-                  <div>
-                    <p className="quality-gate-label">
-                      <span className="quality-severity-badge severity-critical">Critical</span>
-                    </p>
-                    <p className="field-label">Release-blocking or security-critical issues.</p>
-                  </div>
-                  <div className="quality-gate-input-wrap">
-                    <label className="field-label" htmlFor="quality-gate-critical-input">Allowed unresolved</label>
-                    <input
-                      id="quality-gate-critical-input"
-                      aria-label="Quality gate critical"
-                      value={settingsGateCritical}
-                      onChange={(event) => setSettingsGateCritical(event.target.value)}
-                      inputMode="numeric"
-                    />
-                  </div>
-                </div>
-                <div className="quality-gate-row">
-                  <div>
-                    <p className="quality-gate-label">
-                      <span className="quality-severity-badge severity-high">High</span>
-                    </p>
-                    <p className="field-label">Major correctness or reliability problems.</p>
-                  </div>
-                  <div className="quality-gate-input-wrap">
-                    <label className="field-label" htmlFor="quality-gate-high-input">Allowed unresolved</label>
-                    <input
-                      id="quality-gate-high-input"
-                      aria-label="Quality gate high"
-                      value={settingsGateHigh}
-                      onChange={(event) => setSettingsGateHigh(event.target.value)}
-                      inputMode="numeric"
-                    />
-                  </div>
-                </div>
-                <div className="quality-gate-row">
-                  <div>
-                    <p className="quality-gate-label">
-                      <span className="quality-severity-badge severity-medium">Medium</span>
-                    </p>
-                    <p className="field-label">Important issues that should be addressed soon.</p>
-                  </div>
-                  <div className="quality-gate-input-wrap">
-                    <label className="field-label" htmlFor="quality-gate-medium-input">Allowed unresolved</label>
-                    <input
-                      id="quality-gate-medium-input"
-                      aria-label="Quality gate medium"
-                      value={settingsGateMedium}
-                      onChange={(event) => setSettingsGateMedium(event.target.value)}
-                      inputMode="numeric"
-                    />
-                  </div>
-                </div>
-                <div className="quality-gate-row">
-                  <div>
-                    <p className="quality-gate-label">
-                      <span className="quality-severity-badge severity-low">Low</span>
-                    </p>
-                    <p className="field-label">Minor issues, cleanup, and polish improvements.</p>
-                  </div>
-                  <div className="quality-gate-input-wrap">
-                    <label className="field-label" htmlFor="quality-gate-low-input">Allowed unresolved</label>
-                    <input
-                      id="quality-gate-low-input"
-                      aria-label="Quality gate low"
-                      value={settingsGateLow}
-                      onChange={(event) => setSettingsGateLow(event.target.value)}
-                      inputMode="numeric"
-                    />
-                  </div>
-                </div>
-              </div>
-              <p className="settings-subheading">Dependency Policy</p>
-              <p className="field-label">
-                Controls whether workers may install new dependencies. Applies as the default for newly created tasks.
-              </p>
-              <div className="toggle-group" role="group" aria-label="Default dependency policy">
-                {(['permissive', 'prudent', 'strict'] as const).map((level) => (
+              <label className="field-label" htmlFor="settings-role-overrides">Role provider overrides (JSON object)</label>
+              <p className="field-label">Maps <code>role</code> {'->'} <code>provider</code> when that role executes.</p>
+              <div className="json-editor-group">
+                <textarea
+                  id="settings-role-overrides"
+                  className="json-editor-textarea"
+                  rows={4}
+                  value={settingsRoleProviderOverrides}
+                  onChange={(event) => setSettingsRoleProviderOverrides(event.target.value)}
+                  placeholder={ROLE_PROVIDER_OVERRIDES_EXAMPLE}
+                />
+                <div className="inline-actions json-editor-actions">
                   <button
-                    key={level}
+                    className="button"
                     type="button"
-                    className={`toggle-button ${settingsDependencyPolicy === level ? 'is-active' : ''}`}
-                    aria-pressed={settingsDependencyPolicy === level}
-                    onClick={() => setSettingsDependencyPolicy(level)}
+                    onClick={() => handleFormatJsonField('Role provider overrides', settingsRoleProviderOverrides, setSettingsRoleProviderOverrides)}
                   >
-                    {humanizeLabel(level)}
+                    Format
                   </button>
-                ))}
-              </div>
-              <p className="field-label">
-                {settingsDependencyPolicy === 'permissive' && 'Workers will prefer well-maintained libraries over manual implementation and install what they need.'}
-                {settingsDependencyPolicy === 'prudent' && 'Workers will prefer existing dependencies but may install new ones when manual implementation would be unreliable or disproportionately complex.'}
-                {settingsDependencyPolicy === 'strict' && 'Workers must not install any new dependencies. All solutions must use only what is already in the project.'}
-              </p>
-              <p className="settings-subheading">Default HITL Mode</p>
-              <p className="field-label">
-                Applies to newly created tasks. You can still override per task.
-              </p>
-              <div className="toggle-group" role="group" aria-label="Default HITL mode">
-                {(['autopilot', 'supervised', 'review_only'] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    className={`toggle-button ${settingsDefaultHitlMode === mode ? 'is-active' : ''}`}
-                    aria-pressed={settingsDefaultHitlMode === mode}
-                    onClick={() => setSettingsDefaultHitlMode(mode)}
-                  >
-                    {humanizeLabel(mode)}
+                  <button className="button" type="button" onClick={() => setSettingsRoleProviderOverrides('')}>
+                    Clear
                   </button>
-                ))}
+                </div>
               </div>
             </form>
           </article>
@@ -6883,6 +6823,12 @@ export default function App() {
                       </option>
                     ))}
                   </select>
+                  <label className="field-label">HITL mode</label>
+                  <HITLModeSelector
+                    currentMode={newTaskHitlMode}
+                    onModeChange={setNewTaskHitlMode}
+                    projectDir={projectDir}
+                  />
                   <label className="field-label" htmlFor="task-project-commands">Project commands override (optional)</label>
                   <textarea
                     id="task-project-commands"
@@ -6898,12 +6844,6 @@ export default function App() {
                   <details className="advanced-fields">
                     <summary>Advanced</summary>
                     <div className="form-stack advanced-fields-body">
-                      <label className="field-label">HITL mode</label>
-                      <HITLModeSelector
-                        currentMode={newTaskHitlMode}
-                        onModeChange={setNewTaskHitlMode}
-                        projectDir={projectDir}
-                      />
                       <label className="field-label">Priority</label>
                       <div className="toggle-group" role="group" aria-label="Task priority">
                         {['P0', 'P1', 'P2', 'P3'].map((priority) => (
