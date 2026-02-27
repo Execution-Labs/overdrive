@@ -96,7 +96,7 @@ describe('App default route', () => {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10 },
+            orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10, step_timeout_seconds: 600 },
             agent_routing: { default_role: 'general', task_type_roles: {}, role_provider_overrides: {} },
             workers: { default: 'codex', routing: {}, providers: { codex: { type: 'codex', command: 'codex exec' } } },
             defaults: { quality_gate: { critical: 0, high: 0, medium: 0, low: 0 }, dependency_policy: 'prudent' },
@@ -163,7 +163,7 @@ describe('App default route', () => {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10 },
+            orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10, step_timeout_seconds: 600 },
             agent_routing: { default_role: 'general', task_type_roles: {}, role_provider_overrides: {} },
             workers: { default: 'codex', routing: {}, providers: { codex: { type: 'codex', command: 'codex exec' } } },
             defaults: { quality_gate: { critical: 0, high: 0, medium: 0, low: 0 }, dependency_policy: 'prudent' },
@@ -258,6 +258,57 @@ describe('App default route', () => {
       expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/workers/health'))).toBe(true)
       expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/workers/routing'))).toBe(true)
     })
+  })
+
+  it('does not show awaiting approval badge for cancelled tasks', async () => {
+    const mockedFetch = vi.fn().mockImplementation((url) => {
+      const u = String(url)
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            columns: {
+              backlog: [],
+              queued: [],
+              in_progress: [],
+              in_review: [],
+              blocked: [],
+              done: [],
+              cancelled: [
+                {
+                  id: 'task-cancelled-1',
+                  title: 'Cancelled task',
+                  status: 'cancelled',
+                  priority: 'P2',
+                  task_type: 'feature',
+                  pending_gate: 'before_implement',
+                  blocked_by: [],
+                  blocks: [],
+                },
+              ],
+            },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      if (u.includes('/api/agents')) return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      if (u.includes('/api/projects')) return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+    global.fetch = mockedFetch as unknown as typeof fetch
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /cancelled task/i })).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/Awaiting approval/i)).toBeNull()
   })
 
   it('submits task_type and advanced create fields from Create Task form', async () => {
@@ -1019,7 +1070,7 @@ describe('App default route', () => {
     })
   })
 
-  it('supports bounded font size controls in task detail plan view', async () => {
+  it('shows plan content without font size controls in task detail plan view', async () => {
     const task = {
       id: 'task-1',
       title: 'Task 1',
@@ -1095,32 +1146,72 @@ describe('App default route', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: /^Plan$/i }))
 
-    const increaseButton = await screen.findByRole('button', { name: /Increase plan font size/i })
-    const decreaseButton = await screen.findByRole('button', { name: /Decrease plan font size/i })
     await waitFor(() => {
       expect(screen.getByText('Plan heading')).toBeInTheDocument()
     })
+    expect(screen.queryByRole('button', { name: /Increase plan font size/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Decrease plan font size/i })).not.toBeInTheDocument()
+  })
 
-    const planContent = document.querySelector('.plan-content-field.rendered-markdown') as HTMLDivElement
-    expect(planContent).toBeTruthy()
-    expect(planContent.style.fontSize).toBe('0.84rem')
-
-    for (let i = 0; i < 10; i += 1) {
-      fireEvent.click(increaseButton)
+  it('shows awaiting approval badge on board cards and opens plan tab for before_implement', async () => {
+    const task = {
+      id: 'task-1',
+      title: 'Task 1',
+      description: 'Plan and execute',
+      priority: 'P2',
+      status: 'in_progress',
+      task_type: 'feature',
+      blocked_by: [],
+      blocks: [],
+      pending_gate: 'before_implement',
     }
-    await waitFor(() => {
-      expect(increaseButton).toBeDisabled()
+    const mockedFetch = vi.fn().mockImplementation((url, init) => {
+      const u = String(url)
+      const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ columns: { backlog: [], queued: [], in_progress: [task], in_review: [], blocked: [], done: [] } }),
+        })
+      }
+      if (u.includes('/api/tasks/task-1') && method === 'GET') {
+        return Promise.resolve({ ok: true, json: async () => ({ task }) })
+      }
+      if (u.includes('/api/tasks/task-1/plan') && method === 'GET') {
+        return Promise.resolve({ ok: true, json: async () => ({ task_id: 'task-1', revisions: [] }) })
+      }
+      if (u.includes('/api/tasks/task-1/plan/jobs') && method === 'GET') {
+        return Promise.resolve({ ok: true, json: async () => ({ jobs: [] }) })
+      }
+      if (u.includes('/api/tasks/task-1/workdoc') && method === 'GET') {
+        return Promise.resolve({ ok: true, json: async () => ({ task_id: 'task-1', content: '', exists: false }) })
+      }
+      if (u.includes('/api/collaboration/timeline/task-1')) return Promise.resolve({ ok: true, json: async () => ({ events: [] }) })
+      if (u.includes('/api/collaboration/feedback/task-1')) return Promise.resolve({ ok: true, json: async () => ({ feedback: [] }) })
+      if (u.includes('/api/collaboration/comments/task-1')) return Promise.resolve({ ok: true, json: async () => ({ comments: [] }) })
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [task] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 1, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      if (u.includes('/api/agents')) return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      if (u.includes('/api/projects')) return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      return Promise.resolve({ ok: true, json: async () => ({}) })
     })
-    expect(planContent.style.fontSize).toBe('1.08rem')
+    global.fetch = mockedFetch as unknown as typeof fetch
 
-    for (let i = 0; i < 10; i += 1) {
-      fireEvent.click(decreaseButton)
-    }
+    render(<App />)
+
     await waitFor(() => {
-      expect(decreaseButton).toBeDisabled()
+      expect(screen.getByText('Awaiting approval')).toBeInTheDocument()
     })
-    expect(planContent.style.fontSize).toBe('0.72rem')
-    expect(screen.getByText('Plan heading')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Task 1'))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Plan$/i })).toBeInTheDocument()
+    })
   })
 
   it('refreshes surfaces when websocket events arrive', async () => {

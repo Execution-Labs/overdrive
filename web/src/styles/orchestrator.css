@@ -311,6 +311,12 @@ a:focus-visible {
   flex-shrink: 0;
 }
 
+.refine-banner.refine-banner-done {
+  background: #e8f4ea;
+  border-color: #9cc8a6;
+  color: #205c2d;
+}
+
 @keyframes refine-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
@@ -454,6 +460,11 @@ a:focus-visible {
 .task-card-button:hover {
   border-color: #8cb59b;
   box-shadow: 0 8px 18px rgba(18, 35, 26, 0.08);
+}
+
+.task-card-awaiting-gate {
+  border-color: #d09a39;
+  background: #fff9eb;
 }
 
 .task-card-button:active {
@@ -1057,6 +1068,10 @@ textarea {
 .status-pill.status-pill-inline {
   font-size: 0.68rem;
   margin-left: 0.35rem;
+}
+
+.status-pill.status-pill-no-offset {
+  margin-left: 0;
 }
 
 /* ── Step badge (task detail header) ── */
@@ -2035,8 +2050,15 @@ textarea {
 .plan-content-field.rendered-markdown {
   max-height: 36rem;
   overflow-y: auto;
-  font-size: 0.84rem;
+  font-size: 0.78rem;
 }
+
+.plan-content-field.rendered-markdown h1 { font-size: 1.55em; }
+.plan-content-field.rendered-markdown h2 { font-size: 1.35em; }
+.plan-content-field.rendered-markdown h3 { font-size: 1.18em; }
+.plan-content-field.rendered-markdown h4 { font-size: 1.05em; }
+.plan-content-field.rendered-markdown h5,
+.plan-content-field.rendered-markdown h6 { font-size: 1em; }
 
 /* ── Diff viewer ──────────────────────────────────────── */
 .log-step-selector {
@@ -2375,10 +2397,45 @@ textarea {
   background: var(--color-warning-50);
 }
 
+.plan-gate-banner .field-label {
+  margin: 0 0 0.35rem;
+}
+
+.plan-tab-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.9rem;
+  margin-bottom: 0;
+  flex-wrap: wrap;
+  padding: 0.2rem 0 0.45rem;
+}
+
 .plan-tab-mode-switcher {
   display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
+  align-items: stretch;
+  border: 1px solid var(--color-border-default);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--color-bg-primary);
+}
+
+.plan-tab-mode-switcher .button {
+  border: 0;
+  border-right: 1px solid var(--color-border-default);
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.plan-tab-mode-switcher .button:last-child {
+  border-right: 0;
+}
+
+.plan-tab-mode-switcher .button:hover {
+  background: rgba(18, 35, 26, 0.06);
+  color: var(--color-text-primary);
 }
 
 .plan-tab-mode-switcher .button.is-active {
@@ -2386,15 +2443,8 @@ textarea {
   color: var(--color-text-inverse);
 }
 
-.plan-font-size-controls {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin-bottom: 0.5rem;
-}
-
-.plan-font-size-controls .field-label {
-  margin: 0;
+.form-stack > .plan-tab-toolbar {
+  margin-bottom: 0;
 }
 
 .plan-tab-commit-bar {

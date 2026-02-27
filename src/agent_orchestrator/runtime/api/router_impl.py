@@ -18,9 +18,9 @@ from ...collaboration.modes import MODE_CONFIGS
 from ...pipelines.registry import PipelineRegistry
 from ...workers.config import WorkerProviderSpec, get_workers_runtime_config
 from ...workers.diagnostics import test_worker
+from ...collaboration.modes import normalize_hitl_mode
 from ..domain.models import (
     AgentRecord,
-    ApprovalMode,
     DependencyPolicy,
     Priority,
     Task,
@@ -50,11 +50,11 @@ class CreateTaskRequest(BaseModel):
     blocked_by: list[str] = Field(default_factory=list)
     parent_id: Optional[str] = None
     pipeline_template: Optional[list[str]] = None
-    approval_mode: str = "human_review"
-    hitl_mode: str = "autopilot"
+    hitl_mode: Optional[str] = None
     dependency_policy: str = ""
     source: str = "manual"
     worker_model: Optional[str] = None
+    step_timeout_seconds: Optional[int] = Field(None, ge=1, le=7200)
     metadata: dict[str, Any] = Field(default_factory=dict)
     project_commands: Optional[dict[str, dict[str, str]]] = None
     classifier_pipeline_id: Optional[str] = None
@@ -88,10 +88,10 @@ class UpdateTaskRequest(BaseModel):
     status: Optional[str] = None
     labels: Optional[list[str]] = None
     blocked_by: Optional[list[str]] = None
-    approval_mode: Optional[str] = None
     hitl_mode: Optional[str] = None
     dependency_policy: Optional[str] = None
     worker_model: Optional[str] = None
+    step_timeout_seconds: Optional[int] = Field(None, ge=1, le=7200)
     metadata: Optional[dict[str, Any]] = None
     project_commands: Optional[dict[str, dict[str, str]]] = None
 
@@ -175,6 +175,8 @@ class GenerateTasksRequest(BaseModel):
 class ApproveGateRequest(BaseModel):
     """Request body for clearing a pending human gate on the active task."""
     gate: Optional[str] = None
+    action: Literal["approve", "request_changes"] = "approve"
+    guidance: Optional[str] = None
 
 
 class OrchestratorControlRequest(BaseModel):
@@ -187,6 +189,11 @@ class OrchestratorSettingsRequest(BaseModel):
     concurrency: int = Field(2, ge=1, le=128)
     auto_deps: bool = True
     max_review_attempts: int = Field(10, ge=1, le=50)
+    step_timeout_seconds: int = Field(600, ge=1, le=7200)
+    gate_reminder_minutes: int = Field(30, ge=0, le=10080)
+    gate_stale_minutes: int = Field(0, ge=0, le=10080)
+    gate_max_wait_minutes: int = Field(0, ge=0, le=43200)
+    gate_timeout_action: Literal["none", "block"] = "none"
 
 
 class AgentRoutingSettingsRequest(BaseModel):
@@ -234,6 +241,7 @@ class DefaultsSettingsRequest(BaseModel):
         low=0,
     )
     dependency_policy: str = "prudent"
+    hitl_mode: str = "autopilot"
 
 
 class LanguageCommandsRequest(BaseModel):
@@ -310,6 +318,22 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
 
 IMPORT_JOB_TTL_SECONDS = 60 * 60 * 24
 IMPORT_JOB_MAX_RECORDS = 200
+_GATE_DISPLAY_LABELS: dict[str, str] = {
+    "before_implement": "Plan ready.",
+    "before_generate_tasks": "Plan ready to generate tasks.",
+    "before_done": "Work complete.",
+    "after_implement": "Implementation complete; approval required",
+    "before_commit": "Implementation completed.",
+    "human_intervention": "Human intervention required",
+}
+
+
+def humanize_label(value: str | None) -> str:
+    """Convert snake_case identifiers into a title-cased human label."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return raw.replace("_", " ").strip().capitalize()
 
 
 def _priority_rank(priority: str) -> int:
@@ -605,7 +629,38 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
 
 def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[str, Any]:
     payload = task.to_dict()
+    payload["hitl_mode"] = normalize_hitl_mode(str(payload.get("hitl_mode") or "autopilot"))
     metadata = task.metadata if isinstance(task.metadata, dict) else {}
+    step_timeout_seconds: int | None = None
+    raw_step_timeouts = metadata.get("step_timeouts")
+    if isinstance(raw_step_timeouts, dict):
+        for key in ("implement", "implement_fix"):
+            if key not in raw_step_timeouts:
+                continue
+            raw_candidate = raw_step_timeouts.get(key)
+            if raw_candidate is None:
+                continue
+            try:
+                candidate = int(raw_candidate)
+            except (TypeError, ValueError):
+                continue
+            if candidate > 0:
+                step_timeout_seconds = candidate
+                break
+    payload["step_timeout_seconds"] = step_timeout_seconds
+    pending_gate = str(task.pending_gate or "").strip() or None
+    gate_display = _GATE_DISPLAY_LABELS.get(pending_gate or "", humanize_label(pending_gate) if pending_gate else None)
+    payload["gate_context"] = {
+        "is_waiting": bool(pending_gate),
+        "gate": pending_gate,
+        "display": gate_display,
+        "step": str(task.current_step or metadata.get("pipeline_phase") or "").strip() or None,
+        "status_kind": (
+            "intervention_wait"
+            if pending_gate == "human_intervention"
+            else ("approval_wait" if pending_gate else None)
+        ),
+    }
     payload["human_blocking_issues"] = _normalize_human_blocking_issues(metadata.get("human_blocking_issues"))
     raw_actions = metadata.get("human_review_actions")
     payload["human_review_actions"] = list(raw_actions) if isinstance(raw_actions, list) else []
@@ -617,6 +672,14 @@ def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[s
         if summary is not None:
             payload["execution_summary"] = summary
     return payload
+
+
+def _gate_display_label(gate: str | None) -> str:
+    """Return a user-facing gate label for API/UI messages."""
+    raw = str(gate or "").strip()
+    if not raw:
+        return "approval gate"
+    return _GATE_DISPLAY_LABELS.get(raw, humanize_label(raw))
 
 
 def _safe_state_path(raw_path: Any, state_root: Path) -> Optional[Path]:
@@ -829,11 +892,29 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     prompt_defaults = get_configurable_step_prompt_defaults()
     prompt_overrides = _normalize_prompt_overrides(project_cfg.get("prompt_overrides"))
     prompt_injections = _normalize_prompt_injections(project_cfg.get("prompt_injections"))
+    default_hitl_mode = normalize_hitl_mode(str(defaults.get("hitl_mode") or "autopilot"))
     return {
         "orchestrator": {
             "concurrency": _coerce_int(orchestrator.get("concurrency"), 2, minimum=1, maximum=128),
             "auto_deps": _coerce_bool(orchestrator.get("auto_deps"), True),
             "max_review_attempts": _coerce_int(orchestrator.get("max_review_attempts"), 10, minimum=1, maximum=50),
+            "step_timeout_seconds": _coerce_int(
+                orchestrator.get("step_timeout_seconds"), 600, minimum=1, maximum=7200
+            ),
+            "gate_reminder_minutes": _coerce_int(
+                orchestrator.get("gate_reminder_minutes"), 30, minimum=0, maximum=10080
+            ),
+            "gate_stale_minutes": _coerce_int(
+                orchestrator.get("gate_stale_minutes"), 0, minimum=0, maximum=10080
+            ),
+            "gate_max_wait_minutes": _coerce_int(
+                orchestrator.get("gate_max_wait_minutes"), 0, minimum=0, maximum=43200
+            ),
+            "gate_timeout_action": (
+                str(orchestrator.get("gate_timeout_action") or "none").strip().lower()
+                if str(orchestrator.get("gate_timeout_action") or "none").strip().lower() in {"none", "block"}
+                else "none"
+            ),
         },
         "agent_routing": {
             "default_role": str(routing.get("default_role") or "general"),
@@ -848,6 +929,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
                 "low": _coerce_int(quality_gate.get("low"), 0, minimum=0),
             },
             "dependency_policy": str(defaults.get("dependency_policy") or "prudent") if str(defaults.get("dependency_policy") or "prudent") in ("permissive", "prudent", "strict") else "prudent",
+            "hitl_mode": default_hitl_mode,
         },
         "workers": {
             "default": workers_default,

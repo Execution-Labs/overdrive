@@ -57,8 +57,7 @@ function installFetchMock(options?: {
         action: 'Provide token',
       },
     ],
-    approval_mode: 'human_review',
-    hitl_mode: 'autopilot',
+        hitl_mode: 'autopilot',
   }
   let terminalTask = {
     id: 'task-d1',
@@ -87,7 +86,7 @@ function installFetchMock(options?: {
   }
 
   const settingsPayload = {
-    orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10 },
+    orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10, step_timeout_seconds: 600 },
     agent_routing: {
       default_role: 'general',
       task_type_roles: {},
@@ -143,7 +142,11 @@ function installFetchMock(options?: {
         pending_gate: undefined,
         human_blocking_issues: [],
       }
-      return jsonResponse({ task })
+      return jsonResponse({
+        task,
+        message: 'Approved Human Review. Task will resume shortly.',
+        approved_at: '2026-02-22T00:00:00Z',
+      })
     }
     if (u.includes('/api/tasks/task-d1') && method === 'DELETE') {
       terminalDeleted = true
@@ -559,6 +562,7 @@ describe('App action coverage', () => {
       expect(body.orchestrator.concurrency).toBe(4)
       expect(body.orchestrator.auto_deps).toBe(false)
       expect(body.orchestrator.max_review_attempts).toBe(5)
+      expect(body.orchestrator.step_timeout_seconds).toBe(600)
       expect(body.defaults.quality_gate).toEqual({ critical: 1, high: 2, medium: 3, low: 4 })
       expect(body.agent_routing.task_type_roles).toEqual({ bug: 'debugger' })
       expect(body.workers.default).toBe('claude')
@@ -740,5 +744,150 @@ describe('App action coverage', () => {
       const body = JSON.parse(String((commitCall?.[1] as RequestInit).body))
       expect(body.job_id).toBe('job-1')
     })
+  })
+
+  it('treats already-approved gate as silent no-op', async () => {
+    const jsonResponse = (payload: unknown) => Promise.resolve({ ok: true, json: async () => payload })
+    const mockedFetch = vi.fn().mockImplementation((url, init) => {
+      const u = String(url)
+      const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+      const task = {
+        id: 'task-1',
+        title: 'Task 1',
+        description: 'Ship task controls',
+        priority: 'P2',
+        status: 'queued',
+        task_type: 'feature',
+        labels: ['ui'],
+        blocked_by: [],
+        blocks: [],
+        pending_gate: 'human_review',
+                hitl_mode: 'autopilot',
+      }
+      if (u === '/' || u.startsWith('/?')) return jsonResponse({ project_id: 'repo-alpha' })
+      if (u.includes('/api/collaboration/modes')) return jsonResponse({ modes: [] })
+      if (u.includes('/api/tasks/board')) {
+        return jsonResponse({ columns: { backlog: [], queued: [task], in_progress: [], in_review: [], blocked: [], done: [] } })
+      }
+      if (u.includes('/api/tasks/task-1') && method === 'GET') return jsonResponse({ task })
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) return jsonResponse({ tasks: [task] })
+      if (u.includes('/api/tasks/task-1/approve-gate') && method === 'POST') {
+        return Promise.resolve({
+          ok: false,
+          status: 400,
+          statusText: 'Bad Request',
+          json: async () => ({ detail: 'No pending gate on this task' }),
+        })
+      }
+      if (u.includes('/api/orchestrator/status')) return jsonResponse({ status: 'running', queue_depth: 1, in_progress: 0, draining: false, run_branch: null })
+      if (u.includes('/api/metrics')) return jsonResponse({})
+      if (u.includes('/api/workers/health')) return jsonResponse({ providers: [] })
+      if (u.includes('/api/workers/routing')) return jsonResponse({ default: 'codex', rows: [] })
+      if (u.includes('/api/agents')) return jsonResponse({ agents: [] })
+      if (u.includes('/api/projects/pinned')) return jsonResponse({ items: [] })
+      if (u.includes('/api/projects')) return jsonResponse({ projects: [] })
+      if (u.includes('/api/settings')) return jsonResponse({
+        orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10, step_timeout_seconds: 600 },
+        agent_routing: { default_role: 'general', task_type_roles: {}, role_provider_overrides: {} },
+        defaults: { quality_gate: { critical: 0, high: 0, medium: 0, low: 0 }, dependency_policy: 'prudent' },
+        workers: { default: 'codex', default_model: '', routing: {}, providers: { codex: { type: 'codex', command: 'codex exec' } } },
+        project: { commands: {}, prompt_overrides: {}, prompt_injections: {}, prompt_defaults: {} },
+      })
+      if (u.includes('/api/tasks/task-1/plan')) return jsonResponse({ task_id: 'task-1', revisions: [] })
+      if (u.includes('/api/tasks/task-1/plan/jobs')) return jsonResponse({ jobs: [] })
+      if (u.includes('/api/tasks/task-1/workdoc')) return jsonResponse({ task_id: 'task-1', content: '', exists: false })
+      if (u.includes('/api/collaboration/timeline/task-1')) return jsonResponse({ events: [] })
+      if (u.includes('/api/collaboration/feedback/task-1')) return jsonResponse({ feedback: [] })
+      if (u.includes('/api/collaboration/comments/task-1')) return jsonResponse({ comments: [] })
+      return jsonResponse({})
+    })
+    global.fetch = mockedFetch as unknown as typeof fetch
+
+    render(<App />)
+    await waitFor(() => {
+      expect(screen.getByText('Task 1')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Task 1'))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Approve gate/i })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Approve gate/i }))
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Approve gate/i })).not.toBeInTheDocument()
+      expect(screen.queryByText('Gate already approved.')).not.toBeInTheDocument()
+    })
+  })
+
+  it('restores gate CTA when approve request fails', async () => {
+    const jsonResponse = (payload: unknown) => Promise.resolve({ ok: true, json: async () => payload })
+    const mockedFetch = vi.fn().mockImplementation((url, init) => {
+      const u = String(url)
+      const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+      const task = {
+        id: 'task-2',
+        title: 'Task 2',
+        description: 'Finalize commit',
+        priority: 'P2',
+        status: 'in_review',
+        task_type: 'feature',
+        labels: ['ui'],
+        blocked_by: [],
+        blocks: [],
+        pending_gate: null,
+                hitl_mode: 'review_only',
+      }
+      if (u === '/' || u.startsWith('/?')) return jsonResponse({ project_id: 'repo-alpha' })
+      if (u.includes('/api/collaboration/modes')) return jsonResponse({ modes: [] })
+      if (u.includes('/api/tasks/board')) {
+        return jsonResponse({ columns: { backlog: [], queued: [], in_progress: [], in_review: [task], blocked: [], done: [] } })
+      }
+      if (u.includes('/api/tasks/task-2') && method === 'GET') return jsonResponse({ task })
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) return jsonResponse({ tasks: [task] })
+      if (u.includes('/api/review/task-2/approve') && method === 'POST') {
+        return Promise.resolve({
+          ok: false,
+          status: 500,
+          statusText: 'Internal Server Error',
+          json: async () => ({ detail: 'Approval service timeout' }),
+        })
+      }
+      if (u.includes('/api/orchestrator/status')) return jsonResponse({ status: 'running', queue_depth: 0, in_progress: 1, draining: false, run_branch: null })
+      if (u.includes('/api/metrics')) return jsonResponse({})
+      if (u.includes('/api/workers/health')) return jsonResponse({ providers: [] })
+      if (u.includes('/api/workers/routing')) return jsonResponse({ default: 'codex', rows: [] })
+      if (u.includes('/api/agents')) return jsonResponse({ agents: [] })
+      if (u.includes('/api/projects/pinned')) return jsonResponse({ items: [] })
+      if (u.includes('/api/projects')) return jsonResponse({ projects: [] })
+      if (u.includes('/api/settings')) return jsonResponse({
+        orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10, step_timeout_seconds: 600 },
+        agent_routing: { default_role: 'general', task_type_roles: {}, role_provider_overrides: {} },
+        defaults: { quality_gate: { critical: 0, high: 0, medium: 0, low: 0 }, dependency_policy: 'prudent' },
+        workers: { default: 'codex', default_model: '', routing: {}, providers: { codex: { type: 'codex', command: 'codex exec' } } },
+        project: { commands: {}, prompt_overrides: {}, prompt_injections: {}, prompt_defaults: {} },
+      })
+      if (u.includes('/api/tasks/task-2/plan')) return jsonResponse({ task_id: 'task-2', revisions: [] })
+      if (u.includes('/api/tasks/task-2/plan/jobs')) return jsonResponse({ jobs: [] })
+      if (u.includes('/api/tasks/task-2/workdoc')) return jsonResponse({ task_id: 'task-2', content: '', exists: false })
+      if (u.includes('/api/collaboration/timeline/task-2')) return jsonResponse({ events: [] })
+      if (u.includes('/api/collaboration/feedback/task-2')) return jsonResponse({ feedback: [] })
+      if (u.includes('/api/collaboration/comments/task-2')) return jsonResponse({ comments: [] })
+      return jsonResponse({})
+    })
+    global.fetch = mockedFetch as unknown as typeof fetch
+
+    render(<App />)
+    await waitFor(() => {
+      expect(screen.getByText('Task 2')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Task 2'))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Approve$/i })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Approve$/i }))
+    await waitFor(() => {
+      expect(screen.getAllByText(/500 Internal Server Error/i).length).toBeGreaterThan(0)
+    })
+    expect(screen.getByRole('button', { name: /^Approve$/i })).toBeInTheDocument()
   })
 })

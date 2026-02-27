@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from agent_orchestrator.runtime.domain.models import AgentRecord, Task
+from agent_orchestrator.runtime.domain.models import AgentRecord, RunRecord, Task, now_iso
 from agent_orchestrator.runtime.events import EventBus
 from agent_orchestrator.runtime.orchestrator import OrchestratorService
 from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
@@ -24,7 +24,6 @@ def test_review_loop_retries_until_findings_clear(tmp_path: Path) -> None:
     task = Task(
         title="Loop task",
         status="queued",
-        approval_mode="auto_approve",
         metadata={
             "scripted_findings": [
                 [{"severity": "high", "summary": "Fix me"}],
@@ -55,7 +54,6 @@ def test_review_loop_cap_moves_task_to_blocked(tmp_path: Path) -> None:
     task = Task(
         title="Cap task",
         status="queued",
-        approval_mode="auto_approve",
         metadata={
             "scripted_findings": [
                 [{"severity": "high", "summary": "Fix me"}],
@@ -88,7 +86,7 @@ def test_agent_role_routing_and_provider_override(tmp_path: Path) -> None:
     container.agents.upsert(impl)
     container.agents.upsert(other)
 
-    task = Task(title="Route task", status="queued", approval_mode="auto_approve")
+    task = Task(title="Route task", status="queued", )
     container.tasks.upsert(task)
 
     result = service.run_task(task.id)
@@ -107,8 +105,8 @@ def test_single_run_branch_receives_per_task_commits(tmp_path: Path) -> None:
 
     container, service = _service(tmp_path)
 
-    first = Task(title="First task", status="queued", approval_mode="auto_approve", metadata={"scripted_files": {"first.txt": "first"}})
-    second = Task(title="Second task", status="queued", approval_mode="auto_approve", metadata={"scripted_files": {"second.txt": "second"}})
+    first = Task(title="First task", status="queued", metadata={"scripted_files": {"first.txt": "first"}})
+    second = Task(title="Second task", status="queued", metadata={"scripted_files": {"second.txt": "second"}})
     container.tasks.upsert(first)
     container.tasks.upsert(second)
 
@@ -139,8 +137,8 @@ def test_single_run_branch_uses_fast_forward_even_when_merge_ff_disabled(tmp_pat
 
     container, service = _service(tmp_path)
 
-    first = Task(title="First task", status="queued", approval_mode="auto_approve", metadata={"scripted_files": {"first.txt": "first"}})
-    second = Task(title="Second task", status="queued", approval_mode="auto_approve", metadata={"scripted_files": {"second.txt": "second"}})
+    first = Task(title="First task", status="queued", metadata={"scripted_files": {"first.txt": "first"}})
+    second = Task(title="Second task", status="queued", metadata={"scripted_files": {"second.txt": "second"}})
     container.tasks.upsert(first)
     container.tasks.upsert(second)
 
@@ -187,12 +185,135 @@ def test_scheduler_enforces_concurrency_cap(tmp_path: Path) -> None:
     assert claimed is None
 
 
+def test_scheduler_does_not_count_gate_waiting_task_against_concurrency(tmp_path: Path) -> None:
+    container, _ = _service(tmp_path)
+    waiting_gate = Task(title="Waiting gate", status="in_progress", pending_gate="before_implement")
+    queued = Task(title="Queued", status="queued")
+    container.tasks.upsert(waiting_gate)
+    container.tasks.upsert(queued)
+
+    claimed = container.tasks.claim_next_runnable(max_in_progress=1)
+    assert claimed is not None
+    assert claimed.id == queued.id
+
+
+def test_scheduler_claims_resume_requested_in_progress_task(tmp_path: Path) -> None:
+    container, _ = _service(tmp_path)
+    resume_task = Task(
+        title="Resume me",
+        status="in_progress",
+        pending_gate=None,
+        metadata={
+            "execution_checkpoint": {
+                "gate": "before_implement",
+                "resume_step": "implement",
+                "approved_gate": "before_implement",
+                "resume_requested_at": "2026-01-01T00:00:00+00:00",
+            }
+        },
+    )
+    container.tasks.upsert(resume_task)
+
+    claimed = container.tasks.claim_next_runnable(max_in_progress=2)
+    assert claimed is not None
+    assert claimed.id == resume_task.id
+    checkpoint = claimed.metadata.get("execution_checkpoint") if isinstance(claimed.metadata, dict) else None
+    assert isinstance(checkpoint, dict)
+    assert checkpoint.get("resume_requested_at") is None
+
+
+def test_gate_wait_policy_emits_reminder_event(tmp_path: Path) -> None:
+    container, service = _service(tmp_path)
+    cfg = container.config.load()
+    orchestrator_cfg = dict(cfg.get("orchestrator") or {})
+    orchestrator_cfg["gate_reminder_minutes"] = 1
+    orchestrator_cfg["gate_stale_minutes"] = 0
+    orchestrator_cfg["gate_max_wait_minutes"] = 0
+    orchestrator_cfg["gate_timeout_action"] = "none"
+    cfg["orchestrator"] = orchestrator_cfg
+    container.config.save(cfg)
+
+    task = Task(
+        title="Gate reminder",
+        status="in_progress",
+        pending_gate="before_implement",
+        metadata={"execution_checkpoint": {"paused_at": "2026-01-01T00:00:00+00:00"}},
+    )
+    container.tasks.upsert(task)
+
+    _ = service.tick_once()
+
+    updated = container.tasks.get(task.id)
+    assert updated is not None
+    checkpoint = updated.metadata.get("execution_checkpoint") if isinstance(updated.metadata, dict) else None
+    assert isinstance(checkpoint, dict)
+    assert checkpoint.get("last_reminder_at")
+    events = container.events.list_recent(limit=2000)
+    reminder_events = [
+        event
+        for event in events
+        if event.get("type") == "task.gate_reminder" and event.get("entity_id") == task.id
+    ]
+    assert reminder_events
+
+
+def test_gate_wait_policy_can_auto_block_when_configured(tmp_path: Path) -> None:
+    container, service = _service(tmp_path)
+    cfg = container.config.load()
+    orchestrator_cfg = dict(cfg.get("orchestrator") or {})
+    orchestrator_cfg["gate_reminder_minutes"] = 0
+    orchestrator_cfg["gate_stale_minutes"] = 0
+    orchestrator_cfg["gate_max_wait_minutes"] = 1
+    orchestrator_cfg["gate_timeout_action"] = "block"
+    cfg["orchestrator"] = orchestrator_cfg
+    container.config.save(cfg)
+
+    task = Task(
+        title="Gate timeout policy",
+        status="in_progress",
+        pending_gate="before_commit",
+        metadata={"execution_checkpoint": {"paused_at": "2026-01-01T00:00:00+00:00"}},
+    )
+    container.tasks.upsert(task)
+
+    _ = service.tick_once()
+
+    updated = container.tasks.get(task.id)
+    assert updated is not None
+    assert updated.status == "blocked"
+    assert updated.pending_gate is None
+    assert "exceeded max wait policy" in str(updated.error)
+    events = container.events.list_recent(limit=2000)
+    blocked_events = [
+        event
+        for event in events
+        if event.get("type") == "task.blocked" and event.get("entity_id") == task.id
+    ]
+    assert blocked_events
+
+
+def test_recovery_normalizes_legacy_gate_wait_run_state(tmp_path: Path) -> None:
+    container, service = _service(tmp_path)
+    task = Task(title="Legacy gate run", status="in_progress", pending_gate="before_implement")
+    run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso(), finished_at=None)
+    task.run_ids.append(run.id)
+    container.tasks.upsert(task)
+    container.runs.upsert(run)
+
+    service.ensure_worker()
+    service.shutdown(timeout=0.1)
+
+    recovered = container.runs.get(run.id)
+    assert recovered is not None
+    assert recovered.status == "waiting_gate"
+    assert recovered.finished_at is not None
+
+
 def test_human_blocking_step_sets_pending_gate_and_blocks_task(tmp_path: Path) -> None:
     container, service = _service(tmp_path)
     task = Task(
         title="Needs decision",
         status="queued",
-        approval_mode="auto_approve",
         metadata={
             "scripted_steps": {
                 "plan": {
@@ -221,7 +342,6 @@ def test_review_human_blocking_creates_step_log(tmp_path: Path) -> None:
         title="Review block",
         status="queued",
         task_type="feature",
-        approval_mode="auto_approve",
         metadata={
             "scripted_steps": {
                 "review": {
@@ -254,7 +374,6 @@ def test_review_error_status_creates_step_log(tmp_path: Path) -> None:
         title="Review error",
         status="queued",
         task_type="feature",
-        approval_mode="auto_approve",
         metadata={
             "scripted_steps": {
                 "review": {
@@ -299,7 +418,6 @@ def test_implement_fix_sets_pipeline_phase(tmp_path: Path) -> None:
     task = Task(
         title="Pipeline phase test",
         status="queued",
-        approval_mode="auto_approve",
         metadata={
             "scripted_findings": [
                 [{"severity": "high", "summary": "Fix me"}],

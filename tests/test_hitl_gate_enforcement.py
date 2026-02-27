@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from agent_orchestrator.runtime.domain.models import Task
+from agent_orchestrator.runtime.domain.models import Task, now_iso
 from agent_orchestrator.runtime.events import EventBus
 from agent_orchestrator.runtime.orchestrator import OrchestratorService
 from agent_orchestrator.runtime.storage.container import Container
@@ -29,7 +29,6 @@ def test_autopilot_no_gates(tmp_path: Path) -> None:
     task = Task(
         title="Auto task",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -41,17 +40,16 @@ def test_autopilot_no_gates(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Supervised — blocks at every gate
+# Supervised — gates pause/resume flow
 # ---------------------------------------------------------------------------
 
 
 def test_supervised_blocks_at_gates(tmp_path: Path) -> None:
-    """Supervised mode lets plan run freely, then gates before implement, after implement, and before commit."""
+    """Supervised mode gates before implement, then pauses in pre-commit review."""
     container, service, _ = _service(tmp_path)
     task = Task(
         title="Supervised task",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="supervised",
     )
     container.tasks.upsert(task)
@@ -68,56 +66,71 @@ def test_supervised_blocks_at_gates(tmp_path: Path) -> None:
     with patch.object(service, "_wait_for_gate", side_effect=_mock_wait):
         result = service.run_task(task.id)
 
-    assert result.status == "done"
+    assert result.status == "in_review"
     assert "before_plan" not in gates_seen
     assert "before_implement" in gates_seen
-    assert "after_implement" in gates_seen
-    assert "before_commit" in gates_seen
+    assert "after_implement" not in gates_seen
+    assert "before_commit" not in gates_seen
 
 
-def test_supervised_keeps_previous_step_visible_until_gate_approval(tmp_path: Path) -> None:
-    """Current step should not advance to a gated step before approval."""
+def test_supervised_keeps_previous_step_visible_until_gate_pause(tmp_path: Path) -> None:
+    """Current step should not advance to the gated step before parking."""
     container, service, _ = _service(tmp_path)
     task = Task(
         title="Gate visibility task",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="supervised",
     )
     container.tasks.upsert(task)
 
-    snapshots: list[tuple[str, str | None, str | None]] = []
+    result = service.run_task(task.id)
+
+    assert result.status == "in_progress"
+    assert result.pending_gate == "before_implement"
+    assert result.current_step == "plan"
+    phase = result.metadata.get("pipeline_phase") if isinstance(result.metadata, dict) else None
+    assert phase == "plan"
+
+
+def test_supervised_retry_from_implement_skips_plan_gate(tmp_path: Path) -> None:
+    """Retrying from implement should not re-trigger before_implement approval."""
+    container, service, _ = _service(tmp_path)
+    task = Task(
+        title="Retry from implement",
+        status="queued",
+        hitl_mode="supervised",
+        retry_count=1,
+        metadata={"retry_from_step": "implement"},
+    )
+    container.tasks.upsert(task)
+
+    gates_seen: list[str] = []
 
     def _mock_wait(t: Task, gate_name: str, timeout: int = 3600) -> bool:
-        phase = t.metadata.get("pipeline_phase") if isinstance(t.metadata, dict) else None
-        snapshots.append((gate_name, t.current_step, str(phase) if phase is not None else None))
+        gates_seen.append(gate_name)
         t.pending_gate = None
         container.tasks.upsert(t)
-        return gate_name != "before_commit"
+        return True
 
     with patch.object(service, "_wait_for_gate", side_effect=_mock_wait):
         result = service.run_task(task.id)
 
-    assert result.status == "blocked"
-    assert snapshots[0] == ("before_implement", "plan", "plan")
-    assert snapshots[-1] == ("before_commit", "review", "review")
-    assert snapshots[1][0] == "after_implement"
-    assert snapshots[1][1] not in {"review", "commit"}
-    assert snapshots[1][2] == snapshots[1][1]
+    assert result.status == "in_review"
+    assert "before_implement" not in gates_seen
+    assert "before_commit" not in gates_seen
 
 
 # ---------------------------------------------------------------------------
-# Review-only — gates after_implement and before_commit only
+# Review-only — no gates; pauses in pre-commit review
 # ---------------------------------------------------------------------------
 
 
-def test_review_only_gates_after_implement_and_before_commit(tmp_path: Path) -> None:
-    """review_only mode only activates after_implement and before_commit."""
+def test_review_only_pauses_in_precommit_review(tmp_path: Path) -> None:
+    """review_only mode skips plan gate and pauses in pre-commit review."""
     container, service, _ = _service(tmp_path)
     task = Task(
         title="Review-only task",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="review_only",
     )
     container.tasks.upsert(task)
@@ -133,71 +146,128 @@ def test_review_only_gates_after_implement_and_before_commit(tmp_path: Path) -> 
     with patch.object(service, "_wait_for_gate", side_effect=_mock_wait):
         result = service.run_task(task.id)
 
-    assert result.status == "done"
+    assert result.status == "in_review"
     assert "before_plan" not in gates_seen
     assert "before_implement" not in gates_seen
-    assert "after_implement" in gates_seen
-    assert "before_commit" in gates_seen
+    assert "after_implement" not in gates_seen
+    assert "before_commit" not in gates_seen
 
 
-# ---------------------------------------------------------------------------
-# Collaborative — gates after_implement and before_commit
-# ---------------------------------------------------------------------------
-
-
-def test_collaborative_gates(tmp_path: Path) -> None:
-    """collaborative mode activates after_implement and before_commit."""
+def test_supervised_chore_skips_before_implement_gate(tmp_path: Path) -> None:
+    """Chore pipeline starts at implement and should not gate before implement."""
     container, service, _ = _service(tmp_path)
     task = Task(
-        title="Collaborative task",
+        title="Supervised chore",
         status="queued",
-        approval_mode="auto_approve",
-        hitl_mode="collaborative",
+        hitl_mode="supervised",
+        task_type="chore",
     )
     container.tasks.upsert(task)
 
-    gates_seen: list[str] = []
+    result = service.run_task(task.id)
+    assert result.status == "in_review"
+    assert result.pending_gate is None
 
-    def _mock_wait(t: Task, gate_name: str, timeout: int = 3600) -> bool:
-        gates_seen.append(gate_name)
-        t.pending_gate = None
-        container.tasks.upsert(t)
-        return True
 
-    with patch.object(service, "_wait_for_gate", side_effect=_mock_wait):
-        result = service.run_task(task.id)
+def test_supervised_plan_only_pauses_before_generate_tasks(tmp_path: Path) -> None:
+    """Plan-only pipeline should gate before generate_tasks in supervised mode."""
+    container, service, _ = _service(tmp_path)
+    task = Task(
+        title="Supervised plan only",
+        status="queued",
+        hitl_mode="supervised",
+        task_type="plan_only",
+    )
+    container.tasks.upsert(task)
 
-    assert result.status == "done"
-    assert "before_plan" not in gates_seen
-    assert "after_implement" in gates_seen
-    assert "before_commit" in gates_seen
+    result = service.run_task(task.id)
+    assert result.status == "in_progress"
+    assert result.pending_gate == "before_generate_tasks"
+    assert result.current_step == "initiative_plan"
+
+
+def test_review_only_noncommit_pauses_before_done(tmp_path: Path) -> None:
+    """Review-only non-commit pipeline should pause at before_done."""
+    container, service, _ = _service(tmp_path)
+    task = Task(
+        title="Review-only research",
+        status="queued",
+        hitl_mode="review_only",
+        task_type="research",
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "in_progress"
+    assert result.pending_gate == "before_done"
 
 
 # ---------------------------------------------------------------------------
-# Gate timeout — blocks the task
+# Gate pause — parks the task
 # ---------------------------------------------------------------------------
 
 
-def test_gate_timeout_blocks_task(tmp_path: Path) -> None:
-    """If nobody approves the gate, _wait_for_gate returns False → blocked."""
+def test_gate_wait_parks_task(tmp_path: Path) -> None:
+    """If nobody approves the gate, task remains paused at pending gate."""
     container, service, _ = _service(tmp_path)
     task = Task(
         title="Timeout task",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="supervised",
     )
     container.tasks.upsert(task)
 
-    def _mock_wait_reject(t: Task, gate_name: str, timeout: int = 3600) -> bool:
-        # Simulate gate not being approved
-        return False
+    result = service.run_task(task.id)
 
-    with patch.object(service, "_wait_for_gate", side_effect=_mock_wait_reject):
-        result = service.run_task(task.id)
+    assert result.status == "in_progress"
+    assert result.pending_gate == "before_implement"
+    assert not result.error
 
-    assert result.status == "blocked"
-    assert "gate" in (result.error or "").lower()
+
+def test_approved_gate_resumes_to_next_gate(tmp_path: Path) -> None:
+    """Gate resume should continue the same run without retry semantics."""
+    container, service, _ = _service(tmp_path)
+    task = Task(
+        title="Resume task",
+        status="queued",
+        hitl_mode="supervised",
+    )
+    container.tasks.upsert(task)
+
+    parked = service.run_task(task.id)
+    assert parked.pending_gate == "before_implement"
+    assert parked.status == "in_progress"
+    assert len(parked.run_ids) == 1
+    first_run_id = parked.run_ids[-1]
+
+    checkpoint = dict(parked.metadata.get("execution_checkpoint") or {})
+    checkpoint["approved_gate"] = "before_implement"
+    checkpoint["resume_requested_at"] = now_iso()
+    parked.pending_gate = None
+    parked.metadata["execution_checkpoint"] = checkpoint
+    container.tasks.upsert(parked)
+
+    result = service.run_task(task.id)
+
+    assert result.status == "in_review"
+    assert result.pending_gate is None
+    assert result.run_ids == [first_run_id]
+
+    runs = [run for run in container.runs.list() if run.task_id == task.id]
+    assert len(runs) == 1
+    assert runs[0].id == first_run_id
+
+    started_events = [
+        event
+        for event in container.events.list_recent(limit=2000)
+        if event.get("type") == "task.started" and event.get("entity_id") == task.id
+    ]
+    assert len(started_events) >= 2
+    latest_payload = started_events[-1].get("payload") or {}
+    assert latest_payload.get("is_retry") is False
+    assert latest_payload.get("run_attempt") == 1
+    workdoc = service.get_workdoc(task.id).get("content") or ""
+    assert "## Retry Attempt 2" not in workdoc
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +308,13 @@ def test_gate_approve_api(tmp_path: Path) -> None:
     data = resp.json()
     assert data["cleared_gate"] == "before_plan"
     assert data["task"]["pending_gate"] is None
+    checkpoint = data["task"]["metadata"].get("execution_checkpoint") or {}
+    assert checkpoint.get("approved_gate") == "before_plan"
+    assert checkpoint.get("resume_requested_at")
+    assert checkpoint.get("resume_step") == "plan"
+    assert "approved" in data["message"].lower()
+    assert "task will resume shortly." in data["message"].lower()
+    assert data["approved_at"]
 
 
 def test_gate_approve_api_no_pending(tmp_path: Path) -> None:
@@ -302,26 +379,93 @@ def test_gate_approve_api_mismatch(tmp_path: Path) -> None:
 
     resp = client.post(f"/api/tasks/{task.id}/approve-gate", json={"gate": "before_commit"})
     assert resp.status_code == 400
-    assert "mismatch" in resp.json()["detail"].lower()
 
 
-# ---------------------------------------------------------------------------
-# Backward compat: approval_mode mapping
-# ---------------------------------------------------------------------------
+def test_gate_request_changes_api_requeues_from_prior_step(tmp_path: Path) -> None:
+    """Request-changes action should requeue and set a deterministic restart step."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from agent_orchestrator.runtime.api.router import create_router
+
+    container = Container(tmp_path)
+
+    def resolve_container(_: Any = None) -> Container:
+        return container
+
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus)
+
+    def resolve_orchestrator(_: Any = None) -> OrchestratorService:
+        return service
+
+    router = create_router(resolve_container, resolve_orchestrator, {})
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    task = Task(
+        title="Plan gate request changes",
+        status="in_progress",
+        task_type="feature",
+        pending_gate="before_implement",
+        pipeline_template=["plan", "implement", "verify", "review", "commit"],
+        metadata={"execution_checkpoint": {"gate": "before_implement", "resume_step": "implement"}},
+    )
+    container.tasks.upsert(task)
+
+    resp = client.post(
+        f"/api/tasks/{task.id}/approve-gate",
+        json={"gate": "before_implement", "action": "request_changes", "guidance": "Please tighten scope."},
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    updated = payload["task"]
+    assert updated["status"] == "queued"
+    assert updated["pending_gate"] is None
+    assert updated["metadata"].get("retry_from_step") == "plan"
+    assert "changes requested" in str(payload.get("message") or "").lower()
 
 
-def test_backward_compat_approval_mode_maps(tmp_path: Path) -> None:
-    """auto_approve maps to autopilot; human_review maps to review_only when hitl_mode absent."""
-    auto = Task.from_dict({"title": "Auto", "approval_mode": "auto_approve"})
-    assert auto.hitl_mode == "autopilot"
+def test_gate_approve_human_intervention_keeps_blocked_status(tmp_path: Path) -> None:
+    """Approving intervention gate should clear gate without auto-resuming blocked task."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
 
-    human = Task.from_dict({"title": "Human", "approval_mode": "human_review"})
-    assert human.hitl_mode == "review_only"
+    from agent_orchestrator.runtime.api.router import create_router
+
+    container = Container(tmp_path)
+
+    def resolve_container(_: Any = None) -> Container:
+        return container
+
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus)
+
+    def resolve_orchestrator(_: Any = None) -> OrchestratorService:
+        return service
+
+    router = create_router(resolve_container, resolve_orchestrator, {})
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    task = Task(title="Needs intervention", status="blocked", pending_gate="human_intervention")
+    container.tasks.upsert(task)
+
+    resp = client.post(f"/api/tasks/{task.id}/approve-gate", json={"gate": "human_intervention"})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["task"]["status"] == "blocked"
+    assert payload["task"]["pending_gate"] is None
+    assert "still blocked" in payload["message"].lower()
+    checkpoint = payload["task"]["metadata"].get("execution_checkpoint") or {}
+    assert checkpoint.get("resume_requested_at") in (None, "")
 
 
 def test_explicit_hitl_mode_preserved() -> None:
-    """When hitl_mode is explicitly set in data, it overrides the mapping."""
-    data = {"title": "Explicit", "hitl_mode": "supervised", "approval_mode": "auto_approve"}
+    """When hitl_mode is explicitly set in data, it is preserved."""
+    data = {"title": "Explicit", "hitl_mode": "supervised"}
     task = Task.from_dict(data)
     assert task.hitl_mode == "supervised"
 
@@ -371,7 +515,6 @@ def test_modes_endpoint_uses_modes_py(tmp_path: Path) -> None:
     mode_names = [m["mode"] for m in modes]
     assert "autopilot" in mode_names
     assert "supervised" in mode_names
-    assert "collaborative" in mode_names
     assert "review_only" in mode_names
 
     # Verify descriptions come from modes.py, not hardcoded

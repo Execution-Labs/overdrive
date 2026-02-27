@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, cast
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query
 
-from ..domain.models import Task, now_iso
+from ..domain.models import Priority, Task, now_iso
 from ..storage.container import Container
 from .deps import RouteDeps
 from . import router_impl as impl
@@ -129,13 +129,53 @@ def register_import_routes(router: APIRouter, deps: RouteDeps) -> None:
 
         refreshed_parent = container.tasks.get(prd_parent.id)
         created = list(refreshed_parent.children_ids if refreshed_parent else [])
+        if not created and generated_tasks:
+            # Fallback for rare cases where the initiative pipeline run completes
+            # without attaching generated children to the parent.
+            generated_ref_to_task_id: dict[str, str] = {}
+            for item in generated_tasks:
+                if not isinstance(item, dict):
+                    continue
+                raw_priority = str(item.get("priority") or "P2")
+                if raw_priority not in {"P0", "P1", "P2", "P3"}:
+                    raw_priority = "P2"
+                child = Task(
+                    title=str(item.get("title") or "Imported PRD task"),
+                    description=str(item.get("description") or ""),
+                    task_type=str(item.get("task_type") or "feature"),
+                    priority=cast(Priority, raw_priority),
+                    parent_id=prd_parent.id,
+                    source="generated",
+                    labels=list(item.get("labels") or []),
+                    metadata=dict(item.get("metadata") or {}),
+                )
+                child.source = "prd_import"
+                container.tasks.upsert(child)
+                created.append(child.id)
+                ref_id = str(item.get("id") or "").strip()
+                if ref_id:
+                    generated_ref_to_task_id[ref_id] = child.id
+                bus.emit(
+                    channel="tasks",
+                    event_type="task.created",
+                    entity_id=child.id,
+                    payload={"parent_id": prd_parent.id, "source": "generate_tasks"},
+                )
+            if created:
+                parent = container.tasks.get(prd_parent.id) or prd_parent
+                if not isinstance(parent.children_ids, list):
+                    parent.children_ids = []
+                for child_id in created:
+                    if child_id not in parent.children_ids:
+                        parent.children_ids.append(child_id)
+                container.tasks.upsert(parent)
         _apply_generated_dep_links(container, created)
         for child_id in created:
-            child = container.tasks.get(child_id)
-            if not child:
+            existing_child = container.tasks.get(child_id)
+            if not existing_child:
                 continue
-            child.source = "prd_import"
-            container.tasks.upsert(child)
+            existing_child.source = "prd_import"
+            container.tasks.upsert(existing_child)
 
         job["status"] = "committed"
         job["created_task_ids"] = created

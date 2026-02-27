@@ -193,16 +193,33 @@ class FileTaskRepository(TaskRepository):
         with self._repo._thread_lock:
             with self._repo._lock:
                 tasks = self._repo._load()
-                in_progress = [t for t in tasks if t.status == "in_progress"]
+
+                def _resume_requested(task: Task) -> bool:
+                    if task.status != "in_progress" or task.pending_gate:
+                        return False
+                    if not isinstance(task.metadata, dict):
+                        return False
+                    checkpoint = task.metadata.get("execution_checkpoint")
+                    if not isinstance(checkpoint, dict):
+                        return False
+                    return bool(str(checkpoint.get("resume_requested_at") or "").strip())
+
+                in_progress = [
+                    t
+                    for t in tasks
+                    if t.status == "in_progress" and not t.pending_gate and not _resume_requested(t)
+                ]
                 if len(in_progress) >= max_in_progress:
                     return None
                 terminal = {"done", "cancelled"}
                 by_id = {t.id: t for t in tasks}
 
                 def _is_runnable(task: Task) -> bool:
-                    if task.status != "queued":
+                    if task.status not in {"queued", "in_progress"}:
                         return False
-                    if task.pending_gate:
+                    if task.status == "queued" and task.pending_gate:
+                        return False
+                    if task.status == "in_progress" and not _resume_requested(task):
                         return False
                     for dep_id in task.blocked_by:
                         dep = by_id.get(dep_id)
@@ -218,6 +235,12 @@ class FileTaskRepository(TaskRepository):
                 for idx, task in enumerate(tasks):
                     if task.id == selected.id:
                         selected.status = "in_progress"
+                        if isinstance(selected.metadata, dict):
+                            checkpoint = selected.metadata.get("execution_checkpoint")
+                            if isinstance(checkpoint, dict):
+                                checkpoint = dict(checkpoint)
+                                checkpoint.pop("resume_requested_at", None)
+                                selected.metadata["execution_checkpoint"] = checkpoint
                         selected.updated_at = now_iso()
                         tasks[idx] = selected
                         self._repo._save(tasks)
