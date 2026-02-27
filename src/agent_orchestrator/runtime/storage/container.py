@@ -54,5 +54,4 @@ class Container:
 
     def transaction(self) -> AbstractContextManager[sqlite3.Connection]:
         """Open a container-wide transactional scope for multi-repo updates."""
-
         return self.db.transaction()

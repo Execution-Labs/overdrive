@@ -1,4 +1,5 @@
 """SQLite database manager for runtime state persistence."""
+# ruff: noqa: D102,D107,D202
 
 from __future__ import annotations
 

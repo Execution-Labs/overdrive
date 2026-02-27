@@ -358,7 +358,6 @@ def _migrate_yaml_state_to_sqlite(project_dir: Path, state_root: Path) -> None:
 
 def _ensure_gitignored(project_dir: Path) -> None:
     """Add runtime files to project `.gitignore` if not already present."""
-
     gitignore = project_dir / ".gitignore"
     entries = [".agent_orchestrator/", f"{ARCHIVE_DIR_NAME}/", ".workdoc.md"]
     if gitignore.exists():
@@ -383,7 +382,6 @@ def _ensure_gitignored(project_dir: Path) -> None:
 
 def ensure_state_root(project_dir: Path) -> Path:
     """Ensure runtime state root exists and is initialized with SQLite storage."""
-
     state_root = project_dir / ".agent_orchestrator"
 
     if state_root.exists() and not (state_root / SQLITE_DB_FILE).exists() and not _legacy_yaml_state_exists(state_root):
@@ -451,7 +449,6 @@ def ensure_state_root(project_dir: Path) -> Path:
 
 def archive_state_root(project_dir: Path) -> Path | None:
     """Archive the current runtime state root under a timestamped folder."""
-
     state_root = project_dir / ".agent_orchestrator"
     if not state_root.exists():
         return None

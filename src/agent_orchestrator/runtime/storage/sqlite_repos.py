@@ -1,4 +1,5 @@
 """SQLite-backed repository implementations for runtime state."""
+# ruff: noqa: D102,D107
 
 from __future__ import annotations
 
