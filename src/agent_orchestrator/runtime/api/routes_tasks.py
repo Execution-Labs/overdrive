@@ -918,7 +918,27 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         requested_step = str(step or "").strip()
         requested_run_id = str(run_id or "").strip()
 
-        runs_by_id = {run.id: run for run in container.runs.list()}
+        all_runs = container.runs.list()
+        runs_by_id = {str(run.id): run for run in all_runs if str(run.id).strip()}
+        task_run_ids = [str(run_id_value).strip() for run_id_value in list(task.run_ids or []) if str(run_id_value).strip()]
+        if task_run_ids:
+            known_run_ids = set(task_run_ids)
+            for run in all_runs:
+                run_id_value = str(run.id).strip()
+                if not run_id_value:
+                    continue
+                if str(run.task_id or "").strip() != task.id:
+                    continue
+                if run_id_value in known_run_ids:
+                    continue
+                task_run_ids.append(run_id_value)
+                known_run_ids.add(run_id_value)
+        else:
+            task_run_ids = [
+                str(run.id).strip()
+                for run in all_runs
+                if str(run.id).strip() and str(run.task_id or "").strip() == task.id
+            ]
         step_execution_counts: dict[str, int] = {}
         step_latest_run: dict[str, str] = {}
         available_steps: list[str] = []
@@ -926,11 +946,11 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         # Most-recent-first list of step executions with available stdout logs.
         step_history_entries: list[dict[str, Any]] = []
         step_attempt_counts: dict[str, int] = {}
-        for task_run_id in reversed(task.run_ids):
-            run = runs_by_id.get(task_run_id)
-            if not run:
+        for task_run_id in reversed(task_run_ids):
+            selected_run = runs_by_id.get(task_run_id)
+            if not selected_run:
                 continue
-            for entry in reversed(run.steps or []):
+            for entry in reversed(selected_run.steps or []):
                 if not isinstance(entry, dict) or not entry.get("stdout_path"):
                     continue
                 step_name = str(entry.get("step") or "").strip()
