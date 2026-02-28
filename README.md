@@ -1,30 +1,86 @@
+[![Backend CI](https://github.com/wcgan7/agent-orchestrator/actions/workflows/backend-ci.yml/badge.svg)](https://github.com/wcgan7/agent-orchestrator/actions/workflows/backend-ci.yml)
+[![Web CI](https://github.com/wcgan7/agent-orchestrator/actions/workflows/web-ci.yml/badge.svg)](https://github.com/wcgan7/agent-orchestrator/actions/workflows/web-ci.yml)
+[![Version](https://img.shields.io/github/v/release/wcgan7/agent-orchestrator)](https://github.com/wcgan7/agent-orchestrator/releases)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
+
 # Agent Orchestrator
 
-Agent Orchestrator is a local control center for AI-assisted software delivery, with task management, execution controls, review gates, and worker management in one place.
+Deterministic orchestration for AI-assisted software delivery.
 
-It coordinates work across repositories by sequencing dependencies, parallelizing safe independent tasks, and managing integration as delivery progresses.
+Agent Orchestrator sequences planning, implementation, validation, and review into a controlled execution pipeline. It runs multi-step AI workflows with dependency awareness, governance gates, and full traceability.
 
-You keep task prompts concise; the orchestrator handles step-specific guidance, pipeline structure, and quality controls to produce resilient, merge-ready outcomes without custom prompt packs.
+Designed for teams building controlled, repeatable AI-driven development systems — not single-pass code generation.
 
-<!-- Screenshot may not reflect the latest UI. Regenerate with: npm --prefix web run screenshot:homepage -->
+## Core Principles
+
+- **Deterministic execution over ad-hoc prompting**
+- **Quality gates before commits**
+- **Dependency-aware parallelism**
+- **Provider-agnostic routing**
+- **Complete execution traceability**
+
+## Execution Model
+
+Agent Orchestrator runs tasks through **pipeline templates** chosen by task intent (or auto-routed).
+
+```
+Task
+  ↓
+Select pipeline template (feature / bug_fix / refactor / docs / test / research / …)
+  ↓
+Execute staged steps (template-defined)
+  ↓
+Apply governance gates (approvals, severity thresholds, retry limits)
+  ↓
+Outcome (commit, report, or task generation)
+```
+
+Pipeline templates define step flow; governance policies determine how and when work progresses.
+
+### Reference Pipeline: `feature`
+
+The `feature` pipeline represents the full delivery loop:
+
+plan → implement → verify → review → commit
+
+It includes structured planning, automated verification, severity-scored review findings, and iterative fix cycles until quality gates are satisfied.
+
+---
+
+<!-- Regenerate screenshot: npm --prefix web run screenshot:homepage -->
 ![Agent Orchestrator Dashboard](web/public/homepage-screenshot.png)
+
+---
+
+## When to Use Agent Orchestrator
+
+Choose Agent Orchestrator when you need:
+
+- Multi-step AI-driven feature delivery with review loops
+- Governance controls over automated code changes
+- Cross-repository task coordination
+- Auditable, policy-controlled execution pipelines
+- Structured decomposition of large PRDs into executable tasks
+
+Not designed for lightweight or single-pass code generation workflows.
 
 ## What You Can Do
 
 ### Deliver high-quality code with intent-specific pipelines
-- Write prompts as usual: short, concise, clear intent.
+- Write concise, intent-focused prompts.
 - Select or let the orchestrator route work through the most suitable built-in pipeline (for example `feature`, `bug_fix`, `refactor`, `hotfix`, `docs`, `test`).
-- Each pipeline step applies step-specific guidance (`plan/analyze`, `implement`, `verify`, `review`, `commit`) to produce higher-quality outcomes than single-pass prompting.
-- Delivery pipelines run review-and-fix loops until findings are within your configured tolerance thresholds.
+- Each pipeline step applies intent-specific guidance (`plan/analyze`, `implement`, `verify`, `review`, `commit`) to produce higher-quality outcomes than single-pass generation.
+- Pipelines iterate review-and-fix loops until findings meet configured tolerance thresholds.
 - Full PRDs can be imported and automatically decomposed into dependency-aware execution batches.
 
 ### Enforce quality and governance
 - Choose a Human-in-the-Loop mode per task: **Autopilot**, **Supervised**, or **Review Only**.
-- **Autopilot** runs end-to-end with no approvals.
-- **Supervised** requires plan/decomposition approval and human review before commit.
-- **Review Only** skips planning gates, pauses for human review before commit, and adds a final done gate for non-commit pipelines.
+  - **Autopilot**: runs end-to-end without approvals.
+  - **Supervised**: requires plan approval and human review before commit.
+  - **Review Only**: pauses before commit and adds a final completion gate.
 - Configure severity thresholds (`critical`, `high`, `medium`, `low`) globally or per task to control pass/fail tolerance.
-- Draft, refine, and commit plan revisions with full lineage before implementation when needed.
+- Draft, refine, and commit plan revisions with full lineage before implementation.
 
 ### Scale execution across repositories
 - Run independent tasks in parallel, with automatic isolated git worktree provisioning for same-repo execution.
@@ -227,6 +283,12 @@ git config core.hooksPath .githooks
 - `web/README.md`: frontend-specific setup and test workflow
 - `example/README.md`: sample project walkthrough
 
+## Versioning
+
+Agent Orchestrator follows Semantic Versioning.
+
+During `v0.x`, the primary compatibility surface is the CLI and configuration schema. The REST/WebSocket API and UI are evolving and may change between minor releases.
+
 ## License
 
-MIT
+Released under the MIT License.

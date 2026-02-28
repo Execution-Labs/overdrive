@@ -380,6 +380,23 @@ def _ensure_gitignored(project_dir: Path) -> None:
         gitignore.write_text(lines, encoding="utf-8")
 
 
+def archive_task_context_manifest(project_dir: Path, entries: list[dict[str, Any]]) -> Path | None:
+    """Write task context archive manifest and return its path when entries exist."""
+    if not entries:
+        return None
+    archive_root = project_dir / ARCHIVE_DIR_NAME
+    archive_root.mkdir(parents=True, exist_ok=True)
+    manifest_path = _next_archive_path(archive_root, "task_context_manifest").with_suffix(".json")
+    payload = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "project_dir": str(project_dir),
+        "count": len(entries),
+        "items": entries,
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8")
+    return manifest_path
+
+
 def ensure_state_root(project_dir: Path) -> Path:
     """Ensure runtime state root exists and is initialized with SQLite storage."""
     state_root = project_dir / ".agent_orchestrator"

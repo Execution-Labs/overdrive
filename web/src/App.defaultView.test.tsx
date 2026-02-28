@@ -1206,13 +1206,14 @@ describe('App default route', () => {
     render(<App />)
 
     await waitFor(() => {
-      expect(screen.getByText('Awaiting approval')).toBeInTheDocument()
+      expect(screen.getByText('Awaiting Approval')).toBeInTheDocument()
     })
 
     fireEvent.click(screen.getByText('Task 1'))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /^Plan$/i })).toBeInTheDocument()
     })
+    expect(screen.getAllByText('Awaiting Approval').length).toBeGreaterThanOrEqual(2)
   })
 
   it('refreshes surfaces when websocket events arrive', async () => {

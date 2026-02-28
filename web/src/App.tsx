@@ -560,6 +560,17 @@ function gateApprovalButtonLabel(gate: string | null | undefined): string {
   return 'Approve gate'
 }
 
+function taskStatusDisplay(task: TaskRecord | null | undefined): { label: string; classStatus: string } {
+  if (!task) return { label: 'Unknown', classStatus: 'unknown' }
+  if (task.status !== 'cancelled' && task.status === 'in_progress' && String(task.pending_gate || '').trim()) {
+    return { label: 'Awaiting Approval', classStatus: 'in_review' }
+  }
+  return {
+    label: humanizeLabel(task.status || 'unknown'),
+    classStatus: task.status || 'unknown',
+  }
+}
+
 function dispatchBlockedReasonLabel(raw: string | null | undefined): string {
   const normalized = String(raw || '').trim().toLowerCase()
   if (!normalized) return ''
@@ -4394,6 +4405,7 @@ export default function App() {
   const isTaskActionBusy = taskActionPending !== null
   const configLocked = !new Set(['backlog', 'queued', 'blocked', 'cancelled']).has(selectedTaskView?.status || '')
   const taskStatus = selectedTaskView?.status || ''
+  const selectedTaskStatusDisplay = taskStatusDisplay(selectedTaskView)
   const unresolvedBlockers = blockerIds.filter((depId) => {
     const dep = taskIndex.get(depId)
     return !dep || (dep.status !== 'done' && dep.status !== 'cancelled')
@@ -5448,7 +5460,7 @@ export default function App() {
                     {!boardCompact && <p className="task-meta">{task.priority} · {task.id.replace(/^task-/, '')}{task.parent_id ? ' · from plan' : ''}</p>}
                     {!boardCompact && task.status !== 'cancelled' && task.pending_gate ? (
                       <p className="task-meta">
-                        <span className="status-pill status-pill-inline status-pill-no-offset status-review">Awaiting approval</span>
+                        <span className="status-pill status-pill-inline status-pill-no-offset status-review">Awaiting Approval</span>
                       </p>
                     ) : null}
                     {!boardCompact && task.description ? <p className="task-desc">{task.description}</p> : null}
@@ -6714,7 +6726,7 @@ export default function App() {
             <header className="task-detail-modal-head">
               <div className="task-detail-modal-head-row">
                 <h2>{selectedTaskView.title}</h2>
-                <span className={`status-pill status-pill-prominent ${statusPillClass(taskStatus)}`}>{humanizeLabel(selectedTaskView.status)}</span>
+                <span className={`status-pill status-pill-prominent ${statusPillClass(selectedTaskStatusDisplay.classStatus)}`}>{selectedTaskStatusDisplay.label}</span>
               </div>
               {(selectedTaskView.pipeline_template || []).length > 0 ? (() => {
                 const pipelineSteps = selectedTaskView.pipeline_template!

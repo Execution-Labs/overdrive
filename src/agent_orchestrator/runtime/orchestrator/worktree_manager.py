@@ -6,7 +6,7 @@ import logging
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, TypedDict
 
 from ..domain.models import now_iso
 
@@ -14,6 +14,16 @@ if TYPE_CHECKING:
     from .service import OrchestratorService
 
 logger = logging.getLogger(__name__)
+
+
+class PreserveOutcome(TypedDict):
+    """Structured preserve result for deterministic blocked/review handling."""
+
+    status: str
+    reason_code: str
+    commit_sha: str | None
+    base_sha: str | None
+    head_sha: str | None
 
 
 class WorktreeManager:
@@ -112,12 +122,13 @@ class WorktreeManager:
                     )
                     merge_failed = True
                     task.metadata["merge_conflict"] = True
-        subprocess.run(
-            ["git", "worktree", "remove", str(worktree_dir), "--force"],
-            cwd=svc.container.project_dir,
-            capture_output=True,
-            text=True,
-        )
+        if not merge_failed:
+            subprocess.run(
+                ["git", "worktree", "remove", str(worktree_dir), "--force"],
+                cwd=svc.container.project_dir,
+                capture_output=True,
+                text=True,
+            )
         if not merge_failed:
             subprocess.run(
                 ["git", "branch", "-D", branch],
@@ -270,13 +281,47 @@ class WorktreeManager:
             return
         if not (svc.container.project_dir / ".git").exists():
             return
-        preserved_branches: set[str] = set()
+        referenced_branches: set[str] = set()
+        referenced_worktrees: set[Path] = set()
+        terminal_statuses = {"done", "cancelled"}
         for t in svc.container.tasks.list():
-            pb = t.metadata.get("preserved_branch") if isinstance(t.metadata, dict) else None
+            metadata = t.metadata if isinstance(t.metadata, dict) else {}
+            if t.status not in terminal_statuses:
+                task_context_raw = metadata.get("task_context")
+                task_context = task_context_raw if isinstance(task_context_raw, dict) else {}
+                for key in ("worktree_dir",):
+                    raw_path = str(task_context.get(key) or "").strip()
+                    if raw_path:
+                        try:
+                            referenced_worktrees.add(Path(raw_path).expanduser().resolve())
+                        except Exception:
+                            pass
+                raw_worktree_dir = str(metadata.get("worktree_dir") or "").strip()
+                if raw_worktree_dir:
+                    try:
+                        referenced_worktrees.add(Path(raw_worktree_dir).expanduser().resolve())
+                    except Exception:
+                        pass
+                for branch_key in ("task_branch", "preserved_branch"):
+                    branch = str(task_context.get(branch_key) or "").strip()
+                    if branch:
+                        referenced_branches.add(branch)
+                review_context_raw = metadata.get("review_context")
+                review_context = review_context_raw if isinstance(review_context_raw, dict) else {}
+                review_branch = str(review_context.get("preserved_branch") or "").strip()
+                if review_branch:
+                    referenced_branches.add(review_branch)
+            pb = str(metadata.get("preserved_branch") or "").strip()
             if pb:
-                preserved_branches.add(str(pb))
+                referenced_branches.add(pb)
         for child in worktrees_dir.iterdir():
             if child.is_dir():
+                try:
+                    child_resolved = child.resolve()
+                except Exception:
+                    child_resolved = child
+                if child_resolved in referenced_worktrees:
+                    continue
                 branch_name = f"task-{child.name}"
                 subprocess.run(
                     ["git", "worktree", "remove", str(child), "--force"],
@@ -284,7 +329,7 @@ class WorktreeManager:
                     capture_output=True,
                     text=True,
                 )
-                if branch_name not in preserved_branches:
+                if branch_name not in referenced_branches:
                     subprocess.run(
                         ["git", "branch", "-D", branch_name],
                         cwd=svc.container.project_dir,
@@ -385,7 +430,7 @@ class WorktreeManager:
             # which also returns the conservative default (True) on git errors.
             return True
 
-    def preserve_worktree_work(self, task: Any, worktree_dir: Path) -> bool:
+    def preserve_worktree_work(self, task: Any, worktree_dir: Path) -> PreserveOutcome:
         """Persist task edits by keeping branch history but removing worktree dir.
 
         This is used when human review is required before final merge into the
@@ -396,8 +441,57 @@ class WorktreeManager:
         try:
             if not isinstance(task.metadata, dict):
                 task.metadata = {}
+            had_uncommitted = self.has_uncommitted_changes(worktree_dir)
+            had_commits_ahead = self.has_commits_ahead(worktree_dir)
+            has_material_work = had_uncommitted or had_commits_ahead
+            if not has_material_work:
+                return {
+                    "status": "no_changes",
+                    "reason_code": "no_task_changes",
+                    "commit_sha": None,
+                    "base_sha": None,
+                    "head_sha": None,
+                }
+
+            before_head = ""
+            before_head_result = subprocess.run(
+                ["git", "rev-parse", "--verify", "HEAD"],
+                cwd=worktree_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if before_head_result.returncode == 0:
+                before_head = before_head_result.stdout.strip()
             svc._cleanup_workdoc_for_commit(worktree_dir)
-            self.commit_for_task(task, worktree_dir)
+            commit_sha = self.commit_for_task(task, worktree_dir)
+            after_head = ""
+            after_head_result = subprocess.run(
+                ["git", "rev-parse", "--verify", "HEAD"],
+                cwd=worktree_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if after_head_result.returncode == 0:
+                after_head = after_head_result.stdout.strip()
+
+            if had_uncommitted and (not commit_sha or not after_head or after_head == before_head):
+                return {
+                    "status": "failed",
+                    "reason_code": "dirty_not_preserved",
+                    "commit_sha": commit_sha,
+                    "base_sha": None,
+                    "head_sha": after_head or None,
+                }
+            if not commit_sha and not had_commits_ahead:
+                return {
+                    "status": "failed",
+                    "reason_code": "preserve_commit_missing",
+                    "commit_sha": None,
+                    "base_sha": None,
+                    "head_sha": after_head or None,
+                }
 
             base_ref = str(svc._run_branch or "").strip()
             if not base_ref:
@@ -426,7 +520,13 @@ class WorktreeManager:
                     check=True,
                 )
                 if not result.stdout.strip():
-                    return False
+                    return {
+                        "status": "failed",
+                        "reason_code": "branch_ahead_missing",
+                        "commit_sha": commit_sha,
+                        "base_sha": None,
+                        "head_sha": after_head or None,
+                    }
             except subprocess.CalledProcessError:
                 pass
 
@@ -500,10 +600,22 @@ class WorktreeManager:
                 task.metadata.pop("preserved_merge_base_sha", None)
 
             svc.container.tasks.upsert(task)
-            return True
+            return {
+                "status": "preserved",
+                "reason_code": "ok",
+                "commit_sha": commit_sha or None,
+                "base_sha": str(task.metadata.get("preserved_base_sha") or "").strip() or None,
+                "head_sha": str(task.metadata.get("preserved_head_sha") or "").strip() or None,
+            }
         except Exception:
             logger.exception("Failed to preserve worktree work for task %s", task.id)
-            return False
+            return {
+                "status": "failed",
+                "reason_code": "exception",
+                "commit_sha": None,
+                "base_sha": None,
+                "head_sha": None,
+            }
 
     def resolve_task_plan_excerpt(self, task: Any, *, max_chars: int = 800) -> str:
         """Extract bounded plan text used in merge-conflict prompt context."""

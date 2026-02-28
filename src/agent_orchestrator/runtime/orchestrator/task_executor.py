@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -117,8 +118,16 @@ class TaskExecutor:
         if not has_task_changes:
             return False, "no task-scoped changes available"
 
-        if not svc._preserve_worktree_work(task, worktree_dir):
-            return False, "failed to preserve task-scoped changes"
+        preserve_outcome = svc._preserve_worktree_work(task, worktree_dir)
+        if isinstance(preserve_outcome, bool):
+            preserve_status = "preserved" if preserve_outcome else "failed"
+            preserve_reason = "legacy_bool_result"
+        else:
+            preserve_status = str(getattr(preserve_outcome, "get", lambda _k, _d=None: _d)("status") or "").strip()
+            preserve_reason = str(getattr(preserve_outcome, "get", lambda _k, _d=None: _d)("reason_code") or "failed_to_preserve").strip()
+        if preserve_status != "preserved":
+            reason = preserve_reason
+            return False, f"failed to preserve task-scoped changes ({reason})"
 
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
         preserved_branch = str(metadata.get("preserved_branch") or "").strip()
@@ -221,6 +230,14 @@ class TaskExecutor:
             fresh.status = "blocked"
             fresh.current_agent_id = None
             fresh.error = "Internal error during execution"
+            if isinstance(fresh.metadata, dict):
+                raw_worktree_dir = str(fresh.metadata.get("worktree_dir") or "").strip()
+                if raw_worktree_dir:
+                    svc._mark_task_context_retained(
+                        fresh,
+                        reason=fresh.error,
+                        expected_on_retry=True,
+                    )
             svc.container.tasks.upsert(fresh)
 
     def execute_task_inner(self, task: Task) -> None:
@@ -235,49 +252,71 @@ class TaskExecutor:
             task = fresh_task
         worktree_dir: Optional[Path] = None
         try:
-            old_preserved = task.metadata.get("preserved_branch")
-            if old_preserved:
-                # Try to create worktree from the preserved branch
-                try:
-                    worktree_dir = svc._create_worktree_from_branch(task, old_preserved)
-                except subprocess.CalledProcessError:
-                    # Clean up stale worktree dir that may have caused the failure.
-                    stale_dir = svc.container.state_root / "worktrees" / str(task.id)
-                    if stale_dir.exists():
-                        subprocess.run(
-                            ["git", "worktree", "remove", str(stale_dir), "--force"],
-                            cwd=svc.container.project_dir,
-                            capture_output=True,
-                            text=True,
-                        )
-                    # Retry from-branch after cleaning stale dir
+            if not isinstance(task.metadata, dict):
+                task.metadata = {}
+            task_context_raw = task.metadata.get("task_context")
+            task_context = task_context_raw if isinstance(task_context_raw, dict) else {}
+            expected_on_retry = bool(task_context.get("expected_on_retry"))
+            old_preserved = str(task.metadata.get("preserved_branch") or "").strip()
+
+            retained_path_raw = str(task_context.get("worktree_dir") or task.metadata.get("worktree_dir") or "").strip()
+            retained_path = svc._resolve_retained_task_worktree(task, retained_path_raw)
+            context_expected = bool(expected_on_retry or retained_path_raw or old_preserved)
+
+            if retained_path is not None:
+                worktree_dir = retained_path
+            else:
+                if old_preserved:
                     try:
                         worktree_dir = svc._create_worktree_from_branch(task, old_preserved)
                     except subprocess.CalledProcessError:
-                        # Branch truly missing or corrupted — fall back to fresh worktree
-                        subprocess.run(
-                            ["git", "branch", "-D", str(old_preserved)],
-                            cwd=svc.container.project_dir,
-                            capture_output=True,
-                            text=True,
-                        )
-                        worktree_dir = svc._create_worktree(task)
-                # Clear preserved metadata only after successful worktree creation
-                for key in (
-                    "preserved_branch",
-                    "preserved_base_branch",
-                    "preserved_base_sha",
-                    "preserved_head_sha",
-                    "preserved_merge_base_sha",
-                    "preserved_at",
-                ):
-                    task.metadata.pop(key, None)
-                task.metadata.pop("merge_conflict", None)
+                        stale_dir = svc.container.state_root / "worktrees" / str(task.id)
+                        if stale_dir.exists():
+                            subprocess.run(
+                                ["git", "worktree", "remove", str(stale_dir), "--force"],
+                                cwd=svc.container.project_dir,
+                                capture_output=True,
+                                text=True,
+                            )
+                        try:
+                            worktree_dir = svc._create_worktree_from_branch(task, old_preserved)
+                        except subprocess.CalledProcessError:
+                            worktree_dir = None
+                    if worktree_dir:
+                        for key in (
+                            "preserved_branch",
+                            "preserved_base_branch",
+                            "preserved_base_sha",
+                            "preserved_head_sha",
+                            "preserved_merge_base_sha",
+                            "preserved_at",
+                        ):
+                            task.metadata.pop(key, None)
+                        task.metadata.pop("merge_conflict", None)
+                elif not context_expected:
+                    worktree_dir = svc._create_worktree(task)
+
+            if worktree_dir is None and context_expected:
+                task.status = "blocked"
+                task.current_agent_id = None
+                task.pending_gate = None
+                task.error = "Retained task context is missing; request changes to regenerate implementation context."
+                task.current_step = task.current_step or None
+                svc._mark_task_context_retained(task, reason="context_attach_failed", expected_on_retry=True)
                 svc.container.tasks.upsert(task)
-            else:
-                worktree_dir = svc._create_worktree(task)
+                svc.bus.emit(
+                    channel="tasks",
+                    event_type="task.blocked",
+                    entity_id=task.id,
+                    payload={"error": task.error},
+                )
+                return
+
             if worktree_dir:
                 task.metadata["worktree_dir"] = str(worktree_dir)
+                context_branch = str(task_context.get("task_branch") or f"task-{task.id}").strip() or f"task-{task.id}"
+                svc._record_task_context(task, worktree_dir=worktree_dir, task_branch=context_branch)
+                svc._clear_task_context_retained(task)
                 svc.container.tasks.upsert(task)
 
             registry = PipelineRegistry()
@@ -678,9 +717,6 @@ class TaskExecutor:
                 if not review_passed:
                     task.metadata.pop("review_history", None)
                     task.metadata.pop("verify_environment_note", None)
-                    if worktree_dir and worktree_dir.exists():
-                        if svc._preserve_worktree_work(task, worktree_dir):
-                            worktree_dir = None
                     task.status = "blocked"
                     task.error = "Review attempt cap exceeded"
                     task.current_step = "review"
@@ -728,6 +764,8 @@ class TaskExecutor:
                     # Context is now preserved on task branch; current worktree has
                     # already been removed by preserve_worktree_work.
                     worktree_dir = None
+                    task.metadata.pop("worktree_dir", None)
+                    task.metadata.pop("task_context", None)
                     task.status = "in_review"
                     task.current_step = "review"
                     task.metadata["pipeline_phase"] = "review"
@@ -798,12 +836,12 @@ class TaskExecutor:
 
                 if worktree_dir:
                     svc._merge_and_cleanup(task, worktree_dir)
-                    worktree_dir = None
+                    if not task.metadata.get("merge_conflict"):
+                        worktree_dir = None
 
                 if task.metadata.get("merge_conflict"):
                     task.status = "blocked"
                     task.error = "Merge conflict could not be resolved automatically"
-                    task.metadata["preserved_branch"] = f"task-{task.id}"
                     svc.container.tasks.upsert(task)
                     svc._finalize_run(task, run, status="blocked", summary="Blocked due to unresolved merge conflict")
                     svc.bus.emit(
@@ -852,6 +890,8 @@ class TaskExecutor:
                         text=True,
                     )
                     worktree_dir = None
+                    task.metadata.pop("worktree_dir", None)
+                    task.metadata.pop("task_context", None)
 
                 svc._run_summarize_step(task, run)
                 task.status = "done"
@@ -865,27 +905,29 @@ class TaskExecutor:
             task.metadata.pop("execution_checkpoint", None)
             task.metadata.pop("step_outputs", None)
             task.metadata.pop("worktree_dir", None)
+            task.metadata.pop("task_context", None)
             run.finished_at = now_iso()
             with svc.container.transaction():
                 svc.container.runs.upsert(run)
                 svc.container.tasks.upsert(task)
         finally:
+            latest = svc.container.tasks.get(task.id)
+            if latest is not None:
+                task = latest
+
+            worktree_removed = False
+            metadata_changed = False
+            exception_in_flight = sys.exc_info()[1] is not None
             if worktree_dir and worktree_dir.exists():
-                preserved = task.metadata.get("preserved_branch")
-                if not preserved:
-                    try:
-                        if svc._has_uncommitted_changes(worktree_dir) or svc._has_commits_ahead(worktree_dir):
-                            svc._preserve_worktree_work(task, worktree_dir)
-                            preserved = task.metadata.get("preserved_branch")
-                    except Exception:
-                        pass
-                if preserved:
-                    subprocess.run(
-                        ["git", "worktree", "remove", str(worktree_dir), "--force"],
-                        cwd=svc.container.project_dir,
-                        capture_output=True,
-                        text=True,
+                if task.status == "blocked" or exception_in_flight:
+                    task.metadata["worktree_dir"] = str(worktree_dir)
+                    svc._record_task_context(task, worktree_dir=worktree_dir, task_branch=f"task-{task.id}")
+                    svc._mark_task_context_retained(
+                        task,
+                        reason=str(task.error or ("unexpected_exception" if exception_in_flight else "blocked")),
+                        expected_on_retry=True,
                     )
+                    metadata_changed = True
                 else:
                     subprocess.run(
                         ["git", "worktree", "remove", str(worktree_dir), "--force"],
@@ -893,13 +935,21 @@ class TaskExecutor:
                         capture_output=True,
                         text=True,
                     )
-                    subprocess.run(
-                        ["git", "branch", "-D", f"task-{task.id}"],
-                        cwd=svc.container.project_dir,
-                        capture_output=True,
-                        text=True,
-                    )
-            worktree_removed = bool(task.metadata.pop("worktree_dir", None))
+                    worktree_removed = True
+                    if task.status in {"done", "cancelled"}:
+                        subprocess.run(
+                            ["git", "branch", "-D", f"task-{task.id}"],
+                            cwd=svc.container.project_dir,
+                            capture_output=True,
+                            text=True,
+                        )
+                        task.metadata.pop("task_context", None)
+                        metadata_changed = True
+
+            if task.status in {"done", "cancelled"} and task.metadata.get("worktree_dir"):
+                task.metadata.pop("worktree_dir", None)
+                metadata_changed = True
+
             lease_removed = svc._release_execution_lease(task)
-            if worktree_removed or lease_removed:
+            if worktree_removed or lease_removed or metadata_changed:
                 svc.container.tasks.upsert(task)

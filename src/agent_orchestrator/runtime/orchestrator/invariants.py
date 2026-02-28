@@ -119,6 +119,25 @@ def apply_runtime_invariants(
                         message="Pre-commit review context was missing and task was blocked.",
                     )
 
+        if task.status == "blocked" and git_backed:
+            context_raw = metadata.get("task_context")
+            context = context_raw if isinstance(context_raw, dict) else {}
+            expected_on_retry = bool(context.get("expected_on_retry"))
+            if expected_on_retry:
+                has_retained = service._resolve_retained_task_worktree(task) is not None
+                preserved_branch = str(metadata.get("preserved_branch") or "").strip()
+                has_preserved = bool(preserved_branch and _branch_exists(container.project_dir, preserved_branch))
+                if not has_retained and not has_preserved:
+                    message = "Retry context missing; request changes to regenerate task context."
+                    if task.error != message:
+                        task.error = message
+                        changed = True
+                    _record(
+                        task,
+                        code="context_missing_for_retry",
+                        message="Blocked task expected retry context but retained/preserved references were missing.",
+                    )
+
         if task.status == "in_progress" and not task.pending_gate:
             has_active_future = task.id in active_future_task_ids
             resume_requested = False

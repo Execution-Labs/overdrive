@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import subprocess
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -725,6 +726,8 @@ class OrchestratorService:
         for task in tasks:
             if task.id not in in_progress_ids:
                 continue
+            if isinstance(task.metadata, dict):
+                self._mark_task_context_retained(task, reason="orchestrator_restart", expected_on_retry=False)
             if task.pending_gate or self._is_resume_requested(task):
                 task.current_agent_id = None
                 self.container.tasks.upsert(task)
@@ -1157,6 +1160,126 @@ class OrchestratorService:
     def _create_worktree_from_branch(self, task: Task, branch: str) -> Optional[Path]:
         return self._worktree_manager.create_worktree_from_branch(task, branch)
 
+    def _task_context_metadata(self, task: Task) -> dict[str, Any]:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        raw = task.metadata.get("task_context")
+        if isinstance(raw, dict):
+            return raw
+        context: dict[str, Any] = {}
+        task.metadata["task_context"] = context
+        return context
+
+    def _record_task_context(self, task: Task, *, worktree_dir: Path | None, task_branch: str | None = None) -> None:
+        """Persist active task context so retries can deterministically reattach."""
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        context = self._task_context_metadata(task)
+        context_id = str(context.get("context_id") or "").strip()
+        if not context_id:
+            context["context_id"] = f"ctx-{task.id}-{int(time.time())}"
+        if worktree_dir is not None:
+            context["worktree_dir"] = str(worktree_dir)
+            task.metadata["worktree_dir"] = str(worktree_dir)
+        elif task.metadata.get("worktree_dir"):
+            context["worktree_dir"] = str(task.metadata.get("worktree_dir"))
+        branch_name = str(task_branch or context.get("task_branch") or f"task-{task.id}").strip()
+        if branch_name:
+            context["task_branch"] = branch_name
+        context["retained"] = False
+        context["retained_reason"] = None
+        context["retained_at"] = None
+        context["expected_on_retry"] = False
+        task.metadata["task_context"] = context
+
+    def _mark_task_context_retained(self, task: Task, *, reason: str, expected_on_retry: bool = True) -> None:
+        """Mark task context as retained after a recoverable blocked/interrupt path."""
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        context = self._task_context_metadata(task)
+        context_id = str(context.get("context_id") or "").strip()
+        if not context_id:
+            context["context_id"] = f"ctx-{task.id}-{int(time.time())}"
+        worktree_dir = str(task.metadata.get("worktree_dir") or context.get("worktree_dir") or "").strip()
+        if worktree_dir:
+            context["worktree_dir"] = worktree_dir
+        task_branch = str(context.get("task_branch") or f"task-{task.id}").strip()
+        if task_branch:
+            context["task_branch"] = task_branch
+        context["retained"] = True
+        context["retained_reason"] = str(reason or "blocked")
+        context["retained_at"] = now_iso()
+        context["expected_on_retry"] = bool(expected_on_retry)
+        task.metadata["task_context"] = context
+
+    def _clear_task_context_retained(self, task: Task) -> None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        raw = task.metadata.get("task_context")
+        if not isinstance(raw, dict):
+            return
+        raw["retained"] = False
+        raw["retained_reason"] = None
+        raw["retained_at"] = None
+        raw["expected_on_retry"] = False
+        task.metadata["task_context"] = raw
+
+    def _task_context_expected(self, task: Task) -> bool:
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        raw = metadata.get("task_context")
+        if not isinstance(raw, dict):
+            return False
+        return bool(raw.get("expected_on_retry"))
+
+    def _resolve_retained_task_worktree(self, task: Task, raw_path: str | None = None) -> Path | None:
+        """Resolve and validate retained task worktree path for retry attachment."""
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        context_raw = metadata.get("task_context")
+        context = context_raw if isinstance(context_raw, dict) else {}
+        candidate_raw = str(raw_path or context.get("worktree_dir") or metadata.get("worktree_dir") or "").strip()
+        if not candidate_raw:
+            return None
+        try:
+            candidate = Path(candidate_raw).expanduser().resolve()
+            expected = (self.container.state_root / "worktrees" / str(task.id)).resolve()
+        except Exception:
+            return None
+        if candidate != expected:
+            return None
+        if not candidate.exists() or not candidate.is_dir():
+            return None
+        try:
+            inside_result = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=candidate,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            return None
+        if inside_result.returncode != 0 or str(inside_result.stdout or "").strip().lower() != "true":
+            return None
+        expected_branch = str(context.get("task_branch") or metadata.get("preserved_branch") or f"task-{task.id}").strip()
+        try:
+            branch_result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=candidate,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            return None
+        current_branch = str(branch_result.stdout or "").strip()
+        if branch_result.returncode != 0 or not current_branch or current_branch == "HEAD":
+            return None
+        if expected_branch and current_branch != expected_branch:
+            return None
+        return candidate
+
     # ------------------------------------------------------------------
 
     def _pipeline_id_for_task(self, task: Task) -> str:
@@ -1423,10 +1546,10 @@ class OrchestratorService:
         """Check whether cwd's HEAD has commits beyond the run branch."""
         return self._worktree_manager.has_commits_ahead(cwd)
 
-    def _preserve_worktree_work(self, task: Task, worktree_dir: Path) -> bool:
+    def _preserve_worktree_work(self, task: Task, worktree_dir: Path) -> Any:
         """Commit agent edits in the worktree, remove the worktree but keep the branch.
 
-        Returns True if a branch was preserved with work on it.
+        Returns a structured preserve outcome.
         """
         return self._worktree_manager.preserve_worktree_work(task, worktree_dir)
 

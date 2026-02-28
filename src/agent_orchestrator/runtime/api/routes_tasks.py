@@ -25,7 +25,11 @@ from ..domain.models import (
     TaskStatus,
     now_iso,
 )
-from ..storage.bootstrap import archive_state_root, ensure_state_root
+from ..storage.bootstrap import (
+    archive_state_root,
+    archive_task_context_manifest,
+    ensure_state_root,
+)
 from .deps import RouteDeps
 from . import router_impl as impl
 
@@ -60,6 +64,25 @@ _CHANGES_TELEMETRY_TTL_SECONDS = 900.0
 _CHANGES_TELEMETRY_MAX_KEYS = 2048
 _LOW_CONFIDENCE_FILE_THRESHOLD = 120
 _LOW_CONFIDENCE_LINE_THRESHOLD = 4000
+_INTERNAL_TASK_METADATA_KEYS = {
+    "worktree_dir",
+    "task_context",
+    "preserved_branch",
+    "preserved_base_branch",
+    "preserved_base_sha",
+    "preserved_head_sha",
+    "preserved_merge_base_sha",
+    "preserved_at",
+    "review_context",
+    "execution_checkpoint",
+    "pending_precommit_approval",
+    "review_stage",
+    "active_human_guidance",
+    "retry_guidance",
+    "requested_changes",
+    "pipeline_phase",
+    "step_outputs",
+}
 
 
 def _gate_approved_message(gate: str | None, *, will_resume: bool) -> str:
@@ -122,6 +145,54 @@ def _pipeline_steps(task: Task) -> list[str]:
         return PipelineRegistry().resolve_for_task_type(task.task_type).step_names()
     except Exception:
         return []
+
+
+def _task_context_manifest_entry(task: Task) -> dict[str, Any] | None:
+    metadata = task.metadata if isinstance(task.metadata, dict) else {}
+    context_raw = metadata.get("task_context")
+    context = context_raw if isinstance(context_raw, dict) else {}
+    retained_worktree = str(context.get("worktree_dir") or metadata.get("worktree_dir") or "").strip()
+    task_branch = str(context.get("task_branch") or "").strip()
+    preserved_branch = str(metadata.get("preserved_branch") or "").strip()
+    has_context = bool(retained_worktree or task_branch or preserved_branch)
+    if not has_context:
+        return None
+    return {
+        "task_id": task.id,
+        "status": task.status,
+        "run_ids": list(task.run_ids or []),
+        "retained_worktree_dir": retained_worktree or None,
+        "task_branch": task_branch or None,
+        "preserved_branch": preserved_branch or None,
+        "preserved_base_branch": str(metadata.get("preserved_base_branch") or "").strip() or None,
+        "preserved_base_sha": str(metadata.get("preserved_base_sha") or "").strip() or None,
+        "preserved_head_sha": str(metadata.get("preserved_head_sha") or "").strip() or None,
+        "preserved_merge_base_sha": str(metadata.get("preserved_merge_base_sha") or "").strip() or None,
+        "retained_reason": str(context.get("retained_reason") or "").strip() or None,
+        "retained_at": str(context.get("retained_at") or "").strip() or None,
+        "expected_on_retry": bool(context.get("expected_on_retry")),
+        "archived_at": now_iso(),
+    }
+
+
+def _collect_task_context_manifest_entries(tasks: list[Task]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for task in tasks:
+        entry = _task_context_manifest_entry(task)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _sanitize_client_task_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
+    metadata = dict(raw or {})
+    sanitized: dict[str, Any] = {}
+    for key, value in metadata.items():
+        normalized = str(key)
+        if normalized in _INTERNAL_TASK_METADATA_KEYS or normalized.startswith("preserved_"):
+            continue
+        sanitized[normalized] = value
+    return sanitized
 
 
 def _previous_step(steps: list[str], target_step: str) -> str | None:
@@ -200,6 +271,66 @@ def _is_within_project(candidate: Path, project_root: Path) -> bool:
     except Exception:
         return False
     return resolved_candidate == resolved_root or resolved_root in resolved_candidate.parents
+
+
+def _is_valid_task_worktree_path(
+    *,
+    task_id: str,
+    candidate: Path,
+    project_root: Path,
+    state_root: Path,
+    strict_retained: bool,
+) -> bool:
+    try:
+        resolved_candidate = candidate.resolve()
+        resolved_root = project_root.resolve()
+        resolved_state = state_root.resolve()
+    except Exception:
+        return False
+    if strict_retained:
+        expected = (resolved_state / "worktrees" / str(task_id)).resolve()
+        if resolved_candidate != expected:
+            return False
+    else:
+        if not (resolved_candidate == resolved_root or resolved_root in resolved_candidate.parents):
+            return False
+    if not resolved_candidate.exists() or not resolved_candidate.is_dir():
+        return False
+    try:
+        inside = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=resolved_candidate,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except Exception:
+        return False
+    return inside.returncode == 0 and str(inside.stdout or "").strip().lower() == "true"
+
+
+def _resolve_worktree_diff_base_ref(
+    *,
+    task: Task,
+    metadata: dict[str, Any],
+    git_dir: Path,
+    head_ref: str | None,
+) -> tuple[str | None, str]:
+    task_context_raw = metadata.get("task_context")
+    task_context = task_context_raw if isinstance(task_context_raw, dict) else {}
+    preferred_base = str(task_context.get("base_branch") or metadata.get("preserved_base_branch") or "").strip()
+    if preferred_base and _resolve_commit_sha(git_dir, preferred_base):
+        return preferred_base, "task_context"
+    review_context_raw = metadata.get("review_context")
+    review_context = review_context_raw if isinstance(review_context_raw, dict) else {}
+    review_base = str(review_context.get("base_branch") or "").strip()
+    if review_base and _resolve_commit_sha(git_dir, review_base):
+        return review_base, "review_context"
+    heuristic = _resolve_base_branch(git_dir, avoid_branch=str(head_ref or "").strip() or None)
+    if heuristic and _resolve_commit_sha(git_dir, heuristic):
+        return heuristic, "heuristic"
+    return None, "none"
 
 
 def _is_runtime_state_path(path_text: str) -> bool:
@@ -580,6 +711,7 @@ def _preserved_branch_changes(
     display_base_branch = str(base_ref or "").strip() or None
     return {
         "mode": "preserved_branch",
+        "context_source": "preserved_branch",
         "commit": None,
         "branch": preserved_branch,
         "base_branch": display_base_branch,
@@ -737,7 +869,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             dependency_policy=cast(DependencyPolicy, dep_policy),
             source=body.source,
             worker_model=(str(body.worker_model).strip() if body.worker_model else None),
-            metadata=dict(body.metadata or {}),
+            metadata=_sanitize_client_task_metadata(body.metadata),
             project_commands=(body.project_commands if body.project_commands else None),
         )
         if not isinstance(task.metadata, dict):
@@ -789,7 +921,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             description=str(body.description or "").strip(),
             task_type="feature",
             status="queued",
-            metadata=dict(body.metadata or {}),
+            metadata=_sanitize_client_task_metadata(body.metadata),
         )
         if not isinstance(synthetic.metadata, dict):
             synthetic.metadata = {}
@@ -879,6 +1011,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         orchestrator.control("pause")
         orchestrator.shutdown(timeout=10.0)
 
+        context_entries = _collect_task_context_manifest_entries(container.tasks.list())
+        context_manifest = archive_task_context_manifest(container.project_dir, context_entries)
         archived_to = archive_state_root(container.project_dir)
         ensure_state_root(container.project_dir)
         deps.job_store.clear()
@@ -891,7 +1025,13 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             if archive_path
             else "Cleared all tasks. No existing runtime state archive was needed."
         )
-        payload = {"archived_to": archive_path, "message": message, "cleared_at": now_iso()}
+        payload = {
+            "archived_to": archive_path,
+            "message": message,
+            "cleared_at": now_iso(),
+            "archived_context_count": len(context_entries),
+            "archived_context_manifest_path": str(context_manifest) if context_manifest else "",
+        }
         bus.emit(channel="tasks", event_type="tasks.cleared", entity_id=container.project_id, payload=payload)
         bus.emit(channel="notifications", event_type="tasks.cleared", entity_id=container.project_id, payload=payload)
         return {"cleared": True, **payload}
@@ -958,11 +1098,22 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if task.status not in {"done", "cancelled"}:
             raise HTTPException(status_code=400, detail="Only terminal tasks (done/cancelled) can be deleted.")
 
+        context_entry = _task_context_manifest_entry(task)
+        context_manifest = (
+            archive_task_context_manifest(container.project_dir, [context_entry])
+            if context_entry is not None
+            else None
+        )
         _remove_task_relationship_refs(task_id=task_id, container=container)
         if not container.tasks.delete(task_id):
             raise HTTPException(status_code=404, detail="Task not found")
         bus.emit(channel="tasks", event_type="task.deleted", entity_id=task_id, payload={"status": task.status})
-        return {"deleted": True, "task_id": task_id}
+        return {
+            "deleted": True,
+            "task_id": task_id,
+            "archived_context_count": 1 if context_entry is not None else 0,
+            "archived_context_manifest_path": str(context_manifest) if context_manifest else "",
+        }
 
     @router.get("/tasks/{task_id}/diff")
     async def get_task_diff(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1038,28 +1189,6 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
 
-        commit_payload: dict[str, Any] | None = None
-        try:
-            commit_payload = await get_task_diff(task_id, project_dir)
-        except HTTPException as exc:
-            if exc.status_code != 500:
-                raise
-        if commit_payload and commit_payload.get("commit"):
-            return {
-                "mode": "committed",
-                "commit": commit_payload.get("commit"),
-                "base_ref": None,
-                "base_sha": None,
-                "head_ref": None,
-                "head_sha": None,
-                "base_source": "none",
-                "confidence": "high",
-                "warnings": [],
-                "files": commit_payload.get("files") or [],
-                "diff": commit_payload.get("diff") or "",
-                "stat": commit_payload.get("stat") or "",
-            }
-
         task_metadata = task.metadata if isinstance(task.metadata, dict) else {}
         worktree_dir = None
         worktree_candidate_present = False
@@ -1071,6 +1200,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         git_dir: Path | None = None
         project_root = container.project_dir
         has_task_worktree = False
+        strict_retained_context = task.status == "blocked"
         if worktree_dir:
             try:
                 worktree_path = Path(worktree_dir).expanduser().resolve()
@@ -1078,12 +1208,41 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 worktree_path = None
             if (
                 worktree_path
-                and worktree_path.exists()
-                and worktree_path.is_dir()
-                and _is_within_project(worktree_path, project_root)
+                and _is_valid_task_worktree_path(
+                    task_id=task.id,
+                    candidate=worktree_path,
+                    project_root=project_root,
+                    state_root=container.state_root,
+                    strict_retained=strict_retained_context,
+                )
             ):
                 git_dir = worktree_path
                 has_task_worktree = True
+        prefer_retained_worktree = bool(task.status == "blocked" and has_task_worktree)
+
+        if not prefer_retained_worktree:
+            commit_payload: dict[str, Any] | None = None
+            try:
+                commit_payload = await get_task_diff(task_id, project_dir)
+            except HTTPException as exc:
+                if exc.status_code != 500:
+                    raise
+            if commit_payload and commit_payload.get("commit"):
+                return {
+                    "mode": "committed",
+                    "context_source": "committed",
+                    "commit": commit_payload.get("commit"),
+                    "base_ref": None,
+                    "base_sha": None,
+                    "head_ref": None,
+                    "head_sha": None,
+                    "base_source": "none",
+                    "confidence": "high",
+                    "warnings": [],
+                    "files": commit_payload.get("files") or [],
+                    "diff": commit_payload.get("diff") or "",
+                    "stat": commit_payload.get("stat") or "",
+                }
 
         if has_task_worktree and git_dir is not None:
             try:
@@ -1091,6 +1250,17 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                     ["git", "status", "--short"],
                     cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
                 )
+                head_ref_result = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=git_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                head_ref: str | None = str(head_ref_result.stdout or "").strip()
+                if head_ref_result.returncode != 0 or not head_ref or head_ref == "HEAD":
+                    head_ref = None
                 has_head = (
                     subprocess.run(
                         ["git", "rev-parse", "--verify", "HEAD"],
@@ -1102,8 +1272,21 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                     ).returncode
                     == 0
                 )
-                stat_cmd = ["git", "diff", "--stat", "HEAD"] if has_head else ["git", "diff", "--stat"]
-                diff_cmd = ["git", "diff", "HEAD"] if has_head else ["git", "diff"]
+                base_ref = None
+                base_source = "none"
+                if prefer_retained_worktree and has_head:
+                    base_ref, base_source = _resolve_worktree_diff_base_ref(
+                        task=task,
+                        metadata=task_metadata,
+                        git_dir=git_dir,
+                        head_ref=head_ref,
+                    )
+                if base_ref and has_head:
+                    stat_cmd = ["git", "diff", "--stat", base_ref]
+                    diff_cmd = ["git", "diff", base_ref]
+                else:
+                    stat_cmd = ["git", "diff", "--stat", "HEAD"] if has_head else ["git", "diff", "--stat"]
+                    diff_cmd = ["git", "diff", "HEAD"] if has_head else ["git", "diff"]
                 stat_result = subprocess.run(
                     stat_cmd,
                     cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
@@ -1140,7 +1323,32 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 stat_text = stat_result.stdout or ("\n".join(status_lines) if status_lines else "")
                 return {
                     "mode": "working_tree",
+                    "context_source": "retained_worktree",
                     "commit": None,
+                    "base_ref": base_ref,
+                    "base_sha": _resolve_commit_sha(git_dir, base_ref) if base_ref else None,
+                    "head_ref": head_ref,
+                    "head_sha": _resolve_commit_sha(git_dir, head_ref) if head_ref else None,
+                    "base_source": base_source,
+                    "confidence": "high",
+                    "warnings": [],
+                    "files": files,
+                    "diff": diff_text,
+                    "stat": stat_text,
+                }
+
+        if prefer_retained_worktree:
+            commit_payload = None
+            try:
+                commit_payload = await get_task_diff(task_id, project_dir)
+            except HTTPException as exc:
+                if exc.status_code != 500:
+                    raise
+            if commit_payload and commit_payload.get("commit"):
+                return {
+                    "mode": "committed",
+                    "context_source": "committed",
+                    "commit": commit_payload.get("commit"),
                     "base_ref": None,
                     "base_sha": None,
                     "head_ref": None,
@@ -1148,9 +1356,9 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                     "base_source": "none",
                     "confidence": "high",
                     "warnings": [],
-                    "files": files,
-                    "diff": diff_text,
-                    "stat": stat_text,
+                    "files": commit_payload.get("files") or [],
+                    "diff": commit_payload.get("diff") or "",
+                    "stat": commit_payload.get("stat") or "",
                 }
 
         preserved_payload = _preserved_branch_changes(
@@ -1165,6 +1373,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if has_task_worktree:
             return {
                 "mode": "none",
+                "context_source": "none",
                 "commit": None,
                 "base_ref": None,
                 "base_sha": None,
@@ -1186,6 +1395,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         return {
             "mode": "none",
             "reason": reason,
+            "context_source": "none",
             "commit": None,
             "base_ref": None,
             "base_sha": None,

@@ -1112,6 +1112,30 @@ def test_task_step_timeout_round_trip(tmp_path: Path) -> None:
         assert "step_timeouts" not in (cleared.json()["task"]["metadata"] or {})
 
 
+def test_create_task_strips_internal_context_metadata_keys(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={
+                "title": "Sanitize metadata",
+                "metadata": {
+                    "worktree_dir": "/tmp/bad",
+                    "task_context": {"expected_on_retry": True},
+                    "preserved_branch": "task-bad",
+                    "user.note": "keep",
+                },
+            },
+        )
+        assert created.status_code == 200
+        task = created.json()["task"]
+        metadata = task["metadata"] or {}
+        assert "worktree_dir" not in metadata
+        assert "task_context" not in metadata
+        assert "preserved_branch" not in metadata
+        assert metadata.get("user.note") == "keep"
+
+
 def test_task_payload_includes_gate_context(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     container = Container(tmp_path)
@@ -1714,6 +1738,8 @@ def test_delete_terminal_task_cleans_relationship_references(tmp_path: Path) -> 
         payload = resp.json()
         assert payload["deleted"] is True
         assert payload["task_id"] == task_to_delete.id
+        assert payload["archived_context_count"] == 0
+        assert payload["archived_context_manifest_path"] == ""
 
     fresh = Container(tmp_path)
     assert fresh.tasks.get(task_to_delete.id) is None
@@ -1734,6 +1760,39 @@ def test_delete_non_terminal_task_rejected(tmp_path: Path) -> None:
         assert "Only terminal tasks" in resp.json()["detail"]
 
 
+def test_delete_terminal_task_archives_context_manifest(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    retained_dir = tmp_path / ".agent_orchestrator" / "worktrees" / "task-delete-context"
+    task = Task(
+        title="Delete context task",
+        status="done",
+        metadata={
+            "worktree_dir": str(retained_dir),
+            "task_context": {
+                "context_id": "ctx-delete",
+                "worktree_dir": str(retained_dir),
+                "task_branch": "task-delete-context",
+                "retained": True,
+                "expected_on_retry": True,
+            },
+        },
+    )
+    container.tasks.upsert(task)
+
+    with TestClient(app) as client:
+        resp = client.delete(f"/api/tasks/{task.id}")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["deleted"] is True
+        assert payload["archived_context_count"] == 1
+        manifest_path = Path(str(payload["archived_context_manifest_path"] or ""))
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["count"] == 1
+        assert manifest["items"][0]["task_id"] == task.id
+
+
 def test_clear_tasks_archives_state_and_reinitializes_board(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
@@ -1743,6 +1802,8 @@ def test_clear_tasks_archives_state_and_reinitializes_board(tmp_path: Path) -> N
         assert clear_resp.status_code == 200
         body = clear_resp.json()
         assert body["cleared"] is True
+        assert body["archived_context_count"] == 0
+        assert body["archived_context_manifest_path"] == ""
         archived_to = str(body["archived_to"] or "")
         assert archived_to
         assert "Archived previous runtime state to" in body["message"]
@@ -1775,6 +1836,39 @@ def test_clear_tasks_archives_state_and_reinitializes_board(tmp_path: Path) -> N
         status_resp = client.get("/api/orchestrator/status")
         assert status_resp.status_code == 200
         assert status_resp.json().get("scheduler_attached") is True
+
+
+def test_clear_tasks_archives_context_manifest_when_present(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    retained_dir = tmp_path / ".agent_orchestrator" / "worktrees" / "task-retained"
+    task = Task(
+        title="Retained blocked task",
+        status="blocked",
+        metadata={
+            "worktree_dir": str(retained_dir),
+            "task_context": {
+                "context_id": "ctx-retained",
+                "worktree_dir": str(retained_dir),
+                "task_branch": "task-retained",
+                "retained": True,
+                "expected_on_retry": True,
+            },
+        },
+    )
+    container.tasks.upsert(task)
+
+    with TestClient(app) as client:
+        clear_resp = client.post("/api/tasks/clear")
+        assert clear_resp.status_code == 200
+        body = clear_resp.json()
+        assert body["cleared"] is True
+        assert body["archived_context_count"] == 1
+        manifest_path = Path(str(body["archived_context_manifest_path"] or ""))
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["count"] == 1
+        assert manifest["items"][0]["task_id"] == task.id
 
 
 def test_api_surfaces_human_blocking_issues_on_task_and_timeline(tmp_path: Path) -> None:
@@ -2389,6 +2483,49 @@ def test_task_changes_endpoint_ignores_out_of_scope_worktree_dir(tmp_path: Path)
         assert payload["diff"] == ""
 
 
+def test_task_changes_endpoint_rejects_blocked_repo_root_worktree_context(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "init",
+        ],
+        tmp_path,
+    )
+    (tmp_path / "tracked.txt").write_text("base\nrepo root change\n", encoding="utf-8")
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Blocked root context"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "blocked"
+        stored.metadata["worktree_dir"] = str(tmp_path)
+        stored.metadata["task_context"] = {
+            "context_id": "ctx-root",
+            "worktree_dir": str(tmp_path),
+            "task_branch": f"task-{stored.id}",
+            "retained": True,
+            "expected_on_retry": True,
+        }
+        container.tasks.upsert(stored)
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "none"
+        assert payload["reason"] == "invalid_worktree_context"
+        assert payload["diff"] == ""
+
+
 def test_task_changes_endpoint_does_not_fallback_to_repo_root_without_context(tmp_path: Path) -> None:
     _git(["init"], tmp_path)
     (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
@@ -2465,9 +2602,101 @@ def test_task_changes_endpoint_falls_back_when_commit_diff_errors(tmp_path: Path
         assert resp.status_code == 200
         payload = resp.json()
         assert payload["mode"] == "working_tree"
+        assert payload["context_source"] == "retained_worktree"
         assert payload["commit"] is None
         assert any(item.get("path") == "tracked.txt" for item in payload["files"])
         assert "+update" in payload["diff"]
+
+
+def test_task_changes_endpoint_prefers_blocked_retained_worktree_over_commit_diff(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "init",
+        ],
+        tmp_path,
+    )
+
+    old_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Blocked retained changes"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        retained_branch = f"task-{stored.id}"
+        retained_worktree = container.state_root / "worktrees" / stored.id
+        subprocess.run(
+            ["git", "worktree", "add", str(retained_worktree), "-b", retained_branch],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (retained_worktree / "tracked.txt").write_text("base\nold commit change\nnew retained change\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], retained_worktree)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "retained work",
+            ],
+            retained_worktree,
+        )
+        stored.status = "blocked"
+        stored.metadata["worktree_dir"] = str(retained_worktree)
+        stored.metadata["task_context"] = {
+            "context_id": "ctx-retained",
+            "worktree_dir": str(retained_worktree),
+            "task_branch": retained_branch,
+            "base_branch": base_branch,
+            "retained": True,
+            "expected_on_retry": True,
+        }
+        run = RunRecord(
+            task_id=stored.id,
+            status="done",
+            started_at=now_iso(),
+            finished_at=now_iso(),
+            steps=[{"step": "commit", "status": "ok", "commit": old_commit}],
+        )
+        container.runs.upsert(run)
+        stored.run_ids.append(run.id)
+        container.tasks.upsert(stored)
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "working_tree"
+        assert payload["context_source"] == "retained_worktree"
+        assert payload["base_ref"] == base_branch
+        assert "+new retained change" in payload["diff"]
 
 
 def test_task_changes_endpoint_uses_preserved_branch_when_worktree_is_empty(tmp_path: Path) -> None:
