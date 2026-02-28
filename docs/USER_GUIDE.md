@@ -140,6 +140,10 @@ Actions:
 Both actions can include optional human guidance and are recorded in task
 history/timeline metadata.
 
+Changes tab note:
+- Preserved-branch diffs may include low-confidence warnings when context is
+  reconstructed from legacy metadata (for example inferred base branch).
+
 ## HITL and Collaboration
 
 Collaboration APIs and UI support:

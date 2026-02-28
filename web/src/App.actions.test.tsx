@@ -1059,4 +1059,96 @@ describe('App action coverage', () => {
     })
     expect(screen.queryByText('Working tree changes')).not.toBeInTheDocument()
   })
+
+  it('shows provenance and warning banner for low-confidence preserved-branch diff', async () => {
+    const jsonResponse = (payload: unknown) => Promise.resolve({ ok: true, json: async () => payload })
+    const task = {
+      id: 'task-diffwarn',
+      title: 'Low-confidence diff task',
+      description: 'Uses preserved branch fallback',
+      priority: 'P2',
+      status: 'blocked',
+      task_type: 'feature',
+      labels: [],
+      blocked_by: [],
+      blocks: [],
+      hitl_mode: 'review_only',
+    }
+    const mockedFetch = vi.fn().mockImplementation((url, init) => {
+      const u = String(url)
+      const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+      if (u === '/' || u.startsWith('/?')) return jsonResponse({ project_id: 'repo-alpha' })
+      if (u.includes('/api/collaboration/modes')) return jsonResponse({ modes: [] })
+      if (u.includes('/api/tasks/board')) {
+        return jsonResponse({
+          columns: { backlog: [], queued: [], in_progress: [], in_review: [], blocked: [task], done: [], cancelled: [] },
+        })
+      }
+      if (u.includes('/api/tasks/execution-order')) return jsonResponse({ batches: [], completed: [] })
+      if (u.includes('/api/tasks/task-diffwarn/changes')) {
+        return jsonResponse({
+          mode: 'preserved_branch',
+          commit: null,
+          branch: 'task-task-diffwarn',
+          base_branch: 'main',
+          base_ref: 'main',
+          base_sha: 'aaaaaaaaaaaa1111111111111111111111111111',
+          head_ref: 'task-task-diffwarn',
+          head_sha: 'bbbbbbbbbbbb2222222222222222222222222222',
+          base_source: 'heuristic',
+          confidence: 'low',
+          warnings: ['heuristic_base_inferred', 'large_file_count'],
+          files: [{ path: 'tracked.txt', changes: '1 +' }],
+          diff: 'diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1,2 @@\n base\n+change\n',
+          stat: ' tracked.txt | 1 +\n 1 file changed, 1 insertion(+)\n',
+        })
+      }
+      if (u.includes('/api/tasks/task-diffwarn') && method === 'GET') return jsonResponse({ task })
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) return jsonResponse({ tasks: [task] })
+      if (u.includes('/api/orchestrator/status')) return jsonResponse({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null })
+      if (u.includes('/api/metrics')) return jsonResponse({})
+      if (u.includes('/api/workers/health')) return jsonResponse({ providers: [] })
+      if (u.includes('/api/workers/routing')) return jsonResponse({ default: 'codex', rows: [] })
+      if (u.includes('/api/agents')) return jsonResponse({ agents: [] })
+      if (u.includes('/api/projects/pinned')) return jsonResponse({ items: [] })
+      if (u.includes('/api/projects')) return jsonResponse({ projects: [] })
+      if (u.includes('/api/review-queue')) return jsonResponse({ tasks: [] })
+      if (u.includes('/api/phases')) return jsonResponse([])
+      if (u.includes('/api/collaboration/presence')) return jsonResponse({ users: [] })
+      if (u.includes('/api/collaboration/timeline/task-diffwarn')) return jsonResponse({ events: [] })
+      if (u.includes('/api/collaboration/feedback/task-diffwarn')) return jsonResponse({ feedback: [] })
+      if (u.includes('/api/collaboration/comments/task-diffwarn')) return jsonResponse({ comments: [] })
+      if (u.includes('/api/tasks/task-diffwarn/plan')) return jsonResponse({ task_id: 'task-diffwarn', revisions: [] })
+      if (u.includes('/api/tasks/task-diffwarn/plan/jobs')) return jsonResponse({ jobs: [] })
+      if (u.includes('/api/tasks/task-diffwarn/workdoc')) return jsonResponse({ task_id: 'task-diffwarn', content: '', exists: false })
+      if (u.includes('/api/settings')) {
+        return jsonResponse({
+          orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10, step_timeout_seconds: 600 },
+          agent_routing: { default_role: 'general', task_type_roles: {}, role_provider_overrides: {} },
+          defaults: { quality_gate: { critical: 0, high: 0, medium: 0, low: 0 }, dependency_policy: 'prudent' },
+          workers: { default: 'codex', default_model: '', routing: {}, providers: { codex: { type: 'codex', command: 'codex exec' } } },
+          project: { commands: {}, prompt_overrides: {}, prompt_injections: {}, prompt_defaults: {} },
+        })
+      }
+      return jsonResponse({})
+    })
+    global.fetch = mockedFetch as unknown as typeof fetch
+
+    render(<App />)
+    await waitFor(() => {
+      expect(screen.getByText('Low-confidence diff task')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('Low-confidence diff task'))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Changes$/i })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Changes$/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/Low-confidence diff:/i)).toBeInTheDocument()
+    })
+    expect(screen.getByText(/Provenance:/i)).toBeInTheDocument()
+    expect(screen.getByText(/Base branch was inferred heuristically\./i)).toBeInTheDocument()
+  })
 })

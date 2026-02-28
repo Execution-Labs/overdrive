@@ -1609,6 +1609,13 @@ export default function App() {
     reason?: 'task_context_missing' | 'invalid_worktree_context' | 'preserved_branch_missing'
     branch?: string | null
     base_branch?: string | null
+    base_ref?: string | null
+    base_sha?: string | null
+    head_ref?: string | null
+    head_sha?: string | null
+    base_source?: 'metadata_sha' | 'metadata_branch' | 'review_context_sha' | 'review_context_branch' | 'heuristic' | 'none'
+    confidence?: 'high' | 'medium' | 'low'
+    warnings?: string[]
     commit: string | null
     files: { path: string; changes: string }[]
     diff: string
@@ -3524,6 +3531,13 @@ export default function App() {
           reason?: 'task_context_missing' | 'invalid_worktree_context' | 'preserved_branch_missing'
           branch?: string | null
           base_branch?: string | null
+          base_ref?: string | null
+          base_sha?: string | null
+          head_ref?: string | null
+          head_sha?: string | null
+          base_source?: 'metadata_sha' | 'metadata_branch' | 'review_context_sha' | 'review_context_branch' | 'heuristic' | 'none'
+          confidence?: 'high' | 'medium' | 'low'
+          warnings?: string[]
           commit: string | null
           files: { path: string; changes: string }[]
           diff: string
@@ -3536,6 +3550,13 @@ export default function App() {
           reason: data.reason,
           branch: data.branch ?? null,
           base_branch: data.base_branch ?? null,
+          base_ref: data.base_ref ?? null,
+          base_sha: data.base_sha ?? null,
+          head_ref: data.head_ref ?? null,
+          head_sha: data.head_sha ?? null,
+          base_source: data.base_source ?? 'none',
+          confidence: data.confidence ?? 'high',
+          warnings: Array.isArray(data.warnings) ? data.warnings.map((item) => String(item)).filter(Boolean) : [],
           commit: data.commit ?? null,
           files: Array.isArray(data.files) ? data.files : [],
           diff: typeof data.diff === 'string' ? data.diff : '',
@@ -3550,6 +3571,13 @@ export default function App() {
           reason: undefined,
           branch: null,
           base_branch: null,
+          base_ref: null,
+          base_sha: null,
+          head_ref: null,
+          head_sha: null,
+          base_source: 'none',
+          confidence: 'high',
+          warnings: [],
           commit: legacy.commit ?? null,
           files: Array.isArray(legacy.files) ? legacy.files : [],
           diff: typeof legacy.diff === 'string' ? legacy.diff : '',
@@ -5303,6 +5331,22 @@ export default function App() {
               }
               const totalAdditions = fileChunks.reduce((sum, chunk) => sum + chunk.additions, 0)
               const totalDeletions = fileChunks.reduce((sum, chunk) => sum + chunk.deletions, 0)
+              const warningLabels: Record<string, string> = {
+                heuristic_base_inferred: 'Base branch was inferred heuristically.',
+                large_file_count: 'Diff spans an unusually large number of files.',
+                large_line_churn: 'Diff contains unusually large line churn.',
+                base_not_ancestor: 'Inferred base is not an ancestor of preserved work.',
+              }
+              const warningMessages = (taskDiff.warnings || []).map((code) => warningLabels[code] || code)
+              const baseRef = taskDiff.base_ref || taskDiff.base_branch || null
+              const headRef = taskDiff.head_ref || taskDiff.branch || null
+              const baseSha = taskDiff.base_sha || null
+              const headSha = taskDiff.head_sha || null
+              const provenanceText = taskDiff.mode === 'preserved_branch'
+                ? `${headRef || 'task branch'} vs ${baseRef || 'base'}`
+                : (baseRef || headRef)
+                  ? `${headRef || 'head'} vs ${baseRef || 'base'}`
+                  : ''
               return (
                 <>
                   <p className="task-meta">
@@ -5324,6 +5368,18 @@ export default function App() {
                       </>
                     ) : null}
                   </p>
+                  {provenanceText ? (
+                    <p className="task-meta">
+                      Provenance: {provenanceText}
+                      {baseSha ? ` @${baseSha.slice(0, 12)}` : ''}
+                      {headSha ? ` -> ${headSha.slice(0, 12)}` : ''}
+                    </p>
+                  ) : null}
+                  {warningMessages.length > 0 ? (
+                    <p className="info-banner">
+                      {taskDiff.confidence === 'low' ? 'Low-confidence diff:' : 'Diff warning:'} {warningMessages.join(' ')}
+                    </p>
+                  ) : null}
                   {fileChunks.length > 0 ? (
                     <div className="diff-file-sections">
                       {fileChunks.map((chunk) => (
