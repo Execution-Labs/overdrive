@@ -921,6 +921,7 @@ class TaskExecutor:
             metadata_changed = False
             exception_in_flight = sys.exc_info()[1] is not None
             if worktree_dir and worktree_dir.exists():
+                keep_active_context = task.status in {"in_progress", "in_review"}
                 if task.status == "blocked" or exception_in_flight:
                     task.metadata["worktree_dir"] = str(worktree_dir)
                     svc._record_task_context(task, worktree_dir=worktree_dir, task_branch=f"task-{task.id}")
@@ -929,6 +930,14 @@ class TaskExecutor:
                         reason=str(task.error or ("unexpected_exception" if exception_in_flight else "blocked")),
                         expected_on_retry=True,
                     )
+                    metadata_changed = True
+                elif keep_active_context:
+                    # Keep task context for active non-terminal states (for example
+                    # gate waits). This avoids deleting context/branch state while
+                    # the task is still expected to continue.
+                    task.metadata["worktree_dir"] = str(worktree_dir)
+                    svc._record_task_context(task, worktree_dir=worktree_dir, task_branch=f"task-{task.id}")
+                    svc._clear_task_context_retained(task)
                     metadata_changed = True
                 else:
                     subprocess.run(

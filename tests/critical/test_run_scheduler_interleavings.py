@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
+import subprocess
 
 from fastapi.testclient import TestClient
 
@@ -22,9 +23,18 @@ def _service(tmp_path: Path, *, worker_adapter: object | None = None) -> tuple[C
     return container, service
 
 
+def _git_init(path: Path) -> None:
+    """Initialize git repo with one commit for worktree-backed interleaving tests."""
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True, capture_output=True, text=True)
+    (path / "README.md").write_text("# init\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=path, check=True, capture_output=True, text=True)
+
+
 def test_manual_run_waits_for_scheduler_claim_and_returns_terminal(tmp_path: Path) -> None:
     """run_task should block on already-claimed scheduler work and return final task state."""
-
     step_started = threading.Event()
     release_step = threading.Event()
 
@@ -69,7 +79,6 @@ def test_manual_run_waits_for_scheduler_claim_and_returns_terminal(tmp_path: Pat
 
 def test_request_changes_rerun_under_active_scheduler_keeps_valid_state(tmp_path: Path) -> None:
     """Gate request-changes + immediate rerun should never surface missing retry-context failures."""
-
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         created = client.post(
@@ -107,6 +116,58 @@ def test_request_changes_rerun_under_active_scheduler_keeps_valid_state(tmp_path
         assert rerun.status_code == 200
         rerun_task = rerun.json()["task"]
         error_text = str(rerun_task.get("error") or "")
+        assert "Retained task context is missing" not in error_text
+        assert "Retry context missing" not in error_text
+
+        orchestrators = list(app.state.orchestrators.values())
+        assert orchestrators, "expected active orchestrator cache"
+        service = orchestrators[0]
+        latest = service.container.tasks.get(task["id"])
+        assert latest is not None
+        assert_task_lifecycle_invariants(latest, service=service)
+
+
+def test_plan_gate_request_changes_rerun_under_active_scheduler_git_keeps_valid_state(tmp_path: Path) -> None:
+    """Git-backed plan gate reruns should not hit internal worktree/branch races."""
+    _git_init(tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={
+                "title": "Interleaving plan-gate request changes",
+                "task_type": "initiative_plan",
+                "hitl_mode": "supervised",
+                "status": "queued",
+                "pipeline_template": ["analyze", "initiative_plan", "generate_tasks"],
+            },
+        )
+        assert created.status_code == 200
+        task = created.json()["task"]
+
+        first_run = client.post(f"/api/tasks/{task['id']}/run")
+        assert first_run.status_code == 200
+        parked = first_run.json()["task"]
+        assert parked["status"] == "in_progress"
+        assert parked["pending_gate"] == "before_generate_tasks"
+
+        request_changes = client.post(
+            f"/api/tasks/{task['id']}/approve-gate",
+            json={
+                "gate": "before_generate_tasks",
+                "action": "request_changes",
+                "guidance": "narrow the initiative plan",
+            },
+        )
+        assert request_changes.status_code == 200
+
+        # approve-gate(request_changes) starts scheduler work; rerun immediately to
+        # exercise interleavings between manual run and background claim.
+        rerun = client.post(f"/api/tasks/{task['id']}/run")
+        assert rerun.status_code == 200
+        rerun_task = rerun.json()["task"]
+        error_text = str(rerun_task.get("error") or "")
+        assert "Internal error during execution" not in error_text
         assert "Retained task context is missing" not in error_text
         assert "Retry context missing" not in error_text
 

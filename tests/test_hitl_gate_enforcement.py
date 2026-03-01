@@ -1,6 +1,7 @@
 """Tests for HITL mode gate enforcement in the orchestrator."""
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -16,6 +17,16 @@ def _service(tmp_path: Path) -> tuple[Container, OrchestratorService, EventBus]:
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus)
     return container, service, bus
+
+
+def _git_init(path: Path) -> None:
+    """Initialize a git repository with one commit for worktree-based tests."""
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True, capture_output=True, text=True)
+    (path / "README.md").write_text("# init\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=path, check=True, capture_output=True, text=True)
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +526,70 @@ def test_gate_request_changes_rerun_does_not_fail_missing_context(tmp_path: Path
     rerun = service.run_task(task.id)
     assert rerun.status == "in_progress"
     assert rerun.pending_gate == "before_implement"
+    assert "Retained task context is missing" not in str(rerun.error or "")
+    assert "Retry context missing" not in str(rerun.error or "")
+
+
+def test_plan_gate_request_changes_git_rerun_preserves_active_worktree_context(tmp_path: Path) -> None:
+    """Plan-gate request changes should not fail on rerun in git-backed repos."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from agent_orchestrator.runtime.api.router import create_router
+
+    _git_init(tmp_path)
+    container = Container(tmp_path)
+
+    def resolve_container(_: Any = None) -> Container:
+        return container
+
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus)
+
+    def resolve_orchestrator(_: Any = None) -> OrchestratorService:
+        return service
+
+    router = create_router(resolve_container, resolve_orchestrator, {})
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    task = Task(
+        title="Plan-only gate request changes",
+        status="queued",
+        task_type="initiative_plan",
+        hitl_mode="supervised",
+        pipeline_template=["analyze", "initiative_plan", "generate_tasks"],
+    )
+    container.tasks.upsert(task)
+
+    parked = service.run_task(task.id)
+    assert parked.status == "in_progress"
+    assert parked.pending_gate == "before_generate_tasks"
+    parked_task = container.tasks.get(task.id)
+    assert parked_task is not None
+    assert str(parked_task.metadata.get("worktree_dir") or "").strip()
+    assert isinstance(parked_task.metadata.get("task_context"), dict)
+
+    resp = client.post(
+        f"/api/tasks/{task.id}/approve-gate",
+        json={
+            "gate": "before_generate_tasks",
+            "action": "request_changes",
+            "guidance": "Refine plan",
+        },
+    )
+    assert resp.status_code == 200
+    queued = container.tasks.get(task.id)
+    assert queued is not None
+    assert queued.status == "queued"
+
+    # approve-gate(request_changes) starts the scheduler; pause to make rerun deterministic.
+    service.control("pause")
+    rerun = service.run_task(task.id)
+    assert rerun.status == "in_progress"
+    assert rerun.pending_gate == "before_generate_tasks"
+    assert "Internal error during execution" not in str(rerun.error or "")
     assert "Retained task context is missing" not in str(rerun.error or "")
     assert "Retry context missing" not in str(rerun.error or "")
 
