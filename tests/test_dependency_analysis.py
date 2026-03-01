@@ -306,3 +306,91 @@ def test_new_tasks_trigger_reanalysis(tmp_path: Path) -> None:
 
     service._maybe_analyze_dependencies()
     assert call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# 11. Generated tasks skip redundant auto-deps analysis
+# ---------------------------------------------------------------------------
+
+
+def test_generated_tasks_marked_analyzed_skip_auto_deps(tmp_path: Path) -> None:
+    call_count = 0
+
+    class CountingAdapter(_EphemeralMixin):
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            nonlocal call_count
+            if step == "analyze_deps":
+                call_count += 1
+            return StepResult(status="ok", dependency_edges=[])
+
+    container, service, _ = _service(tmp_path, adapter=CountingAdapter())
+    parent = Task(title="Decompose parent", task_type="decompose", status="done")
+    container.tasks.upsert(parent)
+
+    created_ids = service._create_child_tasks(
+        parent,
+        [
+            {"id": "foundation", "title": "Foundation", "task_type": "feature"},
+            {"id": "api", "title": "API", "task_type": "feature", "depends_on": ["foundation"]},
+        ],
+        effective_policy={"child_status": "queued", "child_hitl_mode": "autopilot", "infer_deps": True},
+    )
+    assert len(created_ids) == 2
+
+    first = container.tasks.get(created_ids[0])
+    second = container.tasks.get(created_ids[1])
+    assert first is not None and second is not None
+    assert first.metadata.get("deps_analyzed") is True
+    assert second.metadata.get("deps_analyzed") is True
+    assert second.metadata.get("deps_analysis_source") == "generate_tasks"
+    assert second.metadata.get("generated_depends_on") == ["foundation"]
+    assert first.id in second.blocked_by
+
+    service._maybe_analyze_dependencies()
+    assert call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# 12. infer_deps=false remains no-deps without auto re-inference
+# ---------------------------------------------------------------------------
+
+
+def test_generated_tasks_infer_deps_false_not_reinferred_by_auto_deps(tmp_path: Path) -> None:
+    call_count = 0
+
+    class EdgeAdapter(_EphemeralMixin):
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            nonlocal call_count
+            if step == "analyze_deps":
+                call_count += 1
+            return StepResult(
+                status="ok",
+                dependency_edges=[{"from": "ignored-a", "to": "ignored-b", "reason": "should not run"}],
+            )
+
+    container, service, _ = _service(tmp_path, adapter=EdgeAdapter())
+    parent = Task(title="Decompose parent", task_type="decompose", status="done")
+    container.tasks.upsert(parent)
+
+    created_ids = service._create_child_tasks(
+        parent,
+        [
+            {"id": "a", "title": "A", "task_type": "feature"},
+            {"id": "b", "title": "B", "task_type": "feature", "depends_on": ["a"]},
+        ],
+        effective_policy={"child_status": "queued", "child_hitl_mode": "autopilot", "infer_deps": False},
+    )
+    assert len(created_ids) == 2
+
+    first = container.tasks.get(created_ids[0])
+    second = container.tasks.get(created_ids[1])
+    assert first is not None and second is not None
+    assert first.metadata.get("deps_analyzed") is True
+    assert second.metadata.get("deps_analyzed") is True
+    assert second.blocked_by == []
+
+    service._maybe_analyze_dependencies()
+    assert call_count == 0
+    second_after = container.tasks.get(created_ids[1])
+    assert second_after is not None
+    assert second_after.blocked_by == []

@@ -466,6 +466,18 @@ class PlanManager:
             priority = str(item.get("priority") or parent.priority)
             if priority not in {"P0", "P1", "P2", "P3"}:
                 priority = parent.priority
+            raw_dep_refs = item.get("depends_on")
+            generated_dep_refs = [
+                str(dep_ref or "").strip()
+                for dep_ref in raw_dep_refs
+                if str(dep_ref or "").strip()
+            ] if isinstance(raw_dep_refs, list) else []
+            child_metadata = dict(item.get("metadata") or {})
+            # Generated-task dependency policy is resolved at generation time.
+            # Marking as analyzed prevents redundant global auto-deps passes.
+            child_metadata["deps_analyzed"] = True
+            child_metadata["deps_analysis_source"] = "generate_tasks"
+            child_metadata["generated_depends_on"] = generated_dep_refs
             from ..domain.models import Task
 
             child = Task(
@@ -478,7 +490,7 @@ class PlanManager:
                 source="generated",
                 labels=list(item.get("labels") or []),
                 hitl_mode=child_hitl_mode,
-                metadata=dict(item.get("metadata") or {}),
+                metadata=child_metadata,
             )
             svc.container.tasks.upsert(child)
             created_ids.append(child.id)
