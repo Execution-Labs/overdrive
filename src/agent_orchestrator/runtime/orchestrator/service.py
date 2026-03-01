@@ -10,6 +10,8 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
+from fnmatch import fnmatch
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal, Optional, cast
 
@@ -27,6 +29,7 @@ from ..domain.models import (
     Task,
     now_iso,
 )
+from ..domain.scope_contract import normalize_scope_contract
 from ..events.bus import EventBus
 from ..storage.container import Container
 from ...worker import WorkerCancelledError
@@ -1272,6 +1275,7 @@ class OrchestratorService:
         return dict(raw) if isinstance(raw, dict) else {}
 
     def supports_task_generation(self, task: Task) -> bool:
+        """Return whether the task's effective pipeline includes generate_tasks."""
         template = self._pipeline_template_for_task(task)
         if task.pipeline_template:
             steps = [str(step).strip() for step in task.pipeline_template if str(step).strip()]
@@ -2326,6 +2330,7 @@ class OrchestratorService:
         "resource_limit",
         "os_incompatibility",
         "infrastructure",
+        "baseline_failure",
     }
     _NON_ACTIONABLE_VERIFY_SUMMARY_PATTERNS = (
         r"command not found",
@@ -2341,11 +2346,338 @@ class OrchestratorService:
         r"docker.*not (available|running)",
         r"requires .* not available",
     )
+    _SCOPE_WRITE_STEPS = {"implement", "implement_fix", "prototype"}
+    _SCOPE_IGNORE_PATH_SEGMENTS = {
+        ".agent_orchestrator",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "__pycache__",
+    }
+    _SCOPE_IGNORE_PATHS = {".workdoc.md"}
 
     @staticmethod
     def _should_gate(mode: str, gate_name: str) -> bool:
         """Compatibility wrapper for HITL gate checks used by delegated executors."""
         return should_gate(mode, gate_name)
+
+    def _scope_contract_for_task(self, task: Task) -> dict[str, Any] | None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        normalized = normalize_scope_contract(task.metadata.get("scope_contract"))
+        if normalized is None:
+            return None
+        task.metadata["scope_contract"] = normalized
+        return normalized
+
+    def _is_scope_restricted(self, task: Task) -> bool:
+        contract = self._scope_contract_for_task(task)
+        return bool(contract and str(contract.get("mode") or "open") == "restricted")
+
+    @staticmethod
+    def _rel_path(path: str) -> str:
+        normalized = str(path or "").strip().replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        return normalized
+
+    def _is_path_allowed_by_scope(self, task: Task, rel_path: str) -> bool:
+        contract = self._scope_contract_for_task(task)
+        normalized = self._rel_path(rel_path).lower()
+        if not contract:
+            return True
+        if str(contract.get("mode") or "open") != "restricted":
+            return True
+        forbidden = [self._rel_path(pat).lower() for pat in list(contract.get("forbidden_globs") or []) if str(pat).strip()]
+        if any(fnmatch(normalized, pattern) for pattern in forbidden):
+            return False
+        allowed = [self._rel_path(pat).lower() for pat in list(contract.get("allowed_globs") or []) if str(pat).strip()]
+        if not allowed:
+            return False
+        return any(fnmatch(normalized, pattern) for pattern in allowed)
+
+    def _ensure_scope_contract_baseline_ref(self, task: Task, project_dir: Path) -> None:
+        """Best-effort fill missing scope baseline_ref from current HEAD."""
+        contract = self._scope_contract_for_task(task)
+        if not contract:
+            return
+        if str(contract.get("baseline_ref") or "").strip():
+            return
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            return
+        baseline_ref = str(result.stdout or "").strip() if result.returncode == 0 else ""
+        if not baseline_ref:
+            return
+        contract["baseline_ref"] = baseline_ref
+        task.metadata["scope_contract"] = contract
+
+    @staticmethod
+    def _parse_porcelain_changed_paths(output: str) -> list[str]:
+        paths: list[str] = []
+        for line in str(output or "").splitlines():
+            if not line.strip():
+                continue
+            # porcelain format: XY <path> OR XY <old> -> <new>
+            payload = line[3:] if len(line) > 3 else line
+            payload = payload.strip()
+            if " -> " in payload:
+                payload = payload.split(" -> ", 1)[1].strip()
+            cleaned = payload.strip().strip('"')
+            rel = OrchestratorService._rel_path(cleaned)
+            if rel:
+                paths.append(rel)
+        return OrchestratorService._dedupe_paths(paths)
+
+    @staticmethod
+    def _parse_plain_changed_paths(output: str) -> list[str]:
+        paths: list[str] = []
+        for line in str(output or "").splitlines():
+            rel = OrchestratorService._rel_path(str(line or "").strip())
+            if rel:
+                paths.append(rel)
+        return OrchestratorService._dedupe_paths(paths)
+
+    @staticmethod
+    def _dedupe_paths(paths: list[str]) -> list[str]:
+        # preserve order while removing duplicates
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for item in paths:
+            if item in seen:
+                continue
+            seen.add(item)
+            uniq.append(item)
+        return uniq
+
+    def _list_worktree_changed_files(self, project_dir: Path) -> list[str]:
+        tracked: list[str] = []
+        try:
+            tracked_result = subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=20,
+            )
+        except Exception:
+            tracked_result = None
+        if tracked_result and tracked_result.returncode == 0:
+            tracked = self._parse_porcelain_changed_paths(str(tracked_result.stdout or ""))
+
+        untracked: list[str] = []
+        try:
+            untracked_result = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=20,
+            )
+        except Exception:
+            untracked_result = None
+        if untracked_result and untracked_result.returncode == 0:
+            untracked = self._parse_plain_changed_paths(str(untracked_result.stdout or ""))
+
+        return self._dedupe_paths(tracked + untracked)
+
+    @classmethod
+    def _is_scope_ignored_path(cls, rel_path: str) -> bool:
+        normalized = cls._rel_path(rel_path).lower()
+        if not normalized:
+            return True
+        if normalized in cls._SCOPE_IGNORE_PATHS:
+            return True
+        segments = [segment for segment in normalized.split("/") if segment]
+        return any(segment in cls._SCOPE_IGNORE_PATH_SEGMENTS for segment in segments)
+
+    def _detect_scope_violations(self, task: Task, project_dir: Path) -> list[str]:
+        if not self._is_scope_restricted(task):
+            return []
+        changed = self._list_worktree_changed_files(project_dir)
+        if not changed:
+            return []
+        filtered: list[str] = []
+        for path in changed:
+            normalized = self._rel_path(path)
+            if self._is_scope_ignored_path(normalized):
+                continue
+            filtered.append(normalized)
+        return [path for path in filtered if not self._is_path_allowed_by_scope(task, path)]
+
+    def _block_for_scope_violation(
+        self,
+        task: Task,
+        run: RunRecord,
+        *,
+        step: str,
+        violations: list[str],
+    ) -> None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        task.metadata["scope_violation"] = {
+            "step": step,
+            "violations": violations,
+            "ts": now_iso(),
+        }
+        task.metadata["verify_reason_code"] = "scope_violation"
+        task.status = "blocked"
+        task.pending_gate = None
+        task.current_step = step
+        task.error = (
+            "Scope violation: modified out-of-scope files: "
+            + ", ".join(violations[:6])
+            + (" ..." if len(violations) > 6 else "")
+        )
+        self.container.tasks.upsert(task)
+        run.status = "blocked"
+        run.finished_at = now_iso()
+        run.summary = f"Blocked during {step}"
+        self.container.runs.upsert(run)
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.scope_violation",
+            entity_id=task.id,
+            payload={"step": step, "violations": violations},
+        )
+        self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
+
+    @staticmethod
+    def _verify_failure_mentions_changed_files(summary: str, changed_files: list[str]) -> bool:
+        text = str(summary or "").lower()
+        if not text or not changed_files:
+            return False
+        for path in changed_files:
+            rel = OrchestratorService._rel_path(path).lower()
+            if not rel:
+                continue
+            basename = Path(rel).name.lower()
+            # Match both full path and basename when meaningful.
+            if rel in text:
+                return True
+            if len(basename) >= 5 and basename in text:
+                return True
+        return False
+
+    @staticmethod
+    def _baseline_debt_signature(summary: str, changed_files: list[str]) -> str:
+        normalized = f"{str(summary or '').strip()}||{'|'.join(sorted(set(changed_files)))}"
+        return sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
+
+    def _create_scope_baseline_debt_task(
+        self,
+        task: Task,
+        *,
+        summary: str,
+        changed_files: list[str],
+    ) -> None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        signature = self._baseline_debt_signature(summary, changed_files)
+        existing = task.metadata.get("scope_baseline_debt_signatures")
+        signatures = list(existing) if isinstance(existing, list) else []
+        if signature in signatures:
+            return
+        signatures.append(signature)
+        task.metadata["scope_baseline_debt_signatures"] = signatures
+
+        debt_task = Task(
+            title=f"Remediate baseline verification debt for {task.id}",
+            description=(
+                "Scoped task verification detected unchanged baseline failures outside allowed scope.\n\n"
+                f"Origin task: {task.id}\n"
+                f"Summary: {summary}\n"
+                f"Changed files in scoped task: {', '.join(changed_files) if changed_files else '(none)'}"
+            ),
+            task_type="chore",
+            priority="P1",
+            status="backlog",
+            source="generated",
+            parent_id=task.id,
+            metadata={
+                "generated_from": "scope_baseline_debt",
+                "origin_task_id": task.id,
+                "failure_signature": signature,
+            },
+        )
+        self.container.tasks.upsert(debt_task)
+        if debt_task.id not in task.blocks:
+            task.blocks.append(debt_task.id)
+        self.container.tasks.upsert(task)
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.generated_from_pipeline",
+            entity_id=task.id,
+            payload={
+                "created_task_ids": [debt_task.id],
+                "reason_code": "baseline_failure",
+            },
+        )
+
+    def _classify_verify_failure_for_scope(
+        self,
+        task: Task,
+        *,
+        step: str,
+        summary: str | None,
+        project_dir: Path,
+    ) -> None:
+        """Create baseline debt tasks when the LLM classifier flags baseline_failure."""
+        if step not in _VERIFY_STEPS or not self._is_scope_restricted(task):
+            return
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        existing_reason = str(task.metadata.get("verify_reason_code") or "").strip().lower()
+        if existing_reason != "baseline_failure":
+            return
+        changed_files = self._list_worktree_changed_files(project_dir)
+        task.metadata["verify_scope_classification"] = {
+            "mode": "restricted",
+            "classification": "unchanged_baseline_debt",
+            "step": step,
+            "summary": str(summary or "").strip(),
+            "changed_files": changed_files,
+            "ts": now_iso(),
+        }
+        self._create_scope_baseline_debt_task(task, summary=str(summary or "").strip(), changed_files=changed_files)
+
+    def _defer_out_of_scope_review_findings(self, task: Task, findings: list[ReviewFinding]) -> list[dict[str, Any]]:
+        """Mark open review findings outside restricted scope as deferred."""
+        if not self._is_scope_restricted(task):
+            return []
+        deferred: list[dict[str, Any]] = []
+        for finding in findings:
+            if finding.status != "open":
+                continue
+            file_path = self._rel_path(str(finding.file or ""))
+            if not file_path:
+                continue
+            if self._is_path_allowed_by_scope(task, file_path):
+                continue
+            finding.status = "deferred_out_of_scope"
+            deferred.append(
+                {
+                    "id": finding.id,
+                    "file": file_path,
+                    "summary": finding.summary,
+                    "severity": finding.severity,
+                }
+            )
+        if deferred:
+            if not isinstance(task.metadata, dict):
+                task.metadata = {}
+            task.metadata["review_deferred_out_of_scope"] = deferred
+        return deferred
 
     def _capture_verify_output(self, task: Task) -> None:
         """Read the tail of the verify step's stdout/stderr and stash it in metadata.
@@ -2472,6 +2804,12 @@ class OrchestratorService:
             self._block_for_invalid_workdoc(task, run, step=step, detail=str(exc))
             return False
 
+        # Ensure each verify invocation gets fresh classification context.
+        if step in _VERIFY_STEPS and isinstance(task.metadata, dict):
+            task.metadata.pop("verify_reason_code", None)
+            task.metadata.pop("verify_environment_note", None)
+            task.metadata.pop("verify_scope_classification", None)
+
         step_started = now_iso()
         try:
             result = self.worker_adapter.run_step(task=task, step=step, attempt=attempt)
@@ -2502,6 +2840,13 @@ class OrchestratorService:
             self._block_for_human_issues(task, run, step, result.summary, result.human_blocking_issues)
             return False
         if result.status != "ok":
+            if step in _VERIFY_STEPS:
+                self._classify_verify_failure_for_scope(
+                    task,
+                    step=step,
+                    summary=result.summary,
+                    project_dir=step_project_dir,
+                )
             if step in _VERIFY_STEPS and self._is_non_actionable_verify_failure(task, result.summary):
                 self._mark_verify_degraded(task, run, step=step, summary=result.summary)
                 return False
@@ -2576,6 +2921,17 @@ class OrchestratorService:
                     "effective_policy": effective_policy,
                 },
             )
+
+        if step in self._SCOPE_WRITE_STEPS:
+            scope_violations = self._detect_scope_violations(task, step_project_dir)
+            if scope_violations:
+                self._block_for_scope_violation(
+                    task,
+                    run,
+                    step=step,
+                    violations=scope_violations,
+                )
+                return False
 
         self._heartbeat_execution_lease(task)
         self.container.tasks.upsert(task)

@@ -18,6 +18,7 @@ from ...workers.diagnostics import test_worker
 from ...worker import WorkerCancelledError
 from ...workers.run import WorkerRunResult, run_worker
 from ..domain.models import RunRecord, Task, now_iso
+from ..domain.scope_contract import normalize_scope_contract
 from ..storage.container import Container
 from .human_guidance import render_human_guidance_prompt
 from .worker_adapter import StepResult
@@ -216,6 +217,8 @@ def _normalize_prompt_overrides(value: Any) -> dict[str, str]:
 def _normalize_prompt_injections(value: Any) -> dict[str, str]:
     """Normalize per-step additive prompt injections from runtime config."""
     return _normalize_prompt_overrides(value)
+
+
 
 
 def get_configurable_step_prompt_defaults() -> dict[str, str]:
@@ -514,6 +517,8 @@ _VERIFY_ALLOWED_REASON_CODES = {
     "assertion_failure",
     "type_error",
     "lint_violation",
+    "baseline_failure",
+    "scope_violation",
     "tool_missing",
     "config_missing",
     "no_tests",
@@ -784,6 +789,33 @@ def build_step_prompt(
     ):
         parts.append("")
         parts.append("## Issues to fix")
+
+    scope_contract = (
+        normalize_scope_contract(task.metadata.get("scope_contract"))
+        if isinstance(task.metadata, dict)
+        else None
+    )
+    if is_fix_step and isinstance(scope_contract, dict) and scope_contract.get("mode") == "restricted":
+        allowed = list(scope_contract.get("allowed_globs") or [])
+        forbidden = list(scope_contract.get("forbidden_globs") or [])
+        parts.append("")
+        parts.append("## Scope contract")
+        parts.append("This task is scope-restricted. Do NOT modify files outside allowed globs.")
+        if allowed:
+            parts.append("Allowed globs:")
+            for pattern in allowed:
+                parts.append(f"- `{pattern}`")
+        if forbidden:
+            parts.append("Forbidden globs:")
+            for pattern in forbidden:
+                parts.append(f"- `{pattern}`")
+        baseline_ref = str(scope_contract.get("baseline_ref") or "").strip()
+        if baseline_ref:
+            parts.append(f"Baseline ref: `{baseline_ref}`")
+        parts.append(
+            "If verification failures are outside this scope and unchanged by your diff, "
+            "report them as baseline debt rather than editing out-of-scope files."
+        )
 
     # Include review findings for fix steps.
     if review_findings and isinstance(review_findings, list) and is_fix_step:

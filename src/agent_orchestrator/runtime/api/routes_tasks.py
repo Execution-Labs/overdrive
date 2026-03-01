@@ -25,6 +25,7 @@ from ..domain.models import (
     TaskStatus,
     now_iso,
 )
+from ..domain.scope_contract import normalize_scope_contract
 from ..storage.bootstrap import (
     archive_state_root,
     archive_task_context_manifest,
@@ -205,11 +206,17 @@ def _collect_task_context_manifest_entries(tasks: list[Task]) -> list[dict[str, 
 def _sanitize_client_task_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
     metadata = dict(raw or {})
     sanitized: dict[str, Any] = {}
+    scope_contract_raw = metadata.get("scope_contract")
+    normalized_scope_contract = normalize_scope_contract(scope_contract_raw)
     for key, value in metadata.items():
         normalized = str(key)
         if normalized in _INTERNAL_TASK_METADATA_KEYS or normalized.startswith("preserved_"):
             continue
+        if normalized == "scope_contract":
+            continue
         sanitized[normalized] = value
+    if normalized_scope_contract is not None:
+        sanitized["scope_contract"] = normalized_scope_contract
     return sanitized
 
 
@@ -1786,7 +1793,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 mode = "active"
             elif isinstance(latest_history_entry, dict):
                 logs_meta = latest_history_entry
-                selected_run_id = str(latest_history.get("run_id") or "").strip() or None
+                latest_history_map = latest_history if isinstance(latest_history, dict) else {}
+                selected_run_id = str(latest_history_map.get("run_id") or "").strip() or None
                 mode = "history"
             elif last_meta:
                 logs_meta = last_meta
@@ -2208,10 +2216,9 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         action = str(getattr(body, "action", "approve") or "approve").strip().lower()
         if action not in {"approve", "request_changes"}:
             raise HTTPException(status_code=400, detail=f"Unsupported gate action: {action}")
+        generation_policy = getattr(body, "generation_policy", None)
         requested_generation_policy = _generation_policy_overrides(
-            body.generation_policy.model_dump(exclude_none=True)
-            if getattr(body, "generation_policy", None) is not None
-            else None
+            generation_policy.model_dump(exclude_none=True) if generation_policy is not None else None
         )
         save_generation_defaults = bool(getattr(body, "save_generation_policy_as_default", False))
 
