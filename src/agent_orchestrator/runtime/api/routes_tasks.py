@@ -488,6 +488,68 @@ def _emit_changes_telemetry_once(
         return
 
 
+_UNTRACKED_DIFF_FILE_CAP = 60
+
+
+def _diff_untracked_files(
+    git_dir: Path,
+    status_entries: list[dict[str, str]],
+) -> tuple[str, list[dict[str, str]]]:
+    """Generate unified diff text and file entries for untracked (``??``) files.
+
+    Returns ``(diff_text, file_entries)`` where *diff_text* is concatenated
+    unified diff output for all untracked files and *file_entries* are
+    ``{"path": ..., "changes": ...}`` dicts suitable for the files list.
+    """
+    has_untracked = any(entry.get("code") == "??" for entry in status_entries)
+    if not has_untracked:
+        return "", []
+
+    try:
+        ls_result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=git_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return "", []
+
+    untracked_paths = [
+        p.strip()
+        for p in ls_result.stdout.splitlines()
+        if p.strip() and not _is_runtime_state_path(p.strip())
+    ]
+
+    if not untracked_paths:
+        return "", []
+
+    capped = untracked_paths[:_UNTRACKED_DIFF_FILE_CAP]
+    diff_parts: list[str] = []
+    file_entries: list[dict[str, str]] = []
+
+    for fpath in capped:
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--no-index", "/dev/null", fpath],
+                cwd=git_dir,
+                capture_output=True,
+                text=True,
+                check=False,  # exit-code 1 is normal for diffs with changes
+                timeout=10,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        raw = result.stdout or ""
+        if raw:
+            diff_parts.append(raw)
+            file_entries.append({"path": fpath, "changes": "new file"})
+
+    return "\n".join(diff_parts), file_entries
+
+
 def _resolve_base_branch(git_dir: Path, *, avoid_branch: str | None = None) -> str | None:
     candidates: list[str] = []
     try:
@@ -1423,6 +1485,17 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 files = parsed
 
             diff_text = diff_result.stdout or ""
+
+            # git diff does not include untracked files — generate diffs for
+            # them separately so reviewers can see new-file content.
+            untracked_diff, untracked_file_entries = _diff_untracked_files(git_dir, status_entries)
+            if untracked_diff:
+                diff_text = (diff_text + "\n" + untracked_diff) if diff_text else untracked_diff
+            if untracked_file_entries:
+                tracked_paths = {entry.get("path") for entry in files}
+                for uf_entry in untracked_file_entries:
+                    if uf_entry["path"] not in tracked_paths:
+                        files.append(uf_entry)
             if files or status_lines:
                 stat_text = stat_result.stdout or ("\n".join(status_lines) if status_lines else "")
                 return {

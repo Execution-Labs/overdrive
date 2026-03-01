@@ -1320,7 +1320,8 @@ def test_decompose_task_type_uses_plan_only_pipeline(tmp_path: Path) -> None:
     children = [t for t in container.tasks.list() if t.parent_id == task.id]
     assert len(children) == 3
     types = sorted(c.task_type for c in children)
-    assert types == ["feature", "feature", "test"]
+    # "test" is not a supported generated task type and gets normalized to "feature"
+    assert types == ["feature", "feature", "feature"]
 
 
 # ---------------------------------------------------------------------------
