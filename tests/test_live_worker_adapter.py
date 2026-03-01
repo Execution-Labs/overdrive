@@ -1811,6 +1811,24 @@ class TestStepOutputInjection:
         assert "Source: review request changes." in prompt
         assert "edge-case test" in prompt
 
+    def test_fix_prompt_includes_restricted_scope_contract(self) -> None:
+        """Restricted scope contract should be injected into implement_fix prompts."""
+        task = _make_task(
+            metadata={
+                "scope_contract": {
+                    "mode": "restricted",
+                    "allowed_globs": ["strategy_miner/ibkr/**", "tests/test_ibkr_smoke.py"],
+                    "forbidden_globs": ["strategy_miner/pipeline/**"],
+                    "baseline_ref": "abc123",
+                }
+            }
+        )
+        prompt = build_step_prompt(task=task, step="implement_fix", attempt=1)
+        assert "## Scope contract" in prompt
+        assert "strategy_miner/ibkr/**" in prompt
+        assert "strategy_miner/pipeline/**" in prompt
+        assert "Baseline ref: `abc123`" in prompt
+
     def test_human_guidance_injects_for_target_plan_step(self) -> None:
         """Guidance targeted at plan should appear in plan prompt."""
         task = _make_task(metadata={

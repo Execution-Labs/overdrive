@@ -330,6 +330,8 @@ class TaskExecutor:
             first_step = steps[0] if steps else "plan"
 
             workdoc_dir = worktree_dir if worktree_dir else svc.container.project_dir
+            svc._ensure_scope_contract_baseline_ref(task, workdoc_dir)
+            svc.container.tasks.upsert(task)
             had_prior_runs = bool(task.run_ids)
             checkpoint = svc._execution_checkpoint(task)
             checkpoint_run_id = str(checkpoint.get("run_id") or "").strip()
@@ -569,6 +571,8 @@ class TaskExecutor:
                     svc.container.tasks.upsert(task)
                     findings, review_result = svc._findings_from_result(task, review_attempt)
                     svc._heartbeat_execution_lease(task)
+                    svc.container.tasks.upsert(task)
+                    svc._defer_out_of_scope_review_findings(task, findings)
                     svc.container.tasks.upsert(task)
                     review_step_log: dict[str, object] = {
                         "step": "review",
