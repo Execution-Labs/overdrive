@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -33,6 +34,121 @@ class WorktreeManager:
         """Bind the manager to the owning orchestrator service state."""
         self._service = service
 
+    _WORKTREE_ADD_MAX_ATTEMPTS = 3
+    _WORKTREE_ADD_RETRY_SLEEP_SECONDS = 0.05
+    _TRANSIENT_WORKTREE_ADD_ERROR_HINTS = (
+        "already checked out at",
+        "is already checked out",
+        "worktree is already registered",
+        "another git process seems to be running",
+        "index.lock",
+        "unable to create",
+        "cannot lock ref",
+        "could not lock",
+        "resource temporarily unavailable",
+    )
+
+    @staticmethod
+    def _local_branch_exists(project_dir: Path, branch_name: str) -> bool:
+        """Return whether a local branch currently exists."""
+        normalized = str(branch_name or "").strip()
+        if not normalized:
+            return False
+        try:
+            result = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{normalized}"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0
+
+    def _prepare_worktree_dir(self, worktree_dir: Path) -> None:
+        """Ensure target worktree path is clear before adding a new worktree."""
+        svc = self._service
+        if not worktree_dir.exists():
+            return
+        subprocess.run(
+            ["git", "worktree", "remove", str(worktree_dir), "--force"],
+            cwd=svc.container.project_dir,
+            capture_output=True,
+            text=True,
+        )
+        if worktree_dir.exists():
+            shutil.rmtree(worktree_dir, ignore_errors=True)
+
+    @classmethod
+    def _is_transient_worktree_add_error(cls, stderr: str) -> bool:
+        lowered = str(stderr or "").lower()
+        if not lowered:
+            return False
+        return any(hint in lowered for hint in cls._TRANSIENT_WORKTREE_ADD_ERROR_HINTS)
+
+    def _add_worktree_with_retry(
+        self,
+        *,
+        worktree_dir: Path,
+        branch: str,
+        prefer_create_branch: bool,
+    ) -> None:
+        """Add task worktree with bounded retries for git-lock/registration races."""
+        svc = self._service
+        last_exc: subprocess.CalledProcessError | None = None
+        for attempt in range(1, self._WORKTREE_ADD_MAX_ATTEMPTS + 1):
+            self._prepare_worktree_dir(worktree_dir)
+            create_branch = bool(
+                prefer_create_branch and not self._local_branch_exists(svc.container.project_dir, branch)
+            )
+            cmd = ["git", "worktree", "add", str(worktree_dir)]
+            if create_branch:
+                cmd.extend(["-b", branch])
+            else:
+                cmd.append(branch)
+            try:
+                subprocess.run(
+                    cmd,
+                    cwd=svc.container.project_dir,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return
+            except subprocess.CalledProcessError as exc:
+                resolved_exc = exc
+                stderr = str(getattr(exc, "stderr", "") or "")
+                # Handle TOCTOU branch races: branch appeared after our local check.
+                if create_branch and "already exists" in stderr.lower():
+                    try:
+                        self._prepare_worktree_dir(worktree_dir)
+                        subprocess.run(
+                            ["git", "worktree", "add", str(worktree_dir), branch],
+                            cwd=svc.container.project_dir,
+                            check=True,
+                            capture_output=True,
+                            text=True,
+                        )
+                        return
+                    except subprocess.CalledProcessError as race_exc:
+                        resolved_exc = race_exc
+                        stderr = str(getattr(race_exc, "stderr", "") or "")
+                last_exc = resolved_exc
+                if not self._is_transient_worktree_add_error(stderr):
+                    raise resolved_exc
+                # Best-effort prune clears stale worktree registrations before retry.
+                subprocess.run(
+                    ["git", "worktree", "prune"],
+                    cwd=svc.container.project_dir,
+                    capture_output=True,
+                    text=True,
+                )
+                time.sleep(self._WORKTREE_ADD_RETRY_SLEEP_SECONDS * attempt)
+        if last_exc is not None:
+            raise last_exc
+
     @staticmethod
     def _clear_preserved_context_metadata(task: Any) -> None:
         """Remove preserved-branch metadata keys after merge/reattach."""
@@ -62,12 +178,10 @@ class WorktreeManager:
         task_id = str(task.id)
         worktree_dir = svc.container.state_root / "worktrees" / task_id
         branch = f"task-{task_id}"
-        subprocess.run(
-            ["git", "worktree", "add", str(worktree_dir), "-b", branch],
-            cwd=svc.container.project_dir,
-            check=True,
-            capture_output=True,
-            text=True,
+        self._add_worktree_with_retry(
+            worktree_dir=worktree_dir,
+            branch=branch,
+            prefer_create_branch=True,
         )
         return worktree_dir
 
@@ -84,12 +198,10 @@ class WorktreeManager:
         self.ensure_branch()
         task_id = str(task.id)
         worktree_dir = svc.container.state_root / "worktrees" / task_id
-        subprocess.run(
-            ["git", "worktree", "add", str(worktree_dir), branch],
-            cwd=svc.container.project_dir,
-            check=True,
-            capture_output=True,
-            text=True,
+        self._add_worktree_with_retry(
+            worktree_dir=worktree_dir,
+            branch=branch,
+            prefer_create_branch=False,
         )
         return worktree_dir
 
@@ -415,7 +527,24 @@ class WorktreeManager:
         preserved branch) even when there are no uncommitted changes.
         """
         svc = self._service
-        base_ref = svc._run_branch or "HEAD"
+        base_ref = str(svc._run_branch or "").strip()
+        if not base_ref:
+            try:
+                current_branch = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=svc.container.project_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                candidate = str(current_branch.stdout or "").strip()
+                if current_branch.returncode == 0 and candidate and candidate != "HEAD":
+                    base_ref = candidate
+            except Exception:
+                base_ref = ""
+        if not base_ref:
+            base_ref = "HEAD"
         try:
             result = subprocess.run(
                 ["git", "log", f"{base_ref}..HEAD", "--oneline"],

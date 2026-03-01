@@ -6,11 +6,13 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+from unittest.mock import patch
 
 from agent_orchestrator.runtime.domain.models import Task
 from agent_orchestrator.runtime.events import EventBus
 from agent_orchestrator.runtime.orchestrator import OrchestratorService
 from agent_orchestrator.runtime.orchestrator.live_worker_adapter import build_step_prompt
+from agent_orchestrator.runtime.orchestrator.worktree_manager import WorktreeManager
 from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 from agent_orchestrator.runtime.storage.container import Container
 
@@ -99,6 +101,153 @@ def test_worktree_created_for_task(tmp_path: Path) -> None:
     assert "worktree_dir" not in updated.metadata
 
 
+def test_create_worktree_reuses_existing_task_branch_without_b_flag_failure(tmp_path: Path) -> None:
+    """Creating a task worktree should succeed even when task branch already exists."""
+    container, service, _ = _service(tmp_path, git=True)
+    task = Task(title="Branch reuse", task_type="chore", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+
+    branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "branch", branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    worktree_dir = service._create_worktree(task)
+    assert worktree_dir is not None
+    assert worktree_dir.exists()
+    current_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=worktree_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert current_branch == branch
+
+    subprocess.run(
+        ["git", "worktree", "remove", str(worktree_dir), "--force"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_create_worktree_recovers_from_branch_exists_race(tmp_path: Path) -> None:
+    """If `worktree add -b` races with branch creation, fallback should still succeed."""
+    container, service, _ = _service(tmp_path, git=True)
+    task = Task(title="Branch race", task_type="chore", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+
+    branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "branch", branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    # Simulate TOCTOU: branch exists in git but the pre-check returns false.
+    with patch.object(WorktreeManager, "_local_branch_exists", return_value=False):
+        worktree_dir = service._create_worktree(task)
+    assert worktree_dir is not None
+    assert worktree_dir.exists()
+
+    current_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=worktree_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert current_branch == branch
+
+    subprocess.run(
+        ["git", "worktree", "remove", str(worktree_dir), "--force"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_create_worktree_retries_transient_git_lock_error(tmp_path: Path) -> None:
+    """Worktree creation should recover from transient git lock contention."""
+    container, service, _ = _service(tmp_path, git=True)
+    task = Task(title="Transient lock", task_type="chore", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+
+    index_lock = tmp_path / ".git" / "index.lock"
+    index_lock.write_text("locked\n", encoding="utf-8")
+
+    def _release_lock() -> None:
+        time.sleep(0.12)
+        if index_lock.exists():
+            index_lock.unlink()
+
+    releaser = threading.Thread(target=_release_lock, daemon=True)
+    releaser.start()
+    worktree_dir = service._create_worktree(task)
+    releaser.join(timeout=1.0)
+
+    assert worktree_dir is not None
+    assert worktree_dir.exists()
+    assert not index_lock.exists()
+
+    subprocess.run(
+        ["git", "worktree", "remove", str(worktree_dir), "--force"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_create_worktree_from_branch_retries_transient_git_lock_error(tmp_path: Path) -> None:
+    """Retaching from preserved branch should recover from transient git lock contention."""
+    container, service, _ = _service(tmp_path, git=True)
+    task = Task(title="Transient lock preserved", task_type="chore", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+    branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "branch", branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    index_lock = tmp_path / ".git" / "index.lock"
+    index_lock.write_text("locked\n", encoding="utf-8")
+
+    def _release_lock() -> None:
+        time.sleep(0.12)
+        if index_lock.exists():
+            index_lock.unlink()
+
+    releaser = threading.Thread(target=_release_lock, daemon=True)
+    releaser.start()
+    worktree_dir = service._create_worktree_from_branch(task, branch)
+    releaser.join(timeout=1.0)
+
+    assert worktree_dir is not None
+    assert worktree_dir.exists()
+    assert not index_lock.exists()
+
+    subprocess.run(
+        ["git", "worktree", "remove", str(worktree_dir), "--force"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 2. Concurrent same-repo tasks run in parallel via worktrees
 # ---------------------------------------------------------------------------
@@ -138,6 +287,56 @@ def test_concurrent_same_repo_tasks(tmp_path: Path) -> None:
         task = container.tasks.get(tid)
         assert task is not None
         assert task.status == "done"
+
+
+def test_ensure_worker_skips_recovery_for_inflight_manual_run(tmp_path: Path) -> None:
+    """Starting scheduler must not recover/requeue a task currently running via run_task()."""
+    entered_implement = threading.Event()
+    release_implement = threading.Event()
+
+    class BlockingAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                entered_implement.set()
+                if not release_implement.wait(timeout=10):
+                    raise RuntimeError("timeout waiting for implement release")
+                (Path(wt) / f"{task.id}.txt").write_text("impl\n")
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=BlockingAdapter(), concurrency=2)
+    task = Task(title="Manual run", task_type="chore", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+
+    holder: dict[str, Task] = {}
+    errors: list[Exception] = []
+
+    def _run_manual() -> None:
+        try:
+            holder["task"] = service.run_task(task.id)
+        except Exception as exc:  # pragma: no cover - assertion checks this list
+            errors.append(exc)
+
+    runner = threading.Thread(target=_run_manual, daemon=True)
+    runner.start()
+    try:
+        assert entered_implement.wait(timeout=5), "manual run never reached implement"
+        service.ensure_worker()
+
+        mid = container.tasks.get(task.id)
+        assert mid is not None
+        assert mid.status == "in_progress"
+        assert "Recovered from interrupted run" not in str(mid.error or "")
+    finally:
+        release_implement.set()
+        runner.join(timeout=15)
+        service.shutdown(timeout=2)
+
+    assert not errors
+    assert "task" in holder
+    final = container.tasks.get(task.id)
+    assert final is not None
+    assert final.status == "done"
 
 
 # ---------------------------------------------------------------------------
@@ -1503,3 +1702,151 @@ def test_retry_from_preserved_branch_no_new_uncommitted_changes(tmp_path: Path) 
     # even though there are no new uncommitted changes.
     result = service.run_task(task.id)
     assert result.status == "done", f"Expected done but got {result.status}: {result.error}"
+
+
+def test_skip_task_to_precommit_transitions_blocked_verify_task(tmp_path: Path) -> None:
+    """Eligible blocked verify tasks can move directly into pre-commit review."""
+    container, service, _ = _service(tmp_path, git=True)
+    service._ensure_branch()
+    run_branch = service._run_branch or subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    task = Task(
+        title="Skip to precommit",
+        task_type="feature",
+        status="blocked",
+        hitl_mode="autopilot",
+    )
+    task.current_step = "verify"
+    container.tasks.upsert(task)
+
+    task_branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "checkout", "-b", task_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (tmp_path / "skip_precommit.txt").write_text("ready for commit\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "task work"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "checkout", run_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    stored = container.tasks.get(task.id)
+    assert stored is not None
+    stored.error = "verify failed due missing local dependency"
+    stored.metadata["preserved_branch"] = task_branch
+    container.tasks.upsert(stored)
+
+    allowed, reason = service.can_skip_to_precommit(stored)
+    assert allowed is True
+    assert reason is None
+
+    updated = service.skip_task_to_precommit(task.id, guidance="Accept risk and proceed to commit.")
+    assert updated.status == "in_review"
+    assert updated.current_step == "review"
+    assert updated.error is None
+    assert updated.pending_gate is None
+    assert updated.metadata.get("pending_precommit_approval") is True
+    assert updated.metadata.get("review_stage") == "pre_commit"
+    assert updated.metadata.get("retry_from_step") == "commit"
+    assert "worktree_dir" not in updated.metadata
+    assert "task_context" not in updated.metadata
+    review_context = updated.metadata.get("review_context")
+    assert isinstance(review_context, dict)
+    assert review_context.get("preserved_branch") == task_branch
+    actions = updated.metadata.get("human_review_actions")
+    assert isinstance(actions, list) and actions
+    assert actions[-1].get("action") == "skip_to_precommit"
+
+
+def test_can_skip_to_precommit_rejects_unsupported_blocked_step(tmp_path: Path) -> None:
+    """Skip-to-precommit is only available for blocked verify/benchmark steps."""
+    container, service, _ = _service(tmp_path, git=True)
+    task = Task(
+        title="Blocked at plan",
+        task_type="feature",
+        status="blocked",
+        hitl_mode="autopilot",
+    )
+    task.current_step = "plan"
+    container.tasks.upsert(task)
+
+    allowed, reason = service.can_skip_to_precommit(task)
+    assert allowed is False
+    assert reason == "blocked_step_not_supported"
+
+
+def test_can_skip_to_precommit_does_not_depend_on_error_phrase(tmp_path: Path) -> None:
+    """Eligibility should depend on state/context, not free-form error strings."""
+    container, service, _ = _service(tmp_path, git=True)
+    service._ensure_branch()
+    run_branch = service._run_branch or subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    task = Task(
+        title="Error phrase resilience",
+        task_type="feature",
+        status="blocked",
+        hitl_mode="autopilot",
+    )
+    task.current_step = "verify"
+    container.tasks.upsert(task)
+
+    task_branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "checkout", "-b", task_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (tmp_path / "error_phrase.txt").write_text("material change\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "material work"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "checkout", run_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    stored = container.tasks.get(task.id)
+    assert stored is not None
+    stored.error = "Internal error during execution"
+    stored.metadata["preserved_branch"] = task_branch
+    container.tasks.upsert(stored)
+
+    allowed, reason = service.can_skip_to_precommit(stored)
+    assert allowed is True
+    assert reason is None

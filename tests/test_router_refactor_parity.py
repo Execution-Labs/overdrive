@@ -78,6 +78,7 @@ EXPECTED_API_ROUTE_TABLE: set[tuple[str, str]] = {
     ("POST", "/api/tasks/{task_id}/reset-dep-analysis"),
     ("POST", "/api/tasks/{task_id}/retry"),
     ("POST", "/api/tasks/{task_id}/run"),
+    ("POST", "/api/tasks/{task_id}/skip-to-precommit"),
     ("POST", "/api/tasks/{task_id}/transition"),
     ("POST", "/api/terminal/session"),
     ("POST", "/api/terminal/session/{session_id}/input"),

@@ -77,6 +77,7 @@ FEATURE_PIPELINE = PipelineTemplate(
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 BUG_FIX_PIPELINE = PipelineTemplate(
@@ -92,6 +93,7 @@ BUG_FIX_PIPELINE = PipelineTemplate(
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 REFACTOR_PIPELINE = PipelineTemplate(
@@ -107,6 +109,7 @@ REFACTOR_PIPELINE = PipelineTemplate(
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 RESEARCH_PIPELINE = PipelineTemplate(
@@ -132,6 +135,7 @@ DOCS_PIPELINE = PipelineTemplate(
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 TEST_PIPELINE = PipelineTemplate(
@@ -146,6 +150,7 @@ TEST_PIPELINE = PipelineTemplate(
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 REPO_REVIEW_PIPELINE = PipelineTemplate(
@@ -198,6 +203,7 @@ PERFORMANCE_PIPELINE = PipelineTemplate(
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 
@@ -212,6 +218,7 @@ HOTFIX_PIPELINE = PipelineTemplate(
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 SPIKE_PIPELINE = PipelineTemplate(
@@ -236,6 +243,7 @@ CHORE_PIPELINE = PipelineTemplate(
         StepDef(name="verify", display_name="Verify"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 PLAN_ONLY_PIPELINE = PipelineTemplate(

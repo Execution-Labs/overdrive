@@ -1716,6 +1716,26 @@ def test_state_machine_allows_and_rejects_expected_transitions(tmp_path: Path) -
         assert "Invalid transition" in invalid.text
 
 
+def test_transition_rejects_blocked_and_in_review_bypass_paths(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        blocked = client.post("/api/tasks", json={"title": "Blocked", "status": "blocked"}).json()["task"]
+        blocked_to_review = client.post(
+            f"/api/tasks/{blocked['id']}/transition",
+            json={"status": "in_review"},
+        )
+        assert blocked_to_review.status_code == 400
+        assert "cannot transition to in_review directly" in str(blocked_to_review.json().get("detail") or "").lower()
+
+        in_review = client.post("/api/tasks", json={"title": "In review", "status": "in_review"}).json()["task"]
+        review_to_done = client.post(
+            f"/api/tasks/{in_review['id']}/transition",
+            json={"status": "done"},
+        )
+        assert review_to_done.status_code == 400
+        assert "cannot transition to done directly" in str(review_to_done.json().get("detail") or "").lower()
+
+
 def test_delete_terminal_task_cleans_relationship_references(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     container = Container(tmp_path)
@@ -2305,6 +2325,226 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
         assert latest_run is not None
         assert latest_run.status == "done"
         assert latest_run.finished_at is not None
+
+
+def test_review_approve_rejects_blocked_task_status(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={"title": "Blocked review approve", "status": "blocked"},
+        ).json()["task"]
+        resp = client.post(f"/api/review/{task['id']}/approve", json={})
+        assert resp.status_code == 400
+        assert "not in_review" in str(resp.json().get("detail") or "")
+
+
+def test_task_payload_surfaces_skip_to_precommit_eligibility(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        feature = client.post("/api/tasks", json={"title": "Eligible blocked skip"}).json()["task"]
+        feature_branch = f"task-{feature['id']}"
+        _git(["checkout", "-b", feature_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("base\nfeature change\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "feature work",
+            ],
+            tmp_path,
+        )
+        _git(["checkout", base_branch], tmp_path)
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(feature["id"])
+        assert stored is not None
+        stored.status = "blocked"
+        stored.current_step = "verify"
+        stored.metadata["preserved_branch"] = feature_branch
+        stored.error = "verify failed because local setup is incomplete"
+        container.tasks.upsert(stored)
+
+        payload = client.get(f"/api/tasks/{feature['id']}").json()["task"]
+        assert payload["can_skip_to_precommit"] is True
+        assert payload["skip_to_precommit_reason_code"] is None
+
+        research = client.post(
+            "/api/tasks",
+            json={"title": "Research blocked", "status": "blocked", "task_type": "research"},
+        ).json()["task"]
+        research_payload = client.get(f"/api/tasks/{research['id']}").json()["task"]
+        assert research_payload["can_skip_to_precommit"] is False
+        assert research_payload["skip_to_precommit_reason_code"] == "pipeline_not_supported"
+
+
+def test_skip_to_precommit_endpoint_moves_task_to_precommit_review(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Skip to precommit path"}).json()["task"]
+        task_branch = f"task-{task['id']}"
+        _git(["checkout", "-b", task_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("base\nskip-to-precommit change\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "task work",
+            ],
+            tmp_path,
+        )
+        _git(["checkout", base_branch], tmp_path)
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "blocked"
+        stored.current_step = "verify"
+        stored.error = "verify failed due missing env dependency"
+        stored.metadata["preserved_branch"] = task_branch
+        container.tasks.upsert(stored)
+
+        resp = client.post(
+            f"/api/tasks/{task['id']}/skip-to-precommit",
+            json={"guidance": "Accept risk and continue to commit"},
+        )
+        assert resp.status_code == 200
+        payload = resp.json()["task"]
+        assert payload["status"] == "in_review"
+        assert payload["current_step"] == "review"
+        assert payload["pending_gate"] is None
+        assert payload["metadata"]["pending_precommit_approval"] is True
+        assert payload["metadata"]["review_stage"] == "pre_commit"
+        assert payload["metadata"]["retry_from_step"] == "commit"
+        assert payload["can_skip_to_precommit"] is False
+        assert payload["skip_to_precommit_reason_code"] == "task_not_blocked"
+        actions = payload.get("human_review_actions") or []
+        assert actions
+        assert actions[-1]["action"] == "skip_to_precommit"
+        assert actions[-1]["guidance"] == "Accept risk and continue to commit"
+
+        approve = client.post(f"/api/review/{task['id']}/approve", json={})
+        assert approve.status_code == 200
+        assert approve.json()["task"]["status"] == "queued"
+
+
+def test_skip_to_precommit_endpoint_rejects_ineligible_task(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={"title": "Research blocked", "status": "blocked", "task_type": "research"},
+        ).json()["task"]
+        resp = client.post(f"/api/tasks/{task['id']}/skip-to-precommit", json={})
+        assert resp.status_code == 409
+        detail = str(resp.json().get("detail") or "")
+        assert "pipeline_not_supported" in detail
+
+
+def test_skip_to_precommit_eligibility_rejects_no_material_preserved_work(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "No preserved changes"}).json()["task"]
+        preserved_branch = f"task-{task['id']}"
+        _git(["checkout", "-b", preserved_branch], tmp_path)
+        # No changes committed on preserved branch.
+        _git(["checkout", base_branch], tmp_path)
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "blocked"
+        stored.current_step = "verify"
+        stored.error = "verify failed in environment setup"
+        stored.metadata["preserved_branch"] = preserved_branch
+        container.tasks.upsert(stored)
+
+        payload = client.get(f"/api/tasks/{task['id']}").json()["task"]
+        assert payload["can_skip_to_precommit"] is False
+        assert payload["skip_to_precommit_reason_code"] == "no_task_changes"
+
+        resp = client.post(f"/api/tasks/{task['id']}/skip-to-precommit", json={})
+        assert resp.status_code == 409
+        assert "no_task_changes" in str(resp.json().get("detail") or "")
 
 
 def test_precommit_review_approve_rejects_missing_context(tmp_path: Path) -> None:

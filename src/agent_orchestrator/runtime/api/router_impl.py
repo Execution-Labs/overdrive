@@ -291,6 +291,11 @@ class RetryTaskRequest(BaseModel):
     start_from_step: Optional[str] = None
 
 
+class SkipToPrecommitRequest(BaseModel):
+    """Optional request body for blocked->pre-commit skip transitions."""
+    guidance: Optional[str] = None
+
+
 class AddFeedbackRequest(BaseModel):
     """Request body for storing structured reviewer feedback on a task."""
     task_id: str
@@ -315,8 +320,8 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     "backlog": {"queued", "cancelled"},
     "queued": {"backlog", "cancelled"},
     "in_progress": {"cancelled"},
-    "in_review": {"done", "blocked", "cancelled"},
-    "blocked": {"queued", "in_review", "cancelled"},
+    "in_review": {"blocked", "cancelled"},
+    "blocked": {"queued", "cancelled"},
     "done": set(),
     "cancelled": {"backlog"},
 }
@@ -632,7 +637,11 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
     }
 
 
-def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[str, Any]:
+def _task_payload(
+    task: Task,
+    container: Optional["Container"] = None,
+    orchestrator: Optional["OrchestratorService"] = None,
+) -> dict[str, Any]:
     payload = task.to_dict()
     payload["hitl_mode"] = normalize_hitl_mode(str(payload.get("hitl_mode") or "autopilot"))
     metadata = task.metadata if isinstance(task.metadata, dict) else {}
@@ -669,6 +678,18 @@ def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[s
     payload["human_blocking_issues"] = _normalize_human_blocking_issues(metadata.get("human_blocking_issues"))
     raw_actions = metadata.get("human_review_actions")
     payload["human_review_actions"] = list(raw_actions) if isinstance(raw_actions, list) else []
+    can_skip_to_precommit = False
+    skip_to_precommit_reason_code: str | None = None
+    if orchestrator is not None:
+        try:
+            can_skip_to_precommit, skip_to_precommit_reason_code = orchestrator.can_skip_to_precommit(task)
+        except Exception:
+            can_skip_to_precommit = False
+            skip_to_precommit_reason_code = "eligibility_unavailable"
+    payload["can_skip_to_precommit"] = bool(can_skip_to_precommit)
+    payload["skip_to_precommit_reason_code"] = (
+        str(skip_to_precommit_reason_code).strip() if skip_to_precommit_reason_code else None
+    )
     if container is not None:
         timing_summary = _build_task_timing_summary(task, container)
         if timing_summary is not None:

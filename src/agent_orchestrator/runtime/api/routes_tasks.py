@@ -44,6 +44,7 @@ PipelineClassificationRequest = impl.PipelineClassificationRequest
 PipelineClassificationResponse = impl.PipelineClassificationResponse
 PlanRefineRequest = impl.PlanRefineRequest
 RetryTaskRequest = impl.RetryTaskRequest
+SkipToPrecommitRequest = impl.SkipToPrecommitRequest
 TransitionRequest = impl.TransitionRequest
 UpdateTaskRequest = impl.UpdateTaskRequest
 VALID_TRANSITIONS = impl.VALID_TRANSITIONS
@@ -820,7 +821,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If task type auto-resolution inputs are invalid.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         registry = PipelineRegistry()
         allowed_pipelines = sorted(template.id for template in registry.list_templates())
         classifier_pipeline_id = str(body.classifier_pipeline_id or "").strip()
@@ -897,7 +898,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 container.tasks.upsert(parent)
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.created", entity_id=task.id, payload={"status": task.status})
-        return {"task": _task_payload(task)}
+        return {"task": _task_payload(task, orchestrator=orchestrator)}
 
     @router.post("/tasks/classify-pipeline", response_model=PipelineClassificationResponse)
     async def classify_pipeline(
@@ -962,7 +963,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Returns:
             A payload with sorted task summaries and total count.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         tasks = container.tasks.list()
         filtered = []
         for task in tasks:
@@ -974,7 +975,10 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 continue
             filtered.append(task)
         filtered.sort(key=lambda t: (_priority_rank(t.priority), t.created_at))
-        return {"tasks": [_task_payload(task) for task in filtered], "total": len(filtered)}
+        return {
+            "tasks": [_task_payload(task, orchestrator=orchestrator) for task in filtered],
+            "total": len(filtered),
+        }
 
     @router.get("/tasks/board")
     async def board(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -986,12 +990,12 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Returns:
             A payload keyed by task status with sorted task cards.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         columns: dict[str, list[dict[str, Any]]] = {
             name: [] for name in ["backlog", "queued", "in_progress", "in_review", "blocked", "done", "cancelled"]
         }
         for task in container.tasks.list():
-            columns.setdefault(task.status, []).append(_task_payload(task))
+            columns.setdefault(task.status, []).append(_task_payload(task, orchestrator=orchestrator))
         for status, items in columns.items():
             items.sort(key=lambda item: _board_item_sort_key(status, item))
         return {"columns": columns}
@@ -1046,7 +1050,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Returns:
             A payload containing ready-to-run batches and recently completed tasks.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         tasks = container.tasks.list()
         terminal = {"done", "cancelled"}
         pending = [t for t in tasks if t.status not in terminal]
@@ -1071,11 +1075,11 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task does not exist.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.delete("/tasks/{task_id}")
     async def delete_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1091,7 +1095,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task is missing or non-terminal.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1184,7 +1188,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Prefers committed diff when present; otherwise returns current working tree
         changes for task worktree/repo context.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1659,7 +1663,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task is missing or if status mutation is requested.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1705,7 +1709,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.updated", entity_id=task.id, payload={"status": task.status})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.post("/tasks/{task_id}/transition")
     async def transition_task(task_id: str, body: TransitionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1722,11 +1726,27 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task is missing, the transition is invalid, or blockers remain.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
         target = body.status
+        if task.status == "blocked" and target == "in_review":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Blocked tasks cannot transition to in_review directly. "
+                    "Use /tasks/{task_id}/skip-to-precommit when eligible."
+                ),
+            )
+        if task.status == "in_review" and target == "done":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "In-review tasks cannot transition to done directly. "
+                    "Use /review/{task_id}/approve."
+                ),
+            )
         valid = VALID_TRANSITIONS.get(task.status, set())
         if target not in valid:
             raise HTTPException(status_code=400, detail=f"Invalid transition {task.status} -> {target}")
@@ -1738,7 +1758,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.transitioned", entity_id=task.id, payload={"status": task.status})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.post("/tasks/{task_id}/run")
     async def run_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1761,7 +1781,49 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             if "Task not found" in str(exc):
                 raise HTTPException(status_code=404, detail=str(exc))
             raise HTTPException(status_code=400, detail=str(exc))
-        return {"task": _task_payload(task)}
+        return {"task": _task_payload(task, orchestrator=orchestrator)}
+
+    @router.post("/tasks/{task_id}/skip-to-precommit")
+    async def skip_to_precommit(
+        task_id: str,
+        body: Optional[SkipToPrecommitRequest] = None,
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        """Move an eligible blocked task directly to pre-commit review.
+
+        Args:
+            task_id: Identifier of the blocked task.
+            body: Optional payload with reviewer guidance/audit note.
+            project_dir: Optional project directory used to resolve runtime state.
+
+        Returns:
+            Updated task payload in pre-commit review state.
+
+        Raises:
+            HTTPException: If task lookup fails or task is not eligible.
+        """
+        container, _, orchestrator = deps.ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        allowed, reason_code = orchestrator.can_skip_to_precommit(task)
+        if not allowed:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Task {task_id} is not eligible to skip to pre-commit ({reason_code or 'not_allowed'})",
+            )
+        guidance = str(body.guidance if body else "").strip()
+        try:
+            updated = orchestrator.skip_task_to_precommit(task_id, guidance=guidance)
+        except ValueError as exc:
+            message = str(exc)
+            if "Task not found" in message:
+                raise HTTPException(status_code=404, detail=message) from exc
+            raise HTTPException(status_code=409, detail=message) from exc
+        return {
+            "task": _task_payload(updated, container, orchestrator),
+            "message": "Task moved to pre-commit review. Approve to run commit.",
+        }
 
     @router.post("/tasks/{task_id}/retry")
     async def retry_task(task_id: str, body: Optional[RetryTaskRequest] = None, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1778,7 +1840,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task is missing or unresolved blockers remain.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1852,7 +1914,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 "previous_error_present": bool(previous_error.strip()),
             },
         )
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.post("/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1868,7 +1930,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task does not exist.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1879,7 +1941,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.metadata.pop("execution_checkpoint", None)
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.cancelled", entity_id=task.id, payload={})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.post("/tasks/{task_id}/approve-gate")
     async def approve_gate(task_id: str, body: ApproveGateRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1969,7 +2031,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             )
             orchestrator.ensure_worker()
             return {
-                "task": _task_payload(task, container),
+                "task": _task_payload(task, container, orchestrator),
                 "cleared_gate": cleared_gate,
                 "message": _gate_changes_requested_message(cleared_gate, start_from_step=start_from_step),
                 "approved_at": acted_at,
@@ -1993,7 +2055,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             bus.emit(channel="tasks", event_type="task.resume_requested", entity_id=task.id, payload={"gate": cleared_gate})
             orchestrator.ensure_worker()
         return {
-            "task": _task_payload(task, container),
+            "task": _task_payload(task, container, orchestrator),
             "cleared_gate": cleared_gate,
             "message": _gate_approved_message(cleared_gate, will_resume=should_resume),
             "approved_at": acted_at,
@@ -2014,7 +2076,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If either task cannot be found.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         blocker = container.tasks.get(body.depends_on)
         if not task or not blocker:
@@ -2026,7 +2088,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         container.tasks.upsert(task)
         container.tasks.upsert(blocker)
         bus.emit(channel="tasks", event_type="task.dependency_added", entity_id=task.id, payload={"depends_on": body.depends_on})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.delete("/tasks/{task_id}/dependencies/{dep_id}")
     async def remove_dependency(task_id: str, dep_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -2043,7 +2105,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task cannot be found.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -2054,7 +2116,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             blocker.blocks = [item for item in blocker.blocks if item != task.id]
             container.tasks.upsert(blocker)
         bus.emit(channel="tasks", event_type="task.dependency_removed", entity_id=task.id, payload={"dep_id": dep_id})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.post("/tasks/analyze-dependencies")
     async def analyze_dependencies(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -2092,7 +2154,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task cannot be found.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -2118,7 +2180,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.dep_analysis_reset", entity_id=task.id, payload={})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.get("/tasks/{task_id}/workdoc")
     async def get_task_workdoc(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -2380,9 +2442,9 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         for child_id in created_ids:
             child_task = container.tasks.get(child_id)
             if child_task is not None:
-                children.append(_task_payload(child_task))
+                children.append(_task_payload(child_task, orchestrator=orchestrator))
         return {
-            "task": _task_payload(updated_task) if updated_task else None,
+            "task": _task_payload(updated_task, orchestrator=orchestrator) if updated_task else None,
             "created_task_ids": created_ids,
             "children": children,
             "source": source,

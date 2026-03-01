@@ -64,6 +64,7 @@ class OrchestratorService:
         "before_commit": "commit",
     }
     _HUMAN_INTERVENTION_GATE = "human_intervention"
+    _SKIP_TO_PRECOMMIT_COMPATIBLE_BLOCKED_STEPS = {"verify", "benchmark"}
 
     def __init__(
         self,
@@ -601,12 +602,20 @@ class OrchestratorService:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
-            self._recover_in_progress_tasks()
-            self._cleanup_orphaned_worktrees()
-            try:
-                self.reconcile(source="startup")
-            except Exception:
-                logger.exception("Startup reconcile failed; scheduler will continue")
+            with self._futures_lock:
+                inflight_futures = len([future for future in self._futures.values() if not future.done()])
+            if inflight_futures == 0:
+                self._recover_in_progress_tasks()
+                self._cleanup_orphaned_worktrees()
+                try:
+                    self.reconcile(source="startup")
+                except Exception:
+                    logger.exception("Startup reconcile failed; scheduler will continue")
+            else:
+                logger.info(
+                    "Skipping startup recovery/cleanup while %d task future(s) are in-flight",
+                    inflight_futures,
+                )
             self._last_reconcile_monotonic = time.monotonic()
             stop_token = threading.Event()
             self._stop = stop_token
@@ -770,59 +779,59 @@ class OrchestratorService:
             bool: `True` when the operation succeeds, otherwise `False`.
         """
         self._sweep_futures()
+        with self._lock:
+            cfg = self.container.config.load()
+            orchestrator_cfg = dict(cfg.get("orchestrator") or {})
+            if orchestrator_cfg.get("status", "running") != "running":
+                self._dispatch_blocked_reason = "paused"
+                return False
+            if self._manual_run_active > 0:
+                self._dispatch_blocked_reason = "manual_run"
+                return False
 
-        cfg = self.container.config.load()
-        orchestrator_cfg = dict(cfg.get("orchestrator") or {})
-        if orchestrator_cfg.get("status", "running") != "running":
-            self._dispatch_blocked_reason = "paused"
-            return False
-        if self._manual_run_active > 0:
-            self._dispatch_blocked_reason = "manual_run"
-            return False
+            self._apply_gate_wait_policies(orchestrator_cfg)
+            self._maybe_analyze_dependencies()
 
-        self._apply_gate_wait_policies(orchestrator_cfg)
-        self._maybe_analyze_dependencies()
-
-        max_in_progress = int(orchestrator_cfg.get("concurrency", 2) or 2)
-        tasks_snapshot = self.container.tasks.list()
-        queued_tasks = [task for task in tasks_snapshot if task.status == "queued"]
-        running_tasks = [task for task in tasks_snapshot if task.status == "in_progress" and not task.pending_gate]
-        claimed = self.container.tasks.claim_next_runnable(max_in_progress=max_in_progress)
-        if not claimed:
-            if len(running_tasks) >= max_in_progress and queued_tasks:
-                self._dispatch_blocked_reason = "concurrency_limit"
-            elif queued_tasks:
-                waiting_gate = [task for task in queued_tasks if task.pending_gate]
-                if waiting_gate:
-                    self._dispatch_blocked_reason = "waiting_gate"
+            max_in_progress = int(orchestrator_cfg.get("concurrency", 2) or 2)
+            tasks_snapshot = self.container.tasks.list()
+            queued_tasks = [task for task in tasks_snapshot if task.status == "queued"]
+            running_tasks = [task for task in tasks_snapshot if task.status == "in_progress" and not task.pending_gate]
+            claimed = self.container.tasks.claim_next_runnable(max_in_progress=max_in_progress)
+            if not claimed:
+                if len(running_tasks) >= max_in_progress and queued_tasks:
+                    self._dispatch_blocked_reason = "concurrency_limit"
+                elif queued_tasks:
+                    waiting_gate = [task for task in queued_tasks if task.pending_gate]
+                    if waiting_gate:
+                        self._dispatch_blocked_reason = "waiting_gate"
+                    else:
+                        by_id = {task.id: task for task in tasks_snapshot}
+                        terminal = {"done", "cancelled"}
+                        has_dep_block = False
+                        for task in queued_tasks:
+                            unresolved = [
+                                dep_id
+                                for dep_id in task.blocked_by
+                                if (by_id.get(dep_id) is None) or (by_id[dep_id].status not in terminal)
+                            ]
+                            if unresolved:
+                                has_dep_block = True
+                                break
+                        self._dispatch_blocked_reason = "blocked_by_dependencies" if has_dep_block else "no_runnable_queued_tasks"
                 else:
-                    by_id = {task.id: task for task in tasks_snapshot}
-                    terminal = {"done", "cancelled"}
-                    has_dep_block = False
-                    for task in queued_tasks:
-                        unresolved = [
-                            dep_id
-                            for dep_id in task.blocked_by
-                            if (by_id.get(dep_id) is None) or (by_id[dep_id].status not in terminal)
-                        ]
-                        if unresolved:
-                            has_dep_block = True
-                            break
-                    self._dispatch_blocked_reason = "blocked_by_dependencies" if has_dep_block else "no_runnable_queued_tasks"
-            else:
-                self._dispatch_blocked_reason = None
-            return False
-        self._dispatch_blocked_reason = None
-        fresh_claimed = self.container.tasks.get(claimed.id) or claimed
-        self._acquire_execution_lease(fresh_claimed)
-        self.container.tasks.upsert(fresh_claimed)
-        claimed = fresh_claimed
+                    self._dispatch_blocked_reason = None
+                return False
+            self._dispatch_blocked_reason = None
+            fresh_claimed = self.container.tasks.get(claimed.id) or claimed
+            self._acquire_execution_lease(fresh_claimed)
+            self.container.tasks.upsert(fresh_claimed)
+            claimed = fresh_claimed
 
-        self.bus.emit(channel="queue", event_type="task.claimed", entity_id=claimed.id, payload={"status": claimed.status})
-        future = self._get_pool(desired_workers=max_in_progress).submit(self._execute_task, claimed)
-        with self._futures_lock:
-            self._futures[claimed.id] = future
-        return True
+            self.bus.emit(channel="queue", event_type="task.claimed", entity_id=claimed.id, payload={"status": claimed.status})
+            future = self._get_pool(desired_workers=max_in_progress).submit(self._execute_task, claimed)
+            with self._futures_lock:
+                self._futures[claimed.id] = future
+            return True
 
     def run_task(self, task_id: str) -> Task:
         """Synchronously execute one task by id and return the final record.
@@ -925,6 +934,200 @@ class OrchestratorService:
         except Exception:
             return None, None
         return spec.name, spec.model
+
+    def _local_branch_exists(self, branch_name: str) -> bool:
+        normalized = str(branch_name or "").strip()
+        if not normalized:
+            return False
+        try:
+            result = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{normalized}"],
+                cwd=self.container.project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0
+
+    def _pipeline_template_for_task(self, task: Task) -> Any | None:
+        registry = PipelineRegistry()
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        pipeline_id = str(metadata.get("final_pipeline_id") or "").strip()
+        if pipeline_id:
+            try:
+                return registry.get(pipeline_id)
+            except Exception:
+                pass
+        try:
+            return registry.resolve_for_task_type(task.task_type)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _task_blocked_step(task: Task) -> str:
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        return str(task.current_step or metadata.get("pipeline_phase") or "").strip()
+
+    def _current_project_branch(self) -> str:
+        """Resolve active branch in the project repository, falling back to HEAD."""
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=self.container.project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            return "HEAD"
+        branch = str(result.stdout or "").strip()
+        if result.returncode == 0 and branch and branch != "HEAD":
+            return branch
+        return "HEAD"
+
+    def _skip_material_base_ref(self) -> str:
+        """Return baseline ref used to prove preserved work has meaningful diff."""
+        run_branch = str(self._run_branch or "").strip()
+        if run_branch:
+            return run_branch
+        return self._current_project_branch()
+
+    def _branch_has_commits_ahead(self, *, branch: str, base_ref: str) -> bool:
+        """Return whether branch has commits ahead of base_ref."""
+        try:
+            result = subprocess.run(
+                ["git", "log", f"{base_ref}..refs/heads/{branch}", "--oneline"],
+                cwd=self.container.project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            return False
+        if result.returncode != 0:
+            return False
+        return bool(str(result.stdout or "").strip())
+
+    def can_skip_to_precommit(self, task: Task) -> tuple[bool, str | None]:
+        """Return whether a blocked task can move directly to pre-commit review."""
+        if task.status != "blocked":
+            return False, "task_not_blocked"
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        if metadata.get("pending_precommit_approval"):
+            return False, "already_in_precommit_review"
+        if task.pending_gate == self._HUMAN_INTERVENTION_GATE:
+            return False, "human_intervention_gate"
+        if metadata.get("human_blocking_issues"):
+            return False, "human_blocking_issues"
+        if metadata.get("merge_conflict"):
+            return False, "merge_conflict"
+        template = self._pipeline_template_for_task(task)
+        if template is None:
+            return False, "pipeline_unresolved"
+        supports_skip = bool((getattr(template, "metadata", {}) or {}).get("supports_skip_to_precommit"))
+        if not supports_skip:
+            return False, "pipeline_not_supported"
+        steps = [str(step).strip() for step in (task.pipeline_template or template.step_names()) if str(step).strip()]
+        if "commit" not in steps:
+            return False, "pipeline_without_commit"
+        if not (self.container.project_dir / ".git").exists():
+            return False, "git_required"
+        blocked_step = self._task_blocked_step(task)
+        if blocked_step not in self._SKIP_TO_PRECOMMIT_COMPATIBLE_BLOCKED_STEPS:
+            return False, "blocked_step_not_supported"
+        retained_worktree = self._resolve_retained_task_worktree(task)
+        preserved_branch = str(metadata.get("preserved_branch") or "").strip()
+        has_preserved_branch = bool(preserved_branch and self._local_branch_exists(preserved_branch))
+        if retained_worktree is None and not has_preserved_branch:
+            return False, "retry_context_unavailable"
+        has_material_work = False
+        if retained_worktree is not None:
+            has_material_work = self._has_uncommitted_changes(retained_worktree) or self._has_commits_ahead(
+                retained_worktree
+            )
+        if (not has_material_work) and has_preserved_branch:
+            has_material_work = self._branch_has_commits_ahead(
+                branch=preserved_branch,
+                base_ref=self._skip_material_base_ref(),
+            )
+        if not has_material_work:
+            return False, "no_task_changes"
+        return True, None
+
+    def skip_task_to_precommit(self, task_id: str, *, guidance: str = "") -> Task:
+        """Move an eligible blocked task into pre-commit review without rerunning steps."""
+        with self._lock:
+            task = self.container.tasks.get(task_id)
+            if not task:
+                raise ValueError(f"Task not found: {task_id}")
+            allowed, reason_code = self.can_skip_to_precommit(task)
+            if not allowed:
+                raise ValueError(f"Task {task_id} cannot skip to pre-commit ({reason_code or 'not_allowed'})")
+            if not isinstance(task.metadata, dict):
+                task.metadata = {}
+            blocked_step = self._task_blocked_step(task)
+            preserved_branch = str(task.metadata.get("preserved_branch") or "").strip()
+            worktree_dir = self._resolve_retained_task_worktree(task)
+            if worktree_dir is None and preserved_branch:
+                try:
+                    worktree_dir = self._create_worktree_from_branch(task, preserved_branch)
+                except subprocess.CalledProcessError as exc:
+                    raise ValueError(
+                        f"Task {task_id} cannot skip to pre-commit (retry_context_attach_failed: {exc})"
+                    ) from exc
+            if worktree_dir is None:
+                raise ValueError(f"Task {task_id} cannot skip to pre-commit (retry_context_unavailable)")
+            context_ok, context_reason = self._task_executor._prepare_precommit_review_context(task, worktree_dir)
+            if not context_ok:
+                detail = context_reason.strip() or "failed_to_prepare_precommit_context"
+                raise ValueError(f"Task {task_id} cannot skip to pre-commit ({detail})")
+
+            task.metadata.pop("worktree_dir", None)
+            task.metadata.pop("task_context", None)
+            task.status = "in_review"
+            task.pending_gate = None
+            task.current_agent_id = None
+            task.current_step = "review"
+            task.error = None
+            task.metadata["pipeline_phase"] = "review"
+            task.metadata["pending_precommit_approval"] = True
+            task.metadata["review_stage"] = "pre_commit"
+            task.metadata["retry_from_step"] = "commit"
+            action_ts = now_iso()
+            action_payload = {
+                "action": "skip_to_precommit",
+                "ts": action_ts,
+                "blocked_step": blocked_step,
+                "reason_code": "skip_to_precommit",
+                "guidance": str(guidance or "").strip(),
+            }
+            history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
+            history.append(action_payload)
+            task.metadata["last_skip_to_precommit"] = action_payload
+            task.updated_at = action_ts
+            self.container.tasks.upsert(task)
+            self.bus.emit(
+                channel="tasks",
+                event_type="task.skip_to_precommit",
+                entity_id=task.id,
+                payload={
+                    "blocked_step": blocked_step,
+                    "reason_code": "skip_to_precommit",
+                    "has_guidance": bool(str(guidance or "").strip()),
+                },
+            )
+            self.bus.emit(
+                channel="review",
+                event_type="task.awaiting_human",
+                entity_id=task.id,
+                payload={"stage": "pre_commit", "source": "skip_to_precommit"},
+            )
+            return task
 
     def _active_plan_refine_job(self, task_id: str) -> PlanRefineJob | None:
         return self._plan_manager.active_plan_refine_job(task_id)

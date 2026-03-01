@@ -133,8 +133,12 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         Returns:
             A payload containing in-review tasks and total count.
         """
-        container, _, _ = deps.ctx(project_dir)
-        items = [_task_payload(task) for task in container.tasks.list() if task.status == "in_review"]
+        container, _, orchestrator = deps.ctx(project_dir)
+        items = [
+            _task_payload(task, orchestrator=orchestrator)
+            for task in container.tasks.list()
+            if task.status == "in_review"
+        ]
         return {"tasks": items, "total": len(items)}
 
     @router.post("/review/{task_id}/approve")
@@ -156,8 +160,8 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        if task.status not in ("in_review", "blocked"):
-            raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review or blocked")
+        if task.status != "in_review":
+            raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review")
 
         is_precommit_review = bool(task.metadata.get("pending_precommit_approval"))
 
@@ -275,7 +279,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
                     container.runs.upsert(latest_run)
                 container.tasks.upsert(task)
             bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={"stage": "pre_commit", "guidance": body.guidance or ""})
-            return {"task": _task_payload(task, container)}
+            return {"task": _task_payload(task, container, orchestrator)}
 
         # If there's a preserved branch, merge it before marking done
         if task.metadata.get("preserved_branch"):
@@ -309,7 +313,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
 
             container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={"guidance": body.guidance or ""})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.post("/review/{task_id}/request-changes")
     async def request_review_changes(task_id: str, body: ReviewActionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -326,7 +330,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task is missing or not in review.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -367,7 +371,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
                 container.runs.upsert(latest_run)
             container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.changes_requested", entity_id=task.id, payload={"guidance": guidance})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.get("/orchestrator/status")
     async def orchestrator_status(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:

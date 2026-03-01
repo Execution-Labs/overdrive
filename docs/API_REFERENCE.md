@@ -198,12 +198,16 @@ Valid transitions:
 - `backlog -> queued|cancelled`
 - `queued -> backlog|cancelled`
 - `in_progress -> cancelled`
-- `in_review -> done|blocked|cancelled`
-- `blocked -> queued|in_review|cancelled`
+- `in_review -> blocked|cancelled`
+- `blocked -> queued|cancelled`
 - `cancelled -> backlog`
 
 Notes:
 - Transitioning to `queued` requires all blockers resolved (`done|cancelled`).
+- Use `POST /api/review/{task_id}/approve` (not `/transition`) to finalize
+  `in_review` tasks.
+- Blocked tasks cannot be forced into `in_review` via `/transition`; use
+  `POST /api/tasks/{task_id}/skip-to-precommit` when eligible.
 
 ### `POST /api/tasks/{task_id}/run`
 Queue/execute a task through the orchestrator.
@@ -219,6 +223,17 @@ Behavior:
 - Clears `error` and `pending_gate`.
 - Increments `retry_count`.
 - Stores retry guidance metadata/history when provided.
+
+### `POST /api/tasks/{task_id}/skip-to-precommit`
+Move an eligible blocked task to pre-commit review without rerunning earlier steps.
+
+Request (optional):
+- `guidance`
+
+Behavior:
+- Only allowed for blocked tasks that satisfy backend eligibility checks
+  (pipeline capability, blocked step compatibility, and retry context availability).
+- Transitions task to `in_review` with `pending_precommit_approval=true`.
 
 ### `POST /api/tasks/{task_id}/cancel`
 Set task status to `cancelled`.
