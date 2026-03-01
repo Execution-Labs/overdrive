@@ -1469,9 +1469,10 @@ def test_generate_tasks_from_plan(tmp_path: Path) -> None:
     task = Task(title="Auth epic", task_type="decompose", status="queued")
     container.tasks.upsert(task)
 
-    created_ids = service.generate_tasks_from_plan(task.id, "Build auth system", infer_deps=False)
+    created_ids, effective_policy = service.generate_tasks_from_plan(task.id, "Build auth system", infer_deps=False)
 
     assert len(created_ids) == 2
+    assert effective_policy["infer_deps"] is False
     parent = container.tasks.get(task.id)
     assert set(parent.children_ids) == set(created_ids)
 
@@ -1517,9 +1518,10 @@ def test_generate_tasks_from_plan_with_deps(tmp_path: Path) -> None:
     task = Task(title="Backend epic", task_type="decompose", status="queued")
     container.tasks.upsert(task)
 
-    created_ids = service.generate_tasks_from_plan(task.id, "Backend plan", infer_deps=True)
+    created_ids, effective_policy = service.generate_tasks_from_plan(task.id, "Backend plan", infer_deps=True)
 
     assert len(created_ids) == 3
+    assert effective_policy["infer_deps"] is True
     db_task = container.tasks.get(created_ids[0])
     models_task = container.tasks.get(created_ids[1])
     api_task = container.tasks.get(created_ids[2])
@@ -1535,6 +1537,67 @@ def test_generate_tasks_from_plan_with_deps(tmp_path: Path) -> None:
     # API depends on both DB and Models
     assert created_ids[0] in api_task.blocked_by
     assert created_ids[1] in api_task.blocked_by
+
+
+def test_pipeline_generate_tasks_consumes_pending_policy_override(tmp_path: Path) -> None:
+    """Runtime generate_tasks step should consume one-shot policy override."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.domain.models import RunRecord, now_iso
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "generate_tasks":
+            return StepResult(
+                status="ok",
+                generated_tasks=[
+                    {"id": "one", "title": "One", "task_type": "feature"},
+                    {"id": "two", "title": "Two", "task_type": "feature", "depends_on": ["one"]},
+                ],
+            )
+        return StepResult(status="ok")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+
+    task = Task(
+        title="Pipeline generate policy",
+        task_type="decompose",
+        status="in_progress",
+        hitl_mode="supervised",
+        metadata={
+            "task_generation_override": {
+                "child_status": "queued",
+                "child_hitl_mode": "review_only",
+                "infer_deps": False,
+            },
+        },
+    )
+    container.tasks.upsert(task)
+    service._init_workdoc(task, container.project_dir)
+    container.tasks.upsert(task)
+    run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso())
+    container.runs.upsert(run)
+
+    ok = service._run_non_review_step(task, run, "generate_tasks", attempt=1)
+    assert ok is True
+
+    updated = container.tasks.get(task.id)
+    assert updated is not None
+    assert "task_generation_override" not in dict(updated.metadata or {})
+    assert len(updated.children_ids) == 2
+    first = container.tasks.get(updated.children_ids[0])
+    second = container.tasks.get(updated.children_ids[1])
+    assert first is not None and second is not None
+    assert first.status == "queued"
+    assert second.status == "queued"
+    assert first.hitl_mode == "review_only"
+    assert second.hitl_mode == "review_only"
+    assert second.blocked_by == []
 
 
 # ---------------------------------------------------------------------------

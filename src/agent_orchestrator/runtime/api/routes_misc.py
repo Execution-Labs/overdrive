@@ -14,7 +14,7 @@ from ..orchestrator.human_guidance import (
     clear_active_human_guidance,
     set_active_human_guidance,
 )
-from ..domain.models import now_iso
+from ..domain.models import Task, now_iso
 from .deps import RouteDeps
 from . import router_impl as impl
 
@@ -462,7 +462,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         Returns:
             The normalized settings payload after persistence.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         cfg = container.config.load()
         touched_sections: list[str] = []
 
@@ -490,6 +490,17 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
                 defaults_cfg["dependency_policy"] = dep_policy
             if "hitl_mode" in incoming_defaults:
                 defaults_cfg["hitl_mode"] = normalize_hitl_mode(incoming_defaults.get("hitl_mode"))
+            incoming_task_generation = incoming_defaults.get("task_generation")
+            if isinstance(incoming_task_generation, dict):
+                task_generation_cfg = orchestrator.resolve_task_generation_policy(
+                    Task(hitl_mode=defaults_cfg.get("hitl_mode") or "autopilot"),
+                    request_overrides=incoming_task_generation,
+                )
+                defaults_cfg["task_generation"] = {
+                    "child_status": task_generation_cfg.get("child_status"),
+                    "child_hitl_mode": task_generation_cfg.get("child_hitl_mode_selection"),
+                    "infer_deps": bool(task_generation_cfg.get("infer_deps", True)),
+                }
             cfg["defaults"] = defaults_cfg
             touched_sections.append("defaults")
 

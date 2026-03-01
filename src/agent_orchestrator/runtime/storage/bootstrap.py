@@ -450,6 +450,23 @@ def ensure_state_root(project_dir: Path) -> Path:
             "quality_gate": {"critical": 0, "high": 0, "medium": 0, "low": 0},
             "dependency_policy": "prudent",
             "hitl_mode": "autopilot",
+            "task_generation": {
+                "child_status": "backlog",
+                "child_hitl_mode": "inherit_parent",
+                "infer_deps": True,
+            },
+        },
+    )
+    defaults_cfg = config.get("defaults")
+    if not isinstance(defaults_cfg, dict):
+        defaults_cfg = {}
+        config["defaults"] = defaults_cfg
+    defaults_cfg.setdefault(
+        "task_generation",
+        {
+            "child_status": "backlog",
+            "child_hitl_mode": "inherit_parent",
+            "infer_deps": True,
         },
     )
     project_cfg = config.get("project")

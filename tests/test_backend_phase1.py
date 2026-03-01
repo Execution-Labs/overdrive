@@ -948,6 +948,11 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert baseline.json()["orchestrator"]["gate_timeout_action"] == "none"
         assert baseline.json()["agent_routing"]["default_role"] == "general"
         assert baseline.json()["defaults"]["quality_gate"]["high"] == 0
+        assert baseline.json()["defaults"]["task_generation"] == {
+            "child_status": "backlog",
+            "child_hitl_mode": "inherit_parent",
+            "infer_deps": True,
+        }
         assert baseline.json()["workers"]["default"] == "codex"
         assert baseline.json()["workers"]["heartbeat_seconds"] == 60
         assert baseline.json()["workers"]["heartbeat_grace_seconds"] == 240
@@ -971,7 +976,14 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
                     "task_type_roles": {"bug": "debugger"},
                     "role_provider_overrides": {"reviewer": "openai"},
                 },
-                "defaults": {"quality_gate": {"critical": 1, "high": 2, "medium": 3, "low": 4}},
+                "defaults": {
+                    "quality_gate": {"critical": 1, "high": 2, "medium": 3, "low": 4},
+                    "task_generation": {
+                        "child_status": "queued",
+                        "child_hitl_mode": "review_only",
+                        "infer_deps": False,
+                    },
+                },
                 "workers": {
                     "default": "ollama-dev",
                     "default_model": "gpt-5-codex",
@@ -1019,6 +1031,11 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert body["defaults"]["quality_gate"]["high"] == 2
         assert body["defaults"]["quality_gate"]["medium"] == 3
         assert body["defaults"]["quality_gate"]["low"] == 4
+        assert body["defaults"]["task_generation"] == {
+            "child_status": "queued",
+            "child_hitl_mode": "review_only",
+            "infer_deps": False,
+        }
         assert body["workers"]["default"] == "ollama-dev"
         assert body["workers"]["default_model"] == "gpt-5-codex"
         assert body["workers"]["heartbeat_seconds"] == 90
@@ -3851,6 +3868,7 @@ def test_generate_tasks_endpoint(tmp_path: Path) -> None:
             "/api/tasks",
             json={
                 "title": "Generate from plan",
+                "task_type": "initiative_plan",
                 "status": "backlog",
                 "metadata": {
                     "scripted_generated_tasks": [
@@ -3870,6 +3888,128 @@ def test_generate_tasks_endpoint(tmp_path: Path) -> None:
         assert body["children"][0]["title"] == "Login endpoint"
         assert body["children"][1]["title"] == "Session store"
         assert body["task"]["children_ids"] == body["created_task_ids"]
+        assert body["effective_policy"]["child_status"] == "backlog"
+        assert body["effective_policy"]["child_hitl_mode"] == "autopilot"
+        assert body["effective_policy"]["infer_deps"] is True
+
+
+def test_generate_tasks_endpoint_applies_policy_and_persists_defaults(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Generate with policy",
+                "task_type": "initiative_plan",
+                "hitl_mode": "supervised",
+                "status": "backlog",
+                "metadata": {
+                    "scripted_generated_tasks": [
+                        {"title": "Child A", "task_type": "feature", "status": "backlog", "hitl_mode": "autopilot"},
+                        {"title": "Child B", "task_type": "feature", "status": "backlog", "hitl_mode": "supervised"},
+                    ],
+                },
+            },
+        ).json()["task"]
+        _create_plan_revision(client, task["id"], "Plan body")
+
+        resp = client.post(
+            f"/api/tasks/{task['id']}/generate-tasks",
+            json={
+                "source": "latest",
+                "policy": {
+                    "child_status": "queued",
+                    "child_hitl_mode": "review_only",
+                    "infer_deps": False,
+                },
+                "save_as_default": True,
+            },
+        )
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["effective_policy"]["child_status"] == "queued"
+        assert payload["effective_policy"]["child_hitl_mode"] == "review_only"
+        assert payload["effective_policy"]["infer_deps"] is False
+        for child in payload["children"]:
+            assert child["status"] == "queued"
+            assert child["hitl_mode"] == "review_only"
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        parent = container.tasks.get(task["id"])
+        assert parent is not None
+        defaults = dict((parent.metadata or {}).get("task_generation_defaults") or {})
+        assert defaults == {
+            "child_status": "queued",
+            "child_hitl_mode": "review_only",
+            "infer_deps": False,
+        }
+
+
+def test_generate_tasks_endpoint_uses_saved_defaults_when_policy_omitted(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Generate from saved defaults",
+                "task_type": "initiative_plan",
+                "hitl_mode": "supervised",
+                "status": "backlog",
+                "metadata": {
+                    "scripted_generated_tasks": [
+                        {"id": "one", "title": "One", "task_type": "feature"},
+                        {"id": "two", "title": "Two", "task_type": "feature", "depends_on": ["one"]},
+                    ],
+                },
+            },
+        ).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        persisted = container.tasks.get(task["id"])
+        assert persisted is not None
+        persisted.metadata["task_generation_defaults"] = {
+            "child_status": "queued",
+            "child_hitl_mode": "inherit_parent",
+            "infer_deps": False,
+        }
+        container.tasks.upsert(persisted)
+        _create_plan_revision(client, task["id"], "Plan body")
+
+        resp = client.post(f"/api/tasks/{task['id']}/generate-tasks", json={"source": "latest"})
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["effective_policy"]["child_status"] == "queued"
+        assert payload["effective_policy"]["child_hitl_mode"] == "supervised"
+        assert payload["effective_policy"]["child_hitl_mode_selection"] == "inherit_parent"
+        assert payload["effective_policy"]["infer_deps"] is False
+
+        first = payload["children"][0]
+        second = payload["children"][1]
+        assert first["status"] == "queued"
+        assert second["status"] == "queued"
+        assert first["hitl_mode"] == "supervised"
+        assert second["hitl_mode"] == "supervised"
+        assert second.get("blocked_by") == []
+
+
+def test_generate_tasks_endpoint_rejects_incompatible_pipeline(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Feature task",
+                "task_type": "feature",
+                "status": "backlog",
+                "metadata": {
+                    "scripted_generated_tasks": [{"title": "Child", "task_type": "feature"}],
+                },
+            },
+        ).json()["task"]
+        _create_plan_revision(client, task["id"], "Plan body")
+
+        resp = client.post(f"/api/tasks/{task['id']}/generate-tasks", json={"source": "latest"})
+        assert resp.status_code == 400
+        assert "pipeline does not include generate_tasks" in resp.json()["detail"]
 
 
 def test_generate_tasks_endpoint_returns_400_when_worker_outputs_no_tasks(tmp_path: Path) -> None:
@@ -3880,6 +4020,7 @@ def test_generate_tasks_endpoint_returns_400_when_worker_outputs_no_tasks(tmp_pa
             "/api/tasks",
             json={
                 "title": "Generate no output",
+                "task_type": "initiative_plan",
                 "status": "backlog",
                 "metadata": {
                     "scripted_steps": {
@@ -3903,6 +4044,7 @@ def test_generate_tasks_with_override(tmp_path: Path) -> None:
             "/api/tasks",
             json={
                 "title": "Override plan test",
+                "task_type": "initiative_plan",
                 "metadata": {
                     "scripted_generated_tasks": [
                         {"title": "From override", "task_type": "feature"},
@@ -3927,6 +4069,87 @@ def test_generate_tasks_with_override(tmp_path: Path) -> None:
         assert resp.status_code == 200
         assert len(resp.json()["created_task_ids"]) == 1
         assert resp.json()["children"][0]["title"] == "From override"
+
+
+def test_approve_gate_before_generate_tasks_accepts_generation_policy(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={
+                "title": "Gate task",
+                "task_type": "initiative_plan",
+                "hitl_mode": "supervised",
+                "status": "in_progress",
+            },
+        ).json()["task"]
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+        task.pending_gate = "before_generate_tasks"
+        container.tasks.upsert(task)
+
+        resp = client.post(
+            f"/api/tasks/{task.id}/approve-gate",
+            json={
+                "action": "approve",
+                "generation_policy": {
+                    "child_status": "queued",
+                    "child_hitl_mode": "review_only",
+                    "infer_deps": False,
+                },
+                "save_generation_policy_as_default": True,
+            },
+        )
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["effective_generation_policy"]["child_status"] == "queued"
+        assert payload["effective_generation_policy"]["child_hitl_mode"] == "review_only"
+        assert payload["effective_generation_policy"]["infer_deps"] is False
+
+        updated = container.tasks.get(task.id)
+        assert updated is not None
+        override = dict((updated.metadata or {}).get("task_generation_override") or {})
+        assert override == {
+            "child_status": "queued",
+            "child_hitl_mode": "review_only",
+            "infer_deps": False,
+        }
+        defaults = dict((updated.metadata or {}).get("task_generation_defaults") or {})
+        assert defaults == {
+            "child_status": "queued",
+            "child_hitl_mode": "review_only",
+            "infer_deps": False,
+        }
+
+
+def test_approve_gate_rejects_generation_policy_for_non_generate_gate(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={
+                "title": "Non-generate gate task",
+                "task_type": "feature",
+                "status": "in_progress",
+            },
+        ).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+        task.pending_gate = "before_implement"
+        container.tasks.upsert(task)
+
+        resp = client.post(
+            f"/api/tasks/{task.id}/approve-gate",
+            json={
+                "action": "approve",
+                "generation_policy": {"child_status": "queued"},
+            },
+        )
+        assert resp.status_code == 400
+        assert "only valid for the before_generate_tasks gate" in resp.json()["detail"]
 
 
 def test_plan_refine_job_lifecycle_and_commit(tmp_path: Path) -> None:
@@ -4112,6 +4335,7 @@ def test_generate_tasks_with_explicit_plan_sources(tmp_path: Path) -> None:
             "/api/tasks",
             json={
                 "title": "Source selection",
+                "task_type": "initiative_plan",
                 "metadata": {
                     "scripted_generated_tasks": [{"title": "From selected source", "task_type": "feature"}],
                 },

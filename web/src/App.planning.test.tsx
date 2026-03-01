@@ -127,6 +127,27 @@ describe('Planning panel', () => {
       if (u.includes('/api/collaboration/timeline/task-1')) return Promise.resolve({ ok: true, json: async () => ({ events: [] }) })
       if (u.includes('/api/collaboration/feedback/task-1')) return Promise.resolve({ ok: true, json: async () => ({ feedback: [] }) })
       if (u.includes('/api/collaboration/comments/task-1')) return Promise.resolve({ ok: true, json: async () => ({ comments: [] }) })
+      if (u.includes('/api/settings')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10, step_timeout_seconds: 600 },
+            agent_routing: { default_role: 'general', task_type_roles: {}, role_provider_overrides: {} },
+            defaults: {
+              quality_gate: { critical: 0, high: 0, medium: 0, low: 0 },
+              dependency_policy: 'prudent',
+              hitl_mode: 'autopilot',
+              task_generation: {
+                child_status: 'queued',
+                child_hitl_mode: 'review_only',
+                infer_deps: false,
+              },
+            },
+            workers: { default: 'codex', default_model: '', routing: {}, providers: { codex: { type: 'codex', command: 'codex exec' } } },
+            project: { commands: {}, prompt_overrides: {}, prompt_injections: {}, prompt_defaults: {} },
+          }),
+        })
+      }
       return Promise.resolve({ ok: true, json: async () => ({}) })
     }) as unknown as typeof fetch
   })
@@ -168,6 +189,12 @@ describe('Planning panel', () => {
       expect(body.feedback).toBe('tighten scope')
     })
 
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Start generated tasks in/i)).toHaveValue('queued')
+      expect(screen.getByLabelText(/Generated task HITL mode/i)).toHaveValue('review_only')
+      expect((screen.getByLabelText(/Infer dependencies between generated tasks/i) as HTMLInputElement).checked).toBe(false)
+    })
+
     fireEvent.change(screen.getByLabelText(/Generate tasks from/i), { target: { value: 'revision' } })
     fireEvent.change(screen.getByLabelText(/Generate from revision/i), { target: { value: 'pr-2' } })
     fireEvent.click(screen.getByRole('button', { name: /Generate Tasks/i }))
@@ -178,7 +205,13 @@ describe('Planning panel', () => {
       const body = JSON.parse(String((generateCall?.[1] as RequestInit).body))
       expect(body.source).toBe('revision')
       expect(body.revision_id).toBe('pr-2')
-      expect(body.infer_deps).toBe(true)
+      expect(body.infer_deps).toBe(false)
+      expect(body.policy).toEqual({
+        child_status: 'queued',
+        child_hitl_mode: 'review_only',
+        infer_deps: false,
+      })
+      expect(body.save_as_default).toBe(false)
     })
   })
 })

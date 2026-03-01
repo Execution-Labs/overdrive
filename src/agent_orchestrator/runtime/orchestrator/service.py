@@ -66,6 +66,15 @@ class OrchestratorService:
     }
     _HUMAN_INTERVENTION_GATE = "human_intervention"
     _SKIP_TO_PRECOMMIT_COMPATIBLE_BLOCKED_STEPS = {"verify", "benchmark"}
+    _TASK_GENERATION_STATUS_VALUES = {"backlog", "queued"}
+    _TASK_GENERATION_HITL_VALUES = {"inherit_parent", "autopilot", "supervised", "review_only"}
+    _TASK_GENERATION_DEFAULTS_KEY = "task_generation_defaults"
+    _TASK_GENERATION_OVERRIDE_KEY = "task_generation_override"
+    _TASK_GENERATION_DEFAULTS = {
+        "child_status": "backlog",
+        "child_hitl_mode": "inherit_parent",
+        "infer_deps": True,
+    }
     _CANCELLED_CONTEXT_METADATA_KEYS = (
         "worktree_dir",
         "task_context",
@@ -81,6 +90,7 @@ class OrchestratorService:
         "cancel_cleanup_pending",
         "cancel_cleanup_deferred_at",
         "cancel_cleanup_reason",
+        _TASK_GENERATION_OVERRIDE_KEY,
     )
 
     def __init__(
@@ -1126,6 +1136,256 @@ class OrchestratorService:
             return registry.resolve_for_task_type(task.task_type)
         except Exception:
             return None
+
+    @classmethod
+    def _normalize_task_generation_status(cls, value: Any, *, default: str = "backlog") -> str:
+        raw = str(value or "").strip().lower()
+        if raw in cls._TASK_GENERATION_STATUS_VALUES:
+            return raw
+        return default
+
+    @classmethod
+    def _normalize_task_generation_hitl_selection(cls, value: Any, *, default: str = "inherit_parent") -> str:
+        raw = str(value or "").strip().lower()
+        if raw == "collaborative":
+            raw = "supervised"
+        if raw in cls._TASK_GENERATION_HITL_VALUES:
+            return raw
+        return default
+
+    @staticmethod
+    def _coerce_task_generation_infer_deps(value: Any, *, default: bool = True) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "off"}:
+                return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return default
+
+    def _system_task_generation_defaults_raw(self) -> dict[str, Any]:
+        cfg = self.container.config.load()
+        defaults_cfg = dict(cfg.get("defaults") or {})
+        raw = defaults_cfg.get("task_generation")
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def supports_task_generation(self, task: Task) -> bool:
+        template = self._pipeline_template_for_task(task)
+        if task.pipeline_template:
+            steps = [str(step).strip() for step in task.pipeline_template if str(step).strip()]
+        elif template is not None:
+            steps = [str(step).strip() for step in template.step_names() if str(step).strip()]
+        else:
+            steps = []
+        return "generate_tasks" in steps
+
+    def resolve_task_generation_policy(
+        self,
+        task: Task,
+        *,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve generated-child policy from request/task/system/fallback precedence."""
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        fallback_defaults = dict(self._TASK_GENERATION_DEFAULTS)
+        system_raw = self._system_task_generation_defaults_raw()
+        task_defaults_raw = task.metadata.get(self._TASK_GENERATION_DEFAULTS_KEY)
+        task_raw = dict(task_defaults_raw) if isinstance(task_defaults_raw, dict) else {}
+        request_raw = dict(request_overrides) if isinstance(request_overrides, dict) else {}
+
+        status: str
+        status_source: str
+        if "child_status" in request_raw and request_raw.get("child_status") is not None:
+            status = self._normalize_task_generation_status(
+                request_raw.get("child_status"),
+                default=self._normalize_task_generation_status(
+                    task_raw.get("child_status"),
+                    default=self._normalize_task_generation_status(
+                        system_raw.get("child_status"),
+                        default=str(fallback_defaults["child_status"]),
+                    ),
+                ),
+            )
+            status_source = "request_override"
+        elif "child_status" in task_raw:
+            status = self._normalize_task_generation_status(
+                task_raw.get("child_status"),
+                default=self._normalize_task_generation_status(
+                    system_raw.get("child_status"),
+                    default=str(fallback_defaults["child_status"]),
+                ),
+            )
+            status_source = "task_defaults"
+        elif "child_status" in system_raw:
+            status = self._normalize_task_generation_status(
+                system_raw.get("child_status"),
+                default=str(fallback_defaults["child_status"]),
+            )
+            status_source = "system_defaults"
+        else:
+            status = str(fallback_defaults["child_status"])
+            status_source = "fallback"
+
+        hitl_selection: str
+        hitl_source: str
+        if "child_hitl_mode" in request_raw and request_raw.get("child_hitl_mode") is not None:
+            hitl_selection = self._normalize_task_generation_hitl_selection(
+                request_raw.get("child_hitl_mode"),
+                default=self._normalize_task_generation_hitl_selection(
+                    task_raw.get("child_hitl_mode"),
+                    default=self._normalize_task_generation_hitl_selection(
+                        system_raw.get("child_hitl_mode"),
+                        default=str(fallback_defaults["child_hitl_mode"]),
+                    ),
+                ),
+            )
+            hitl_source = "request_override"
+        elif "child_hitl_mode" in task_raw:
+            hitl_selection = self._normalize_task_generation_hitl_selection(
+                task_raw.get("child_hitl_mode"),
+                default=self._normalize_task_generation_hitl_selection(
+                    system_raw.get("child_hitl_mode"),
+                    default=str(fallback_defaults["child_hitl_mode"]),
+                ),
+            )
+            hitl_source = "task_defaults"
+        elif "child_hitl_mode" in system_raw:
+            hitl_selection = self._normalize_task_generation_hitl_selection(
+                system_raw.get("child_hitl_mode"),
+                default=str(fallback_defaults["child_hitl_mode"]),
+            )
+            hitl_source = "system_defaults"
+        else:
+            hitl_selection = str(fallback_defaults["child_hitl_mode"])
+            hitl_source = "fallback"
+
+        infer_deps: bool
+        infer_source: str
+        if "infer_deps" in request_raw and request_raw.get("infer_deps") is not None:
+            infer_deps = self._coerce_task_generation_infer_deps(
+                request_raw.get("infer_deps"),
+                default=self._coerce_task_generation_infer_deps(
+                    task_raw.get("infer_deps"),
+                    default=self._coerce_task_generation_infer_deps(
+                        system_raw.get("infer_deps"),
+                        default=bool(fallback_defaults["infer_deps"]),
+                    ),
+                ),
+            )
+            infer_source = "request_override"
+        elif "infer_deps" in task_raw:
+            infer_deps = self._coerce_task_generation_infer_deps(
+                task_raw.get("infer_deps"),
+                default=self._coerce_task_generation_infer_deps(
+                    system_raw.get("infer_deps"),
+                    default=bool(fallback_defaults["infer_deps"]),
+                ),
+            )
+            infer_source = "task_defaults"
+        elif "infer_deps" in system_raw:
+            infer_deps = self._coerce_task_generation_infer_deps(
+                system_raw.get("infer_deps"),
+                default=bool(fallback_defaults["infer_deps"]),
+            )
+            infer_source = "system_defaults"
+        else:
+            infer_deps = bool(fallback_defaults["infer_deps"])
+            infer_source = "fallback"
+
+        if hitl_selection == "inherit_parent":
+            resolved_hitl = normalize_hitl_mode(getattr(task, "hitl_mode", "autopilot"))
+        else:
+            resolved_hitl = normalize_hitl_mode(hitl_selection)
+
+        return {
+            "child_status": status,
+            "child_hitl_mode": resolved_hitl,
+            "child_hitl_mode_selection": hitl_selection,
+            "infer_deps": infer_deps,
+            "sources": {
+                "child_status": status_source,
+                "child_hitl_mode": hitl_source,
+                "infer_deps": infer_source,
+            },
+        }
+
+    def persist_task_generation_defaults(self, task: Task, *, effective_policy: dict[str, Any]) -> dict[str, Any]:
+        """Persist normalized generation defaults onto a parent task."""
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        selection = self._normalize_task_generation_hitl_selection(
+            effective_policy.get("child_hitl_mode_selection"),
+            default=self._normalize_task_generation_hitl_selection(
+                effective_policy.get("child_hitl_mode"),
+                default=str(self._TASK_GENERATION_DEFAULTS["child_hitl_mode"]),
+            ),
+        )
+        defaults = {
+            "child_status": self._normalize_task_generation_status(
+                effective_policy.get("child_status"),
+                default=str(self._TASK_GENERATION_DEFAULTS["child_status"]),
+            ),
+            "child_hitl_mode": selection,
+            "infer_deps": self._coerce_task_generation_infer_deps(
+                effective_policy.get("infer_deps"),
+                default=bool(self._TASK_GENERATION_DEFAULTS["infer_deps"]),
+            ),
+        }
+        task.metadata[self._TASK_GENERATION_DEFAULTS_KEY] = defaults
+        return defaults
+
+    def set_pending_task_generation_override(self, task: Task, *, effective_policy: dict[str, Any] | None) -> None:
+        """Set a one-shot generation policy override consumed by the next generate_tasks step."""
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        if not isinstance(effective_policy, dict):
+            task.metadata.pop(self._TASK_GENERATION_OVERRIDE_KEY, None)
+            return
+        selection = self._normalize_task_generation_hitl_selection(
+            effective_policy.get("child_hitl_mode_selection"),
+            default=self._normalize_task_generation_hitl_selection(
+                effective_policy.get("child_hitl_mode"),
+                default=str(self._TASK_GENERATION_DEFAULTS["child_hitl_mode"]),
+            ),
+        )
+        task.metadata[self._TASK_GENERATION_OVERRIDE_KEY] = {
+            "child_status": self._normalize_task_generation_status(
+                effective_policy.get("child_status"),
+                default=str(self._TASK_GENERATION_DEFAULTS["child_status"]),
+            ),
+            "child_hitl_mode": selection,
+            "infer_deps": self._coerce_task_generation_infer_deps(
+                effective_policy.get("infer_deps"),
+                default=bool(self._TASK_GENERATION_DEFAULTS["infer_deps"]),
+            ),
+        }
+
+    def consume_pending_task_generation_override(self, task: Task) -> dict[str, Any] | None:
+        """Consume and clear any queued one-shot generation policy override."""
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        raw = task.metadata.pop(self._TASK_GENERATION_OVERRIDE_KEY, None)
+        if not isinstance(raw, dict):
+            return None
+        return {
+            "child_status": self._normalize_task_generation_status(
+                raw.get("child_status"),
+                default=str(self._TASK_GENERATION_DEFAULTS["child_status"]),
+            ),
+            "child_hitl_mode": self._normalize_task_generation_hitl_selection(
+                raw.get("child_hitl_mode"),
+                default=str(self._TASK_GENERATION_DEFAULTS["child_hitl_mode"]),
+            ),
+            "infer_deps": self._coerce_task_generation_infer_deps(
+                raw.get("infer_deps"),
+                default=bool(self._TASK_GENERATION_DEFAULTS["infer_deps"]),
+            ),
+        }
 
     @staticmethod
     def _task_blocked_step(task: Task) -> str:
@@ -2191,6 +2451,8 @@ class OrchestratorService:
         # Handle generate_tasks: prefer generated tasks, but avoid silent no-op by recording warning metadata.
         if step == "generate_tasks":
             generated = list(result.generated_tasks or [])
+            policy_override = self.consume_pending_task_generation_override(task)
+            effective_policy = self.resolve_task_generation_policy(task, request_overrides=policy_override)
             if not generated:
                 if not isinstance(task.metadata, dict):
                     task.metadata = {}
@@ -2200,23 +2462,52 @@ class OrchestratorService:
                     channel="tasks",
                     event_type="task.generate_tasks_empty",
                     entity_id=task.id,
-                    payload={"warning": task.metadata["generate_tasks_warning"]},
+                    payload={
+                        "warning": task.metadata["generate_tasks_warning"],
+                        "effective_policy": effective_policy,
+                    },
                 )
                 return True
-            self._create_child_tasks(task, generated)
+            created_ids = self._create_child_tasks(task, generated, effective_policy=effective_policy)
+            self.bus.emit(
+                channel="tasks",
+                event_type="task.generated_from_pipeline",
+                entity_id=task.id,
+                payload={
+                    "created_task_ids": created_ids,
+                    "effective_policy": effective_policy,
+                },
+            )
 
         self._heartbeat_execution_lease(task)
         self.container.tasks.upsert(task)
         return True
 
     def _create_child_tasks(
-        self, parent: Task, task_defs: list[dict[str, Any]], *, apply_deps: bool = False
+        self,
+        parent: Task,
+        task_defs: list[dict[str, Any]],
+        *,
+        effective_policy: dict[str, Any] | None = None,
     ) -> list[str]:
-        return self._plan_manager.create_child_tasks(parent, task_defs, apply_deps=apply_deps)
+        resolved_policy = effective_policy or self.resolve_task_generation_policy(parent)
+        apply_deps = bool(resolved_policy.get("infer_deps", True))
+        return self._plan_manager.create_child_tasks(
+            parent,
+            task_defs,
+            apply_deps=apply_deps,
+            generation_policy=resolved_policy,
+        )
 
     def generate_tasks_from_plan(
-        self, task_id: str, plan_text: str, *, infer_deps: bool = True
-    ) -> list[str]:
+        self,
+        task_id: str,
+        plan_text: str,
+        *,
+        infer_deps: bool | None = True,
+        generation_policy_overrides: dict[str, Any] | None = None,
+        save_as_default: bool = False,
+    ) -> tuple[list[str], dict[str, Any]]:
         """Generate child tasks from an explicit plan text.
 
         This supports a two-phase workflow: run a plan step, review the output,
@@ -2225,17 +2516,26 @@ class OrchestratorService:
         Args:
             task_id (str): Parent task identifier that will receive generated children.
             plan_text (str): Plan content to pass into the ``generate_tasks`` worker step.
-            infer_deps (bool): Whether to apply ``depends_on`` links returned by
+            infer_deps (bool | None): Whether to apply ``depends_on`` links returned by
                 the worker to the created child tasks.
+            generation_policy_overrides (dict[str, Any] | None): Optional policy
+                overrides (status/HITL/infer_deps) for generated children.
+            save_as_default (bool): Persist effective generation policy on parent.
 
         Returns:
-            list[str]: Identifiers of newly created child tasks.
+            tuple[list[str], dict[str, Any]]: Created child ids and effective policy.
 
         Raises:
             ValueError: If the parent task does not exist.
             ValueError: If worker execution fails or yields no valid tasks.
         """
-        return self._plan_manager.generate_tasks_from_plan(task_id, plan_text, infer_deps=infer_deps)
+        return self._plan_manager.generate_tasks_from_plan(
+            task_id,
+            plan_text,
+            infer_deps=infer_deps,
+            generation_policy_overrides=generation_policy_overrides,
+            save_as_default=save_as_default,
+        )
 
     def _findings_from_result(self, task: Task, review_attempt: int) -> tuple[list[ReviewFinding], StepResult]:
         try:

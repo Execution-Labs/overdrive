@@ -164,11 +164,22 @@ class CreatePlanRevisionRequest(BaseModel):
     feedback_note: Optional[str] = None
 
 
+class TaskGenerationPolicyRequest(BaseModel):
+    """Optional policy controls for child tasks generated from plans."""
+    child_status: Optional[Literal["backlog", "queued"]] = None
+    child_hitl_mode: Optional[Literal["inherit_parent", "autopilot", "supervised", "review_only"]] = None
+    infer_deps: Optional[bool] = None
+
+
 class GenerateTasksRequest(BaseModel):
     """Request body for deriving child tasks from committed or ad hoc plan text."""
     source: Optional[Literal["committed", "revision", "override", "latest"]] = None
     revision_id: Optional[str] = None
     plan_override: Optional[str] = None
+    policy: Optional[TaskGenerationPolicyRequest] = None
+    save_as_default: bool = False
+    # Backward-compatibility shim for legacy clients that send infer_deps
+    # at the top level rather than under policy.
     infer_deps: bool = True
 
 
@@ -177,6 +188,8 @@ class ApproveGateRequest(BaseModel):
     gate: Optional[str] = None
     action: Literal["approve", "request_changes"] = "approve"
     guidance: Optional[str] = None
+    generation_policy: Optional[TaskGenerationPolicyRequest] = None
+    save_generation_policy_as_default: bool = False
 
 
 class OrchestratorControlRequest(BaseModel):
@@ -237,6 +250,13 @@ class QualityGateSettingsRequest(BaseModel):
     low: int = Field(0, ge=0)
 
 
+class TaskGenerationDefaultsRequest(BaseModel):
+    """Default policy for generated child tasks."""
+    child_status: Literal["backlog", "queued"] = "backlog"
+    child_hitl_mode: Literal["inherit_parent", "autopilot", "supervised", "review_only"] = "inherit_parent"
+    infer_deps: bool = True
+
+
 class DefaultsSettingsRequest(BaseModel):
     """Project-wide default policies applied to new tasks."""
     quality_gate: QualityGateSettingsRequest = QualityGateSettingsRequest(
@@ -247,6 +267,7 @@ class DefaultsSettingsRequest(BaseModel):
     )
     dependency_policy: str = "prudent"
     hitl_mode: str = "autopilot"
+    task_generation: TaskGenerationDefaultsRequest = TaskGenerationDefaultsRequest()
 
 
 class LanguageCommandsRequest(BaseModel):
@@ -902,6 +923,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     routing = dict(cfg.get("agent_routing") or {})
     defaults = dict(cfg.get("defaults") or {})
     quality_gate = dict(defaults.get("quality_gate") or {})
+    task_generation = dict(defaults.get("task_generation") or {})
     workers_cfg = dict(cfg.get("workers") or {})
     workers_providers = _normalize_workers_providers(workers_cfg.get("providers"))
     workers_default = str(workers_cfg.get("default") or "codex").strip() or "codex"
@@ -919,6 +941,14 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     prompt_overrides = _normalize_prompt_overrides(project_cfg.get("prompt_overrides"))
     prompt_injections = _normalize_prompt_injections(project_cfg.get("prompt_injections"))
     default_hitl_mode = normalize_hitl_mode(str(defaults.get("hitl_mode") or "autopilot"))
+    task_generation_status = str(task_generation.get("child_status") or "backlog").strip().lower()
+    if task_generation_status not in {"backlog", "queued"}:
+        task_generation_status = "backlog"
+    task_generation_hitl = str(task_generation.get("child_hitl_mode") or "inherit_parent").strip().lower()
+    if task_generation_hitl == "collaborative":
+        task_generation_hitl = "supervised"
+    if task_generation_hitl not in {"inherit_parent", "autopilot", "supervised", "review_only"}:
+        task_generation_hitl = "inherit_parent"
     raw_storage_backend = str(cfg.get("storage_backend") or "sqlite").strip().lower()
     storage_backend = raw_storage_backend if raw_storage_backend == "sqlite" else "sqlite"
     return {
@@ -980,6 +1010,11 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
             },
             "dependency_policy": str(defaults.get("dependency_policy") or "prudent") if str(defaults.get("dependency_policy") or "prudent") in ("permissive", "prudent", "strict") else "prudent",
             "hitl_mode": default_hitl_mode,
+            "task_generation": {
+                "child_status": task_generation_status,
+                "child_hitl_mode": task_generation_hitl,
+                "infer_deps": _coerce_bool(task_generation.get("infer_deps"), True),
+            },
         },
         "workers": {
             "default": workers_default,

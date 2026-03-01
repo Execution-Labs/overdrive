@@ -83,6 +83,8 @@ _INTERNAL_TASK_METADATA_KEYS = {
     "requested_changes",
     "pipeline_phase",
     "step_outputs",
+    "task_generation_defaults",
+    "task_generation_override",
 }
 
 
@@ -194,6 +196,19 @@ def _sanitize_client_task_metadata(raw: dict[str, Any] | None) -> dict[str, Any]
             continue
         sanitized[normalized] = value
     return sanitized
+
+
+def _generation_policy_overrides(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """Extract optional generated-task policy overrides from request payloads."""
+    source = dict(raw) if isinstance(raw, dict) else {}
+    overrides: dict[str, Any] = {}
+    if "child_status" in source and source.get("child_status") is not None:
+        overrides["child_status"] = source.get("child_status")
+    if "child_hitl_mode" in source and source.get("child_hitl_mode") is not None:
+        overrides["child_hitl_mode"] = source.get("child_hitl_mode")
+    if "infer_deps" in source and source.get("infer_deps") is not None:
+        overrides["infer_deps"] = source.get("infer_deps")
+    return overrides
 
 
 def _previous_step(steps: list[str], target_step: str) -> str | None:
@@ -2035,6 +2050,12 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         action = str(getattr(body, "action", "approve") or "approve").strip().lower()
         if action not in {"approve", "request_changes"}:
             raise HTTPException(status_code=400, detail=f"Unsupported gate action: {action}")
+        requested_generation_policy = _generation_policy_overrides(
+            body.generation_policy.model_dump(exclude_none=True)
+            if getattr(body, "generation_policy", None) is not None
+            else None
+        )
+        save_generation_defaults = bool(getattr(body, "save_generation_policy_as_default", False))
 
         cleared_gate = task.pending_gate
         acted_at = now_iso()
@@ -2043,6 +2064,11 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             task.metadata = {}
 
         if action == "request_changes":
+            if requested_generation_policy or save_generation_defaults:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Generation policy controls are only supported for gate approval.",
+                )
             start_from_step = _request_changes_step_for_gate(task, cleared_gate)
             guidance = str(getattr(body, "guidance", "") or "").strip()
             task.retry_count += 1
@@ -2103,6 +2129,34 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 "approved_at": acted_at,
             }
 
+        if (requested_generation_policy or save_generation_defaults) and cleared_gate != "before_generate_tasks":
+            raise HTTPException(
+                status_code=400,
+                detail="Generation policy controls are only valid for the before_generate_tasks gate.",
+            )
+
+        effective_generation_policy: dict[str, Any] | None = None
+        saved_generation_defaults: dict[str, Any] | None = None
+        if cleared_gate == "before_generate_tasks":
+            if not orchestrator.supports_task_generation(task):
+                raise HTTPException(status_code=400, detail="Task pipeline does not include generate_tasks")
+            effective_generation_policy = orchestrator.resolve_task_generation_policy(
+                task,
+                request_overrides=(requested_generation_policy or None),
+            )
+            if requested_generation_policy:
+                orchestrator.set_pending_task_generation_override(
+                    task,
+                    effective_policy=effective_generation_policy,
+                )
+            else:
+                orchestrator.set_pending_task_generation_override(task, effective_policy=None)
+            if save_generation_defaults:
+                saved_generation_defaults = orchestrator.persist_task_generation_defaults(
+                    task,
+                    effective_policy=effective_generation_policy,
+                )
+
         if should_resume:
             checkpoint = task.metadata.get("execution_checkpoint")
             checkpoint_payload = dict(checkpoint) if isinstance(checkpoint, dict) else {}
@@ -2116,15 +2170,27 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.pending_gate = None
         task.updated_at = acted_at
         container.tasks.upsert(task)
-        bus.emit(channel="tasks", event_type="task.gate_approved", entity_id=task.id, payload={"gate": cleared_gate})
+        bus.emit(
+            channel="tasks",
+            event_type="task.gate_approved",
+            entity_id=task.id,
+            payload={"gate": cleared_gate, "effective_generation_policy": effective_generation_policy},
+        )
         if should_resume:
-            bus.emit(channel="tasks", event_type="task.resume_requested", entity_id=task.id, payload={"gate": cleared_gate})
+            bus.emit(
+                channel="tasks",
+                event_type="task.resume_requested",
+                entity_id=task.id,
+                payload={"gate": cleared_gate, "effective_generation_policy": effective_generation_policy},
+            )
             orchestrator.ensure_worker()
         return {
             "task": _task_payload(task, container, orchestrator),
             "cleared_gate": cleared_gate,
             "message": _gate_approved_message(cleared_gate, will_resume=should_resume),
             "approved_at": acted_at,
+            "effective_generation_policy": effective_generation_policy,
+            "saved_generation_defaults": saved_generation_defaults,
         }
 
     @router.post("/tasks/{task_id}/dependencies")
@@ -2474,6 +2540,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
+        if not orchestrator.supports_task_generation(task):
+            raise HTTPException(status_code=400, detail="Task pipeline does not include generate_tasks")
         source = body.source
         if source is None:
             # Backward compatibility: previous API accepted only optional plan_override.
@@ -2498,7 +2566,18 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             raise HTTPException(status_code=400, detail=str(exc))
 
         try:
-            created_ids = orchestrator.generate_tasks_from_plan(task_id, plan_text, infer_deps=body.infer_deps)
+            policy_overrides = _generation_policy_overrides(
+                body.policy.model_dump(exclude_none=True) if body.policy is not None else None
+            )
+            if "infer_deps" in body.model_fields_set and "infer_deps" not in policy_overrides:
+                policy_overrides["infer_deps"] = bool(body.infer_deps)
+            created_ids, effective_policy = orchestrator.generate_tasks_from_plan(
+                task_id,
+                plan_text,
+                infer_deps=(bool(body.infer_deps) if "infer_deps" in body.model_fields_set else None),
+                generation_policy_overrides=(policy_overrides or None),
+                save_as_default=bool(body.save_as_default),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
@@ -2515,4 +2594,5 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             "children": children,
             "source": source,
             "source_revision_id": resolved_revision_id,
+            "effective_policy": effective_policy,
         }
