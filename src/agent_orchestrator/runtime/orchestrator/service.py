@@ -34,6 +34,7 @@ from ..events.bus import EventBus
 from ..storage.container import Container
 from ...worker import WorkerCancelledError
 from .dependency_manager import DependencyManager
+from .integration_health import IntegrationHealthChecker
 from .reconciler import OrchestratorReconciler
 from .live_worker_adapter import _VERIFY_STEPS
 from .plan_manager import PlanManager
@@ -151,6 +152,7 @@ class OrchestratorService:
         self._worktree_manager = WorktreeManager(self)
         self._task_executor = TaskExecutor(self)
         self._reconciler = OrchestratorReconciler(self)
+        self._integration_health = IntegrationHealthChecker(self)
         self._load_runtime_state()
 
     def _load_runtime_state(self) -> None:
@@ -185,6 +187,7 @@ class OrchestratorService:
         self._last_reconcile_repairs = self._coerce_nonnegative_int(
             state.get("last_reconcile_repairs"), 0, maximum=1_000_000
         )
+        self._integration_health.load_state(state)
 
     def _persist_runtime_state(self, *, force: bool = False) -> None:
         """Persist scheduler/reconciler heartbeat state to dedicated SQLite table."""
@@ -199,6 +202,7 @@ class OrchestratorService:
             "dispatch_blocked_reason": self._dispatch_blocked_reason,
             "last_reconcile_at": self._last_reconcile_at,
             "last_reconcile_repairs": int(self._last_reconcile_repairs),
+            "integration_health": self._integration_health.persist_state(),
         }
         self.container.db.save_orchestrator_state(state_payload)
         self._last_state_persist_monotonic = now_mono
@@ -821,6 +825,7 @@ class OrchestratorService:
             "dispatch_blocked_reason": dispatch_reason,
             "last_reconcile_at": self._last_reconcile_at,
             "reconcile_repairs": int(self._last_reconcile_repairs),
+            "integration_health": self._integration_health.get_state(),
         }
 
     def control(self, action: str) -> dict[str, Any]:
@@ -1060,6 +1065,17 @@ class OrchestratorService:
             if self._manual_run_active > 0:
                 self._dispatch_blocked_reason = "manual_run"
                 return False
+            if self._integration_health.is_degraded() and orchestrator_cfg.get(
+                "integration_health", {}
+            ).get("blocking"):
+                # Allow the auto-generated fix task to be dispatched; block
+                # everything else to prevent cascading failures on a broken
+                # run branch.
+                fix_id = self._integration_health._fix_task_id
+                fix_task = self.container.tasks.get(fix_id) if fix_id else None
+                if not fix_task or fix_task.status != "queued":
+                    self._dispatch_blocked_reason = "integration_degraded"
+                    return False
 
             self._apply_gate_wait_policies(orchestrator_cfg)
             self._maybe_analyze_dependencies()

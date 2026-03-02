@@ -845,6 +845,18 @@ class TaskExecutor:
                     if not task.metadata.get("merge_conflict"):
                         worktree_dir = None
 
+                        # Post-merge integration health check
+                        health_result = svc._integration_health.run_check(
+                            trigger_task_id=task.id,
+                        )
+                        if health_result and not health_result.passed:
+                            task.metadata["integration_health_degraded"] = True
+                            task.metadata["integration_health_check"] = {
+                                "passed": False,
+                                "exit_code": health_result.exit_code,
+                                "ts": now_iso(),
+                            }
+
                 if task.metadata.get("merge_conflict"):
                     task.status = "blocked"
                     task.error = "Merge conflict could not be resolved automatically"

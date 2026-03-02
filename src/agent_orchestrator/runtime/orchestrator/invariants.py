@@ -213,6 +213,24 @@ def apply_runtime_invariants(
             }
         )
 
+    # If integration health is degraded and the fix task reached a terminal
+    # state, clear the degraded flag so dispatch can resume.  Treating
+    # *cancelled* the same as *done* prevents a deadlock when blocking is
+    # enabled and the user cancels the auto-generated fix task.
+    health = service._integration_health
+    if health.is_degraded():
+        fix_id = health._fix_task_id
+        if fix_id:
+            fix_task = container.tasks.get(fix_id)
+            if fix_task and fix_task.status in ("done", "cancelled"):
+                health.clear_degraded()
+                repairs.append({
+                    "entity": "integration_health",
+                    "task_id": fix_id,
+                    "code": "integration_health_cleared",
+                    "message": f"Fix task {fix_task.status}; integration health restored to healthy.",
+                })
+
     return {
         "source": source,
         "checked_tasks": len(tasks),

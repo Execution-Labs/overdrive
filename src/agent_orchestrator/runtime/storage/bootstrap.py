@@ -442,6 +442,13 @@ def ensure_state_root(project_dir: Path) -> Path:
             "lease_ttl_seconds": 120,
             "tick_stale_seconds": 15,
             "tick_failure_threshold": 5,
+            "integration_health": {
+                "mode": "always",
+                "periodic_interval": 5,
+                "timeout_seconds": 300,
+                "blocking": False,
+                "auto_fix_task": True,
+            },
         },
     )
     config.setdefault(

@@ -248,6 +248,7 @@ class WorktreeManager:
                 capture_output=True,
                 text=True,
             )
+            svc._integration_health.record_merge()
 
     def approve_and_merge(self, task: Any) -> dict[str, Any]:
         """Merge a preserved task branch after manual review approval.
@@ -308,6 +309,7 @@ class WorktreeManager:
             capture_output=True,
             text=True,
         )
+        svc._integration_health.record_merge()
         self._clear_preserved_context_metadata(task)
         task.metadata.pop("merge_conflict", None)
         svc.container.tasks.upsert(task)
