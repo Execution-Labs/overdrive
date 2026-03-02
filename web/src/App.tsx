@@ -7110,6 +7110,9 @@ export default function App() {
                       {(selectedTaskView.pipeline_template || []).map((step) => (
                         <option key={step} value={step}>{humanizeLabel(step)}</option>
                       ))}
+                      {selectedTaskView.current_step && !(selectedTaskView.pipeline_template || []).includes(selectedTaskView.current_step) && (
+                        <option value={selectedTaskView.current_step}>{humanizeLabel(selectedTaskView.current_step)}</option>
+                      )}
                     </select>
                     <button
                       className="button button-primary"
