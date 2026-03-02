@@ -84,8 +84,13 @@ def test_load_state_handles_empty(tmp_path: Path) -> None:
 
 def test_should_run_mode_off(tmp_path: Path) -> None:
     svc = _make_service(tmp_path)
+    cfg = svc.container.config.load()
+    orch = dict(cfg.get("orchestrator") or {})
+    orch["integration_health"] = {"mode": "off"}
+    cfg["orchestrator"] = orch
+    svc.container.config.save(cfg)
+
     health = svc._integration_health
-    # Default config has mode=off
     assert health.should_run() is False
 
 
