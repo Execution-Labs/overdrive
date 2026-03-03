@@ -323,59 +323,103 @@ class WorktreeManager:
         """
         svc = self._service
         saved_worktree_dir = task.metadata.get("worktree_dir")
+        previous_error = ""
         try:
-            result = subprocess.run(
-                ["git", "diff", "--name-only", "--diff-filter=U"],
-                cwd=svc.container.project_dir,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            conflicted_files = [f for f in result.stdout.strip().split("\n") if f]
-            if not conflicted_files:
-                return False
+            cfg = svc.container.config.load()
+            orch_cfg = dict(cfg.get("orchestrator") or {})
+            max_attempts = int(orch_cfg.get("max_merge_conflict_attempts", 3) or 3)
+            max_attempts = max(1, max_attempts)
 
-            conflict_contents: dict[str, str] = {}
-            for fpath in conflicted_files:
-                full = svc.container.project_dir / fpath
-                if full.exists():
-                    conflict_contents[fpath] = full.read_text(errors="replace")
-
-            other_tasks_info: list[str] = []
-            other_objectives: list[str] = []
-            peers = [other for other in svc.container.tasks.list() if other.id != task.id and other.status == "done"]
-            if not peers:
-                peers = [other for other in svc.container.tasks.list() if other.id != task.id]
-            for other in peers:
-                other_tasks_info.append(f"- {other.title}: {other.description}")
-                other_objectives.append(self.format_task_objective_summary(other))
-
+            other_tasks_info, other_objectives = self._gather_peer_context(task)
             task.metadata.pop("worktree_dir", None)
-            task.metadata["merge_conflict_files"] = conflict_contents
-            task.metadata["merge_other_tasks"] = other_tasks_info
-            task.metadata["merge_current_objective"] = self.format_task_objective_summary(task)
-            task.metadata["merge_other_objectives"] = other_objectives
-            svc.container.tasks.upsert(task)
 
-            step_result = svc.worker_adapter.run_step(task=task, step="resolve_merge", attempt=1)
-            if step_result.status != "ok":
-                return False
+            for attempt in range(1, max_attempts + 1):
+                conflicted_files = self._list_unmerged_files(svc.container.project_dir)
+                if not conflicted_files:
+                    return False
 
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=svc.container.project_dir,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            subprocess.run(
-                ["git", "commit", "--no-edit"],
-                cwd=svc.container.project_dir,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            return True
+                conflict_contents: dict[str, str] = {}
+                for fpath in conflicted_files:
+                    full = svc.container.project_dir / fpath
+                    if full.exists():
+                        conflict_contents[fpath] = full.read_text(errors="replace")
+
+                task.metadata["merge_conflict_files"] = conflict_contents
+                task.metadata["merge_other_tasks"] = other_tasks_info
+                task.metadata["merge_current_objective"] = self.format_task_objective_summary(task)
+                task.metadata["merge_other_objectives"] = other_objectives
+                task.metadata["merge_conflict_attempt"] = attempt
+                task.metadata["merge_conflict_max_attempts"] = max_attempts
+                if attempt > 1 and previous_error:
+                    task.metadata["merge_conflict_previous_error"] = previous_error
+                else:
+                    task.metadata.pop("merge_conflict_previous_error", None)
+                svc.container.tasks.upsert(task)
+
+                step_result = None
+                try:
+                    step_result = svc.worker_adapter.run_step(task=task, step="resolve_merge", attempt=attempt)
+                except Exception as exc:
+                    previous_error = f"Merge resolution worker raised exception: {exc}"
+                    logger.exception(
+                        "Resolve-merge worker crashed for task %s on attempt %s/%s (branch %s)",
+                        task.id,
+                        attempt,
+                        max_attempts,
+                        branch,
+                    )
+
+                if step_result is not None and step_result.status == "ok":
+                    subprocess.run(
+                        ["git", "add", "-A"],
+                        cwd=svc.container.project_dir,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    unresolved_files = self._list_unmerged_files(svc.container.project_dir)
+                    if unresolved_files:
+                        marker_files = self._check_remaining_conflicts(svc.container.project_dir, unresolved_files)
+                        if marker_files:
+                            previous_error = (
+                                "Worker reported success but unresolved merge entries remain in "
+                                f"{', '.join(unresolved_files)}; conflict markers still present in "
+                                f"{', '.join(marker_files)}."
+                            )
+                        else:
+                            previous_error = (
+                                "Worker reported success but unresolved merge entries remain in "
+                                f"{', '.join(unresolved_files)}."
+                            )
+                        if attempt < max_attempts:
+                            self._reset_conflicted_files(svc.container.project_dir, unresolved_files)
+                        continue
+                    marker_files = self._check_remaining_conflicts(svc.container.project_dir, conflicted_files)
+                    if marker_files:
+                        previous_error = (
+                            "Worker reported success but conflict markers are still present in "
+                            f"{', '.join(marker_files)}."
+                        )
+                        if attempt < max_attempts:
+                            self._reset_conflicted_files(svc.container.project_dir, conflicted_files)
+                        continue
+                    subprocess.run(
+                        ["git", "commit", "--no-edit"],
+                        cwd=svc.container.project_dir,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    return True
+                else:
+                    summary = str((step_result.summary if step_result is not None else "") or "").strip()
+                    previous_error = summary or "Merge resolution worker returned non-ok status."
+
+                if attempt < max_attempts:
+                    retry_files = self._list_unmerged_files(svc.container.project_dir)
+                    if retry_files:
+                        self._reset_conflicted_files(svc.container.project_dir, retry_files)
+            return False
         except Exception:
             logger.exception("Failed to resolve merge conflict for task %s", task.id)
             return False
@@ -384,8 +428,70 @@ class WorktreeManager:
             task.metadata.pop("merge_other_tasks", None)
             task.metadata.pop("merge_current_objective", None)
             task.metadata.pop("merge_other_objectives", None)
+            task.metadata.pop("merge_conflict_attempt", None)
+            task.metadata.pop("merge_conflict_max_attempts", None)
+            task.metadata.pop("merge_conflict_previous_error", None)
             if saved_worktree_dir:
                 task.metadata["worktree_dir"] = saved_worktree_dir
+
+    def _gather_peer_context(self, task: Any) -> tuple[list[str], list[str]]:
+        """Build cross-task context to guide worker conflict resolution."""
+        svc = self._service
+        other_tasks_info: list[str] = []
+        other_objectives: list[str] = []
+        peers = [other for other in svc.container.tasks.list() if other.id != task.id and other.status == "done"]
+        if not peers:
+            peers = [other for other in svc.container.tasks.list() if other.id != task.id]
+        for other in peers:
+            other_tasks_info.append(f"- {other.title}: {other.description}")
+            other_objectives.append(self.format_task_objective_summary(other))
+        return other_tasks_info, other_objectives
+
+    @staticmethod
+    def _list_unmerged_files(project_dir: Path) -> list[str]:
+        """Return current unresolved merge paths from git index state."""
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=U"],
+            cwd=project_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return [f for f in result.stdout.strip().split("\n") if f]
+
+    @staticmethod
+    def _check_remaining_conflicts(project_dir: Path, files: list[str]) -> list[str]:
+        """Return files that still contain git conflict marker lines."""
+        remaining: list[str] = []
+        for fpath in files:
+            full = project_dir / fpath
+            if not full.exists():
+                continue
+            for line in full.read_text(errors="replace").splitlines():
+                if (
+                    line.startswith("<<<<<<< ")
+                    or line == "======="
+                    or line.startswith(">>>>>>> ")
+                    or line.startswith("||||||| ")
+                ):
+                    remaining.append(fpath)
+                    break
+        return remaining
+
+    @staticmethod
+    def _reset_conflicted_files(project_dir: Path, files: list[str]) -> None:
+        """Best-effort reset to three-way conflict state between retries."""
+        for fpath in files:
+            try:
+                subprocess.run(
+                    ["git", "checkout", "--merge", "--", fpath],
+                    cwd=project_dir,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except Exception:
+                logger.warning("Failed to reset conflicted file before retry: %s", fpath, exc_info=True)
 
     def cleanup_orphaned_worktrees(self) -> None:
         """Remove leftover task worktrees and delete unneeded task branches."""

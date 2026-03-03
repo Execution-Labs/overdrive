@@ -475,6 +475,134 @@ def test_merge_conflict_fallback_on_worker_failure(tmp_path: Path) -> None:
     assert len(ok_tasks) == 1
     assert ok_tasks[0].status == "done"
 
+    for t in tasks:
+        assert t is not None
+        assert "merge_conflict_attempt" not in t.metadata
+        assert "merge_conflict_max_attempts" not in t.metadata
+        assert "merge_conflict_previous_error" not in t.metadata
+
+
+def test_merge_conflict_retries_then_succeeds(tmp_path: Path) -> None:
+    """resolve_merge retries on worker error and succeeds on a later attempt."""
+    write_barrier = threading.Barrier(2, timeout=5)
+    resolve_attempts: list[int] = []
+    resolve_meta: list[dict[str, object]] = []
+
+    class RetryResolveAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / "shared.txt").write_text(f"content by {task.title}\n")
+                write_barrier.wait()
+            if step == "resolve_merge":
+                resolve_attempts.append(attempt)
+                resolve_meta.append(
+                    {
+                        "attempt": task.metadata.get("merge_conflict_attempt"),
+                        "max_attempts": task.metadata.get("merge_conflict_max_attempts"),
+                        "previous_error": task.metadata.get("merge_conflict_previous_error"),
+                    }
+                )
+                if attempt == 1:
+                    return StepResult(status="error", summary="first attempt failed")
+                conflict_files = task.metadata.get("merge_conflict_files", {})
+                for fpath in conflict_files:
+                    (tmp_path / fpath).write_text("resolved on retry\n")
+                return StepResult(status="ok")
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=RetryResolveAdapter(), concurrency=2)
+    t1 = Task(title="Alpha", task_type="feature", status="queued", hitl_mode="autopilot")
+    t2 = Task(title="Beta", task_type="feature", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(t1)
+    container.tasks.upsert(t2)
+
+    assert service.tick_once() is True
+    assert service.tick_once() is True
+    _wait_futures(service, timeout=15)
+
+    assert resolve_attempts == [1, 2]
+    assert resolve_meta[0]["attempt"] == 1
+    assert resolve_meta[0]["max_attempts"] == 3
+    assert not resolve_meta[0]["previous_error"]
+    assert resolve_meta[1]["attempt"] == 2
+    assert "first attempt failed" in str(resolve_meta[1]["previous_error"] or "")
+    assert (tmp_path / "shared.txt").read_text().strip() == "resolved on retry"
+
+    for tid in [t1.id, t2.id]:
+        task = container.tasks.get(tid)
+        assert task is not None
+        assert task.status == "done"
+        assert "merge_conflict_attempt" not in task.metadata
+        assert "merge_conflict_max_attempts" not in task.metadata
+        assert "merge_conflict_previous_error" not in task.metadata
+
+
+def test_merge_conflict_worker_ok_but_unmerged_retries(tmp_path: Path) -> None:
+    """A false-positive worker success should retry until unmerged index entries are gone."""
+    resolve_attempts: list[int] = []
+    resolve_previous_errors: list[str] = []
+
+    class FalsePositiveResolveAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            if step == "resolve_merge":
+                resolve_attempts.append(attempt)
+                resolve_previous_errors.append(str(task.metadata.get("merge_conflict_previous_error") or ""))
+                if attempt == 1:
+                    # Claim success but leave unresolved merge entries untouched.
+                    return StepResult(status="ok")
+                (tmp_path / "shared.txt").write_text("resolved after index check\n")
+                return StepResult(status="ok")
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=FalsePositiveResolveAdapter(), concurrency=1)
+    task = Task(title="Resolve once then retry", task_type="feature", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+    branch = f"task-{task.id}"
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    (tmp_path / "shared.txt").write_text("base\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "add shared"], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    subprocess.run(["git", "checkout", "-b", branch], cwd=tmp_path, check=True, capture_output=True, text=True)
+    (tmp_path / "shared.txt").write_text("branch\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "branch change"], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    subprocess.run(["git", "checkout", base_branch], cwd=tmp_path, check=True, capture_output=True, text=True)
+    (tmp_path / "shared.txt").write_text("main\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "main change"], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    merge_attempt = subprocess.run(
+        ["git", "merge", branch, "--ff", "--no-edit"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert merge_attempt.returncode != 0
+
+    resolved = service._worktree_manager.resolve_merge_conflict(task, branch)
+    assert resolved is True
+
+    assert resolve_attempts == [1, 2]
+    assert resolve_previous_errors[0] == ""
+    assert "conflict markers are still present" in resolve_previous_errors[1]
+    assert (tmp_path / "shared.txt").read_text().strip() == "resolved after index check"
+
+
+def test_reset_conflicted_files_is_best_effort(tmp_path: Path) -> None:
+    """Reset helper should not raise when checkout --merge fails per file."""
+    _git_init(tmp_path)
+    WorktreeManager._reset_conflicted_files(tmp_path, ["missing-file.txt"])
+
 
 # ---------------------------------------------------------------------------
 # 6. Worktree is cleaned up on failure
@@ -830,6 +958,9 @@ def test_resolve_merge_worker_exception_handled(tmp_path: Path) -> None:
         assert "merge_other_tasks" not in t.metadata
         assert "merge_current_objective" not in t.metadata
         assert "merge_other_objectives" not in t.metadata
+        assert "merge_conflict_attempt" not in t.metadata
+        assert "merge_conflict_max_attempts" not in t.metadata
+        assert "merge_conflict_previous_error" not in t.metadata
 
     # The git repo should not be in a dirty merge state
     status = subprocess.run(

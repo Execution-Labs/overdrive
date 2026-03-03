@@ -433,6 +433,7 @@ def ensure_state_root(project_dir: Path) -> Path:
             "concurrency": 2,
             "max_review_attempts": 10,
             "max_verify_fix_attempts": 3,
+            "max_merge_conflict_attempts": 3,
             "gate_reminder_minutes": 30,
             "gate_stale_minutes": 0,
             "gate_max_wait_minutes": 0,

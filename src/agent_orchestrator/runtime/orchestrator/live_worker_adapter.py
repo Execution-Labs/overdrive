@@ -946,6 +946,22 @@ def build_step_prompt(
                 if isinstance(info, str) and info.strip():
                     parts.append(info.strip())
 
+        merge_attempt = int(task.metadata.get("merge_conflict_attempt") or 0)
+        merge_max_attempts = int(task.metadata.get("merge_conflict_max_attempts") or 0)
+        previous_error = str(task.metadata.get("merge_conflict_previous_error") or "").strip()
+        if merge_attempt > 1:
+            parts.append("")
+            parts.append("## Retry context")
+            if merge_max_attempts > 0:
+                parts.append(f"Attempt: {merge_attempt} of {merge_max_attempts}")
+            else:
+                parts.append(f"Attempt: {merge_attempt}")
+            if previous_error:
+                parts.append(f"Previous attempt error: {previous_error}")
+            parts.append(
+                "Re-check all conflicted files carefully. Resolve every unmerged entry and remove all conflict markers."
+            )
+
         parts.append("")
         parts.append("Edit the conflicted files to resolve all conflicts. "
                       "Ensure BOTH this task's and the other task(s)' objectives are preserved.")

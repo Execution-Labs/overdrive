@@ -202,6 +202,7 @@ class OrchestratorSettingsRequest(BaseModel):
     concurrency: int = Field(2, ge=1, le=128)
     auto_deps: bool = True
     max_review_attempts: int = Field(10, ge=1, le=50)
+    max_merge_conflict_attempts: int = Field(3, ge=1, le=10)
     step_timeout_seconds: int = Field(600, ge=1, le=7200)
     gate_reminder_minutes: int = Field(30, ge=0, le=10080)
     gate_stale_minutes: int = Field(0, ge=0, le=10080)
@@ -960,6 +961,9 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
             "concurrency": _coerce_int(orchestrator.get("concurrency"), 2, minimum=1, maximum=128),
             "auto_deps": _coerce_bool(orchestrator.get("auto_deps"), True),
             "max_review_attempts": _coerce_int(orchestrator.get("max_review_attempts"), 10, minimum=1, maximum=50),
+            "max_merge_conflict_attempts": _coerce_int(
+                orchestrator.get("max_merge_conflict_attempts"), 3, minimum=1, maximum=10
+            ),
             "step_timeout_seconds": _coerce_int(
                 orchestrator.get("step_timeout_seconds"), 600, minimum=1, maximum=7200
             ),

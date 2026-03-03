@@ -815,6 +815,27 @@ def test_build_step_prompt_appends_step_injection() -> None:
     assert "Implement the task completely and safely" in prompt
 
 
+def test_build_step_prompt_merge_retry_context() -> None:
+    task = _make_task(
+        task_type="feature",
+        metadata={
+            "merge_conflict_files": {
+                "auth.py": "<<<<<<< HEAD\nold\n=======\nnew\n>>>>>>> task-xyz",
+            },
+            "merge_conflict_attempt": 2,
+            "merge_conflict_max_attempts": 3,
+            "merge_conflict_previous_error": "Worker reported success but unresolved merge entries remain.",
+        },
+    )
+    prompt = build_step_prompt(task=task, step="resolve_merge", attempt=2)
+
+    assert "## Retry context" in prompt
+    assert "Attempt: 2 of 3" in prompt
+    assert "Previous attempt error:" in prompt
+    assert "unresolved merge entries remain" in prompt
+    assert "remove all conflict markers" in prompt.lower()
+
+
 def test_implement_prompt_omits_review_history() -> None:
     task = _make_task(metadata={
         "review_history": [

@@ -298,24 +298,29 @@ def test_task_dependency_guard_blocks_ready_transition(tmp_path: Path) -> None:
         )
         assert dep_resp.status_code == 200
 
+        # Queueing with unresolved deps is allowed — the scheduler gates execution
         transition = client.post(
             f"/api/tasks/{blocked['id']}/transition",
             json={"status": "queued"},
         )
-        assert transition.status_code == 400
-        assert "Unresolved blocker" in transition.text
+        assert transition.status_code == 200
+        assert transition.json()["task"]["status"] == "queued"
+
+        # But manual run is still blocked while deps are unresolved
+        run_resp = client.post(f"/api/tasks/{blocked['id']}/run")
+        assert run_resp.status_code == 400
+        assert "unresolved blocker" in run_resp.text.lower()
 
         # Queue and run the blocker so it completes
         client.post(f"/api/tasks/{blocker['id']}/transition", json={"status": "queued"})
         done = client.post(f"/api/tasks/{blocker['id']}/run")
         assert done.status_code == 200
         assert done.json()["task"]["status"] == "done"
-        ok_transition = client.post(
-            f"/api/tasks/{blocked['id']}/transition",
-            json={"status": "queued"},
-        )
-        assert ok_transition.status_code == 200
-        assert ok_transition.json()["task"]["status"] == "queued"
+
+        # Now manual run succeeds
+        run_ok = client.post(f"/api/tasks/{blocked['id']}/run")
+        assert run_ok.status_code == 200
+        assert run_ok.json()["task"]["status"] == "done"
 
 
 def test_execution_leases_use_dedicated_sqlite_table(tmp_path: Path) -> None:
@@ -941,6 +946,7 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert baseline.json()["orchestrator"]["concurrency"] == 2
         assert baseline.json()["orchestrator"]["auto_deps"] is True
         assert baseline.json()["orchestrator"]["max_review_attempts"] == 10
+        assert baseline.json()["orchestrator"]["max_merge_conflict_attempts"] == 3
         assert baseline.json()["orchestrator"]["step_timeout_seconds"] == 600
         assert baseline.json()["orchestrator"]["gate_reminder_minutes"] == 30
         assert baseline.json()["orchestrator"]["gate_stale_minutes"] == 0
@@ -965,6 +971,7 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
                     "concurrency": 5,
                     "auto_deps": False,
                     "max_review_attempts": 4,
+                    "max_merge_conflict_attempts": 6,
                     "step_timeout_seconds": 900,
                     "gate_reminder_minutes": 15,
                     "gate_stale_minutes": 120,
@@ -1019,6 +1026,7 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert body["orchestrator"]["concurrency"] == 5
         assert body["orchestrator"]["auto_deps"] is False
         assert body["orchestrator"]["max_review_attempts"] == 4
+        assert body["orchestrator"]["max_merge_conflict_attempts"] == 6
         assert body["orchestrator"]["step_timeout_seconds"] == 900
         assert body["orchestrator"]["gate_reminder_minutes"] == 15
         assert body["orchestrator"]["gate_stale_minutes"] == 120
@@ -1067,6 +1075,7 @@ def test_settings_patch_preserves_unspecified_orchestrator_fields(tmp_path: Path
                     "concurrency": 3,
                     "auto_deps": True,
                     "max_review_attempts": 10,
+                    "max_merge_conflict_attempts": 7,
                     "step_timeout_seconds": 600,
                     "gate_reminder_minutes": 5,
                     "gate_stale_minutes": 7,
@@ -1084,10 +1093,33 @@ def test_settings_patch_preserves_unspecified_orchestrator_fields(tmp_path: Path
         assert partial.status_code == 200
         orch = partial.json()["orchestrator"]
         assert orch["concurrency"] == 4
+        assert orch["max_merge_conflict_attempts"] == 7
         assert orch["gate_reminder_minutes"] == 5
         assert orch["gate_stale_minutes"] == 7
         assert orch["gate_max_wait_minutes"] == 9
         assert orch["gate_timeout_action"] == "block"
+
+
+def test_settings_patch_rejects_invalid_merge_conflict_attempts(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        too_low = client.patch(
+            "/api/settings",
+            json={"orchestrator": {"max_merge_conflict_attempts": 0}},
+        )
+        assert too_low.status_code == 422
+
+        too_high = client.patch(
+            "/api/settings",
+            json={"orchestrator": {"max_merge_conflict_attempts": 11}},
+        )
+        assert too_high.status_code == 422
+
+        non_int = client.patch(
+            "/api/settings",
+            json={"orchestrator": {"max_merge_conflict_attempts": "abc"}},
+        )
+        assert non_int.status_code == 422
 
 
 def test_create_task_worker_model_round_trip(tmp_path: Path) -> None:

@@ -274,6 +274,7 @@ type SystemSettings = {
     concurrency: number
     auto_deps: boolean
     max_review_attempts: number
+    max_merge_conflict_attempts: number
     step_timeout_seconds: number
   }
   agent_routing: {
@@ -525,6 +526,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
     concurrency: 2,
     auto_deps: true,
     max_review_attempts: 10,
+    max_merge_conflict_attempts: 3,
     step_timeout_seconds: 600,
   },
   agent_routing: {
@@ -1101,6 +1103,7 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
 
   const maybeConcurrency = Number(orchestrator.concurrency)
   const maybeMaxReviewAttempts = Number(orchestrator.max_review_attempts)
+  const maybeMaxMergeConflictAttempts = Number(orchestrator.max_merge_conflict_attempts)
   const maybeStepTimeoutSeconds = Number(orchestrator.step_timeout_seconds)
   const maybeCritical = Number(qualityGate.critical)
   const maybeHigh = Number(qualityGate.high)
@@ -1112,6 +1115,9 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
       concurrency: Number.isFinite(maybeConcurrency) ? Math.max(1, Math.floor(maybeConcurrency)) : DEFAULT_SETTINGS.orchestrator.concurrency,
       auto_deps: typeof orchestrator.auto_deps === 'boolean' ? orchestrator.auto_deps : DEFAULT_SETTINGS.orchestrator.auto_deps,
       max_review_attempts: Number.isFinite(maybeMaxReviewAttempts) ? Math.max(1, Math.floor(maybeMaxReviewAttempts)) : DEFAULT_SETTINGS.orchestrator.max_review_attempts,
+      max_merge_conflict_attempts: Number.isFinite(maybeMaxMergeConflictAttempts)
+        ? Math.min(10, Math.max(1, Math.floor(maybeMaxMergeConflictAttempts)))
+        : DEFAULT_SETTINGS.orchestrator.max_merge_conflict_attempts,
       step_timeout_seconds: Number.isFinite(maybeStepTimeoutSeconds)
         ? Math.min(7200, Math.max(1, Math.floor(maybeStepTimeoutSeconds)))
         : DEFAULT_SETTINGS.orchestrator.step_timeout_seconds,
@@ -1962,6 +1968,9 @@ export default function App() {
   const [settingsConcurrency, setSettingsConcurrency] = useState(String(DEFAULT_SETTINGS.orchestrator.concurrency))
   const [settingsAutoDeps, setSettingsAutoDeps] = useState(DEFAULT_SETTINGS.orchestrator.auto_deps)
   const [settingsMaxReviewAttempts, setSettingsMaxReviewAttempts] = useState(String(DEFAULT_SETTINGS.orchestrator.max_review_attempts))
+  const [settingsMaxMergeConflictAttempts, setSettingsMaxMergeConflictAttempts] = useState(
+    String(DEFAULT_SETTINGS.orchestrator.max_merge_conflict_attempts)
+  )
   const [settingsStepTimeoutSeconds, setSettingsStepTimeoutSeconds] = useState(String(DEFAULT_SETTINGS.orchestrator.step_timeout_seconds))
   const [settingsDefaultRole, setSettingsDefaultRole] = useState(DEFAULT_SETTINGS.agent_routing.default_role)
   const [settingsTaskTypeRoles, setSettingsTaskTypeRoles] = useState('')
@@ -2189,6 +2198,7 @@ export default function App() {
     setSettingsConcurrency(String(payload.orchestrator.concurrency))
     setSettingsAutoDeps(payload.orchestrator.auto_deps)
     setSettingsMaxReviewAttempts(String(payload.orchestrator.max_review_attempts))
+    setSettingsMaxMergeConflictAttempts(String(payload.orchestrator.max_merge_conflict_attempts))
     setSettingsStepTimeoutSeconds(String(payload.orchestrator.step_timeout_seconds))
     setSettingsDefaultRole(payload.agent_routing.default_role || 'general')
     const taskTypeRoles = payload.agent_routing.task_type_roles || {}
@@ -4319,6 +4329,16 @@ export default function App() {
           concurrency: Math.max(1, parseNonNegativeInt(settingsConcurrency, DEFAULT_SETTINGS.orchestrator.concurrency)),
           auto_deps: settingsAutoDeps,
           max_review_attempts: Math.max(1, parseNonNegativeInt(settingsMaxReviewAttempts, DEFAULT_SETTINGS.orchestrator.max_review_attempts)),
+          max_merge_conflict_attempts: Math.min(
+            10,
+            Math.max(
+              1,
+              parseNonNegativeInt(
+                settingsMaxMergeConflictAttempts,
+                DEFAULT_SETTINGS.orchestrator.max_merge_conflict_attempts,
+              ),
+            ),
+          ),
           step_timeout_seconds: Math.min(
             7200,
             Math.max(1, parseNonNegativeInt(settingsStepTimeoutSeconds, DEFAULT_SETTINGS.orchestrator.step_timeout_seconds)),
@@ -6355,6 +6375,13 @@ export default function App() {
                 id="settings-review-attempts"
                 value={settingsMaxReviewAttempts}
                 onChange={(event) => setSettingsMaxReviewAttempts(event.target.value)}
+                inputMode="numeric"
+              />
+              <label className="field-label" htmlFor="settings-merge-conflict-attempts">Max merge conflict attempts</label>
+              <input
+                id="settings-merge-conflict-attempts"
+                value={settingsMaxMergeConflictAttempts}
+                onChange={(event) => setSettingsMaxMergeConflictAttempts(event.target.value)}
                 inputMode="numeric"
               />
               <label className="field-label" htmlFor="settings-concurrency">Orchestrator concurrency</label>
