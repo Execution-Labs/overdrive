@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 from unittest.mock import patch
 
-from agent_orchestrator.runtime.domain.models import Task
+from agent_orchestrator.runtime.domain.models import RunRecord, Task, now_iso
 from agent_orchestrator.runtime.events import EventBus
 from agent_orchestrator.runtime.orchestrator import OrchestratorService
 from agent_orchestrator.runtime.orchestrator.live_worker_adapter import build_step_prompt
@@ -596,6 +596,68 @@ def test_merge_conflict_worker_ok_but_unmerged_retries(tmp_path: Path) -> None:
     assert resolve_previous_errors[0] == ""
     assert "conflict markers are still present" in resolve_previous_errors[1]
     assert (tmp_path / "shared.txt").read_text().strip() == "resolved after index check"
+
+
+def test_merge_dirty_overlapping_blocks_without_resolve_worker(tmp_path: Path) -> None:
+    """A dirty overlapping integration worktree should block with reason code, not merge_conflict."""
+    resolve_calls = 0
+    _git_init(tmp_path)
+    (tmp_path / "shared.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "add shared"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    # Local dirty change on integration branch that overlaps task merge.
+    (tmp_path / "shared.txt").write_text("local dirty edit\n", encoding="utf-8")
+
+    class DirtyOverlapAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            nonlocal resolve_calls
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / "shared.txt").write_text("task branch edit\n", encoding="utf-8")
+            if step == "resolve_merge":
+                resolve_calls += 1
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=DirtyOverlapAdapter(), concurrency=1, git=False)
+    task = Task(title="Dirty overlap", task_type="feature", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert resolve_calls == 0
+    assert result.metadata.get("merge_conflict") is None
+    assert result.metadata.get("merge_failure_reason_code") == "dirty_overlapping"
+    details = result.metadata.get("merge_failure_details")
+    assert isinstance(details, dict)
+    assert "shared.txt" in list(details.get("blocking_paths") or [])
+    assert "local changes" in str(result.error or "").lower()
+
+
+def test_merge_dirty_non_overlapping_succeeds(tmp_path: Path) -> None:
+    """Dirty local changes on unrelated paths should not block task merge."""
+    _git_init(tmp_path)
+    (tmp_path / "task.txt").write_text("base task\n", encoding="utf-8")
+    (tmp_path / "local.txt").write_text("base local\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "add baseline files"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    # Dirty edit on unrelated file.
+    (tmp_path / "local.txt").write_text("dirty local edit\n", encoding="utf-8")
+
+    class NonOverlapAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / "task.txt").write_text("task branch edit\n", encoding="utf-8")
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=NonOverlapAdapter(), concurrency=1, git=False)
+    task = Task(title="Dirty non-overlap", task_type="feature", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "done"
+    assert (tmp_path / "task.txt").read_text(encoding="utf-8").strip() == "task branch edit"
+    assert (tmp_path / "local.txt").read_text(encoding="utf-8").strip() == "dirty local edit"
 
 
 def test_reset_conflicted_files_is_best_effort(tmp_path: Path) -> None:
@@ -1981,6 +2043,150 @@ def test_can_skip_to_precommit_does_not_depend_on_error_phrase(tmp_path: Path) -
     allowed, reason = service.can_skip_to_precommit(stored)
     assert allowed is True
     assert reason is None
+
+
+def test_can_finalize_merge_conflict_eligibility_and_reasons(tmp_path: Path) -> None:
+    container, service, _ = _service(tmp_path, git=True)
+    service._ensure_branch()
+    run_branch = service._run_branch or subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    task = Task(
+        title="Manual merge finalize eligibility",
+        task_type="feature",
+        status="blocked",
+        hitl_mode="autopilot",
+    )
+    task.current_step = "commit"
+    task.metadata["merge_conflict"] = True
+    container.tasks.upsert(task)
+
+    task_branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "checkout", "-b", task_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (tmp_path / "manual_merge.txt").write_text("integrated content\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "task work"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "checkout", run_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "merge", "--ff", task_branch], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    stored = container.tasks.get(task.id)
+    assert stored is not None
+    stored.metadata["preserved_branch"] = task_branch
+    container.tasks.upsert(stored)
+
+    allowed, reason = service.can_finalize_merge_conflict(stored)
+    assert allowed is True
+    assert reason is None
+
+    stored.current_step = "verify"
+    container.tasks.upsert(stored)
+    allowed, reason = service.can_finalize_merge_conflict(stored)
+    assert allowed is False
+    assert reason == "blocked_step_not_commit"
+
+    stored.current_step = "commit"
+    stored.metadata.pop("merge_conflict", None)
+    container.tasks.upsert(stored)
+    allowed, reason = service.can_finalize_merge_conflict(stored)
+    assert allowed is False
+    assert reason == "not_merge_conflict_block"
+
+
+def test_finalize_merge_conflict_marks_done_and_cleans_metadata(tmp_path: Path) -> None:
+    container, service, _ = _service(tmp_path, git=True)
+    service._ensure_branch()
+    run_branch = service._run_branch or subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    task = Task(
+        title="Finalize merge conflict",
+        task_type="feature",
+        status="blocked",
+        hitl_mode="autopilot",
+    )
+    task.current_step = "commit"
+    task.error = "Merge conflict could not be resolved automatically"
+    task.metadata["merge_conflict"] = True
+    container.tasks.upsert(task)
+
+    task_branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "checkout", "-b", task_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (tmp_path / "finalize_merge.txt").write_text("merge finalized\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "task branch commit"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "checkout", run_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "merge", "--ff", task_branch], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    stored = container.tasks.get(task.id)
+    assert stored is not None
+    run = RunRecord(task_id=stored.id, status="blocked", started_at=now_iso())
+    container.runs.upsert(run)
+    stored.run_ids.append(run.id)
+    stored.metadata["preserved_branch"] = task_branch
+    stored.metadata["merge_conflict_files"] = {"finalize_merge.txt": "<<<<<<< ours"}
+    stored.metadata["merge_conflict_attempt"] = 2
+    stored.metadata["merge_conflict_max_attempts"] = 3
+    stored.metadata["merge_conflict_previous_error"] = "worker failed"
+    container.tasks.upsert(stored)
+
+    updated = service.finalize_merge_conflict(task.id, guidance="Resolved manually and verified.")
+    assert updated.status == "done"
+    assert updated.current_step is None
+    assert updated.error is None
+    for key in (
+        "merge_conflict",
+        "merge_conflict_files",
+        "merge_conflict_attempt",
+        "merge_conflict_max_attempts",
+        "merge_conflict_previous_error",
+        "pending_precommit_approval",
+        "review_stage",
+        "pipeline_phase",
+    ):
+        assert key not in updated.metadata
+    actions = updated.metadata.get("human_review_actions")
+    assert isinstance(actions, list) and actions
+    assert actions[-1].get("action") == "finalize_merge_conflict"
+    assert updated.metadata.get("last_manual_merge_finalize", {}).get("verified_ref") == task_branch
+
+    run_after = container.runs.get(run.id)
+    assert run_after is not None
+    assert run_after.status == "done"
+    assert run_after.finished_at is not None
 
 
 def test_cancel_cleanup_defers_while_execution_lease_active_then_reconciles(tmp_path: Path) -> None:

@@ -27,6 +27,18 @@ class PreserveOutcome(TypedDict):
     head_sha: str | None
 
 
+class MergeOutcome(TypedDict, total=False):
+    """Structured merge result for commit/approval flows."""
+
+    status: str
+    reason_code: str
+    error: str
+    commit_sha: str
+    blocking_paths: list[str]
+    unmerged_paths: list[str]
+    stderr_excerpt: str
+
+
 class WorktreeManager:
     """Coordinate task branch/worktree lifecycle and merge conflict handling."""
 
@@ -205,43 +217,25 @@ class WorktreeManager:
         )
         return worktree_dir
 
-    def merge_and_cleanup(self, task: Any, worktree_dir: Path) -> None:
+    def merge_and_cleanup(self, task: Any, worktree_dir: Path) -> MergeOutcome:
         """Merge task work into the base branch, then remove transient worktree.
 
-        On merge conflicts the method attempts automated resolution and marks
-        ``task.metadata["merge_conflict"]`` when conflict handling fails.
+        Merge failures are classified into explicit statuses:
+        ``merge_conflict`` (unmerged entries), ``dirty_overlapping`` (local
+        tracked/untracked overlap), and ``git_error`` (other git failures).
         """
         svc = self._service
         branch = f"task-{task.id}"
-        merge_failed = False
+        merge_outcome: MergeOutcome = {"status": "ok", "reason_code": "ok"}
         with svc._merge_lock:
-            try:
-                subprocess.run(
-                    ["git", "merge", branch, "--ff", "--no-edit"],
-                    cwd=svc.container.project_dir,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            except subprocess.CalledProcessError:
-                resolved = self.resolve_merge_conflict(task, branch)
-                if not resolved:
-                    subprocess.run(
-                        ["git", "merge", "--abort"],
-                        cwd=svc.container.project_dir,
-                        capture_output=True,
-                        text=True,
-                    )
-                    merge_failed = True
-                    task.metadata["merge_conflict"] = True
-        if not merge_failed:
+            merge_outcome = self._merge_branch_with_classification(task, branch)
+        if merge_outcome.get("status") == "ok":
             subprocess.run(
                 ["git", "worktree", "remove", str(worktree_dir), "--force"],
                 cwd=svc.container.project_dir,
                 capture_output=True,
                 text=True,
             )
-        if not merge_failed:
             subprocess.run(
                 ["git", "branch", "-D", branch],
                 cwd=svc.container.project_dir,
@@ -249,6 +243,7 @@ class WorktreeManager:
                 text=True,
             )
             svc._integration_health.record_merge()
+        return merge_outcome
 
     def approve_and_merge(self, task: Any) -> dict[str, Any]:
         """Merge a preserved task branch after manual review approval.
@@ -275,28 +270,11 @@ class WorktreeManager:
         self.ensure_branch()
 
         with svc._merge_lock:
-            try:
-                subprocess.run(
-                    ["git", "merge", branch, "--ff", "--no-edit"],
-                    cwd=svc.container.project_dir,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            except subprocess.CalledProcessError:
-                resolved = self.resolve_merge_conflict(task, branch)
-                if not resolved:
-                    subprocess.run(
-                        ["git", "merge", "--abort"],
-                        cwd=svc.container.project_dir,
-                        capture_output=True,
-                        text=True,
-                    )
-                    task.metadata["merge_conflict"] = True
-                    svc.container.tasks.upsert(task)
-                    return {"status": "merge_conflict"}
-
-            sha = subprocess.run(
+            merge_outcome = self._merge_branch_with_classification(task, branch)
+            if merge_outcome.get("status") != "ok":
+                svc.container.tasks.upsert(task)
+                return dict(merge_outcome)
+            sha = str(merge_outcome.get("commit_sha") or "").strip() or subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=svc.container.project_dir,
                 capture_output=True,
@@ -314,6 +292,214 @@ class WorktreeManager:
         task.metadata.pop("merge_conflict", None)
         svc.container.tasks.upsert(task)
         return {"status": "ok", "commit_sha": sha}
+
+    def _merge_branch_with_classification(self, task: Any, branch: str) -> MergeOutcome:
+        """Merge branch and classify failures into conflict/dirty/git-error buckets."""
+        svc = self._service
+        try:
+            subprocess.run(
+                ["git", "merge", branch, "--ff", "--no-edit"],
+                cwd=svc.container.project_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=svc.container.project_dir,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            self._clear_merge_failure_metadata(task)
+            return {"status": "ok", "reason_code": "ok", "commit_sha": sha}
+        except subprocess.CalledProcessError as exc:
+            stderr = str(exc.stderr or "").strip()
+            stdout = str(exc.stdout or "").strip()
+            unmerged = self._safe_list_unmerged_files(svc.container.project_dir)
+            if unmerged:
+                resolved = self.resolve_merge_conflict(task, branch)
+                if resolved:
+                    sha = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=svc.container.project_dir,
+                        capture_output=True,
+                        text=True,
+                    ).stdout.strip()
+                    self._clear_merge_failure_metadata(task)
+                    return {"status": "ok", "reason_code": "ok", "commit_sha": sha}
+                self._abort_merge_if_needed(svc.container.project_dir)
+                reason_code = "merge_conflict"
+                error = "Merge conflict could not be resolved automatically"
+                self._record_merge_failure(
+                    task,
+                    reason_code=reason_code,
+                    error=error,
+                    unmerged_paths=unmerged,
+                    stderr_excerpt=self._clip_merge_stderr(stderr, stdout),
+                    is_conflict=True,
+                )
+                return {
+                    "status": "merge_conflict",
+                    "reason_code": reason_code,
+                    "error": error,
+                    "unmerged_paths": unmerged,
+                    "stderr_excerpt": self._clip_merge_stderr(stderr, stdout),
+                }
+
+            self._abort_merge_if_needed(svc.container.project_dir)
+            reason_code, blocking_paths = self._classify_merge_failure(stderr, stdout)
+            if reason_code == "dirty_overlapping":
+                if blocking_paths:
+                    joined = ", ".join(blocking_paths)
+                    error = f"Integration branch has local changes that overlap this merge: {joined}"
+                else:
+                    error = "Integration branch has local changes that overlap this merge"
+            else:
+                reason_code = "git_error"
+                error = "Git merge failed before conflict resolution"
+            stderr_excerpt = self._clip_merge_stderr(stderr, stdout)
+            self._record_merge_failure(
+                task,
+                reason_code=reason_code,
+                error=error,
+                blocking_paths=blocking_paths,
+                stderr_excerpt=stderr_excerpt,
+                is_conflict=False,
+            )
+            return {
+                "status": reason_code,
+                "reason_code": reason_code,
+                "error": error,
+                "blocking_paths": blocking_paths,
+                "stderr_excerpt": stderr_excerpt,
+            }
+
+    @staticmethod
+    def _safe_list_unmerged_files(project_dir: Path) -> list[str]:
+        """Return unresolved paths, swallowing git failures during error handling."""
+        try:
+            return WorktreeManager._list_unmerged_files(project_dir)
+        except Exception:
+            return []
+
+    @staticmethod
+    def _clip_merge_stderr(stderr: str, stdout: str) -> str:
+        text = (stderr or "").strip() or (stdout or "").strip()
+        if len(text) > 1000:
+            return text[:1000].rstrip() + "..."
+        return text
+
+    @staticmethod
+    def _parse_overwritten_paths(stderr_text: str, header: str) -> list[str]:
+        """Extract path list from git overwrite errors."""
+        lines = stderr_text.splitlines()
+        start = -1
+        header_l = header.lower()
+        for idx, line in enumerate(lines):
+            if header_l in line.lower():
+                start = idx + 1
+                break
+        if start < 0:
+            return []
+        out: list[str] = []
+        for line in lines[start:]:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            low = stripped.lower()
+            if low.startswith("please ") or low.startswith("aborting") or low.startswith("merge "):
+                break
+            if line.startswith("\t") or line.startswith(" "):
+                out.append(stripped)
+                continue
+            # Stop when the listing block ends.
+            break
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for path in out:
+            if path in seen:
+                continue
+            seen.add(path)
+            deduped.append(path)
+        return deduped
+
+    @classmethod
+    def _classify_merge_failure(cls, stderr: str, stdout: str) -> tuple[str, list[str]]:
+        """Classify merge failure with best-effort extraction of blocking paths."""
+        text = f"{stderr}\n{stdout}".lower()
+        local_header = "your local changes to the following files would be overwritten by merge"
+        untracked_header = "the following untracked working tree files would be overwritten by merge"
+        if local_header in text:
+            return "dirty_overlapping", cls._parse_overwritten_paths(stderr or "", local_header)
+        if untracked_header in text:
+            return "dirty_overlapping", cls._parse_overwritten_paths(stderr or "", untracked_header)
+        if "would be overwritten by merge" in text:
+            return "dirty_overlapping", []
+        if "cannot merge" in text and "entry '" in text and "not uptodate" in text:
+            return "dirty_overlapping", []
+        return "git_error", []
+
+    @staticmethod
+    def _merge_in_progress(project_dir: Path) -> bool:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0
+
+    @classmethod
+    def _abort_merge_if_needed(cls, project_dir: Path) -> None:
+        if not cls._merge_in_progress(project_dir):
+            return
+        subprocess.run(
+            ["git", "merge", "--abort"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    @staticmethod
+    def _clear_merge_failure_metadata(task: Any) -> None:
+        if not isinstance(getattr(task, "metadata", None), dict):
+            return
+        for key in ("merge_failure_reason_code", "merge_failure_details", "merge_conflict"):
+            task.metadata.pop(key, None)
+
+    @staticmethod
+    def _record_merge_failure(
+        task: Any,
+        *,
+        reason_code: str,
+        error: str,
+        blocking_paths: list[str] | None = None,
+        unmerged_paths: list[str] | None = None,
+        stderr_excerpt: str = "",
+        is_conflict: bool,
+    ) -> None:
+        if not isinstance(getattr(task, "metadata", None), dict):
+            task.metadata = {}
+        details: dict[str, Any] = {}
+        if blocking_paths:
+            details["blocking_paths"] = list(blocking_paths)
+        if unmerged_paths:
+            details["unmerged_paths"] = list(unmerged_paths)
+        if stderr_excerpt:
+            details["stderr_excerpt"] = stderr_excerpt
+        task.metadata["merge_failure_reason_code"] = reason_code
+        task.metadata["merge_failure_details"] = details
+        if is_conflict:
+            task.metadata["merge_conflict"] = True
+        else:
+            task.metadata.pop("merge_conflict", None)
+        if hasattr(task, "error"):
+            task.error = error
 
     def resolve_merge_conflict(self, task: Any, branch: str) -> bool:
         """Try worker-assisted conflict resolution for the currently running merge.

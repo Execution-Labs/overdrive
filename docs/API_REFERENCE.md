@@ -218,7 +218,9 @@ Valid transitions:
 - `cancelled -> backlog`
 
 Notes:
-- Transitioning to `queued` requires all blockers resolved (`done|cancelled`).
+- Transitioning to `queued` is allowed even when dependencies are unresolved.
+- Execution is still guarded: `POST /api/tasks/{task_id}/run` returns `400`
+  while blockers remain unresolved.
 - Use `POST /api/review/{task_id}/approve` (not `/transition`) to finalize
   `in_review` tasks.
 - Blocked tasks cannot be forced into `in_review` via `/transition`; use
@@ -249,6 +251,18 @@ Behavior:
 - Only allowed for blocked tasks that satisfy backend eligibility checks
   (pipeline capability, blocked step compatibility, and retry context availability).
 - Transitions task to `in_review` with `pending_precommit_approval=true`.
+
+### `POST /api/tasks/{task_id}/finalize-merge-conflict`
+Finalize a blocked merge-conflict task after manual Git resolution.
+
+Request (optional):
+- `guidance`
+
+Behavior:
+- Only allowed for `blocked` tasks at `commit` where `metadata.merge_conflict=true`.
+- Verifies Git has no unresolved index entries and that task work is already
+  integrated into the active base branch.
+- Marks task `done` and records an audit action in `human_review_actions`.
 
 ### `POST /api/tasks/{task_id}/cancel`
 Set task status to `cancelled`.

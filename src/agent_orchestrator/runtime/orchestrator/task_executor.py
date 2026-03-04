@@ -866,8 +866,9 @@ class TaskExecutor:
                 _consume_human_guidance("commit")
 
                 if worktree_dir:
-                    svc._merge_and_cleanup(task, worktree_dir)
-                    if not task.metadata.get("merge_conflict"):
+                    merge_result = svc._merge_and_cleanup(task, worktree_dir)
+                    merge_status = str((merge_result or {}).get("status") or "ok")
+                    if merge_status == "ok":
                         worktree_dir = None
 
                         # Post-merge integration health check
@@ -882,6 +883,7 @@ class TaskExecutor:
                                 "ts": now_iso(),
                             }
 
+                merge_failure_reason = str(task.metadata.get("merge_failure_reason_code") or "").strip()
                 if task.metadata.get("merge_conflict"):
                     task.status = "blocked"
                     task.error = "Merge conflict could not be resolved automatically"
@@ -892,6 +894,22 @@ class TaskExecutor:
                         event_type="task.blocked",
                         entity_id=task.id,
                         payload={"error": task.error},
+                    )
+                    return
+                if merge_failure_reason in {"dirty_overlapping", "git_error"}:
+                    task.status = "blocked"
+                    if not str(task.error or "").strip():
+                        if merge_failure_reason == "dirty_overlapping":
+                            task.error = "Integration branch has local changes that overlap this merge"
+                        else:
+                            task.error = "Git merge failed before conflict resolution"
+                    svc.container.tasks.upsert(task)
+                    svc._finalize_run(task, run, status="blocked", summary=f"Blocked due to merge failure ({merge_failure_reason})")
+                    svc.bus.emit(
+                        channel="tasks",
+                        event_type="task.blocked",
+                        entity_id=task.id,
+                        payload={"error": task.error, "reason_code": merge_failure_reason},
                     )
                     return
 

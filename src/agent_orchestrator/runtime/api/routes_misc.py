@@ -284,8 +284,48 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         # If there's a preserved branch, merge it before marking done
         if task.metadata.get("preserved_branch"):
             merge_result = orchestrator.approve_and_merge(task)
-            if merge_result.get("status") == "merge_conflict":
-                raise HTTPException(status_code=409, detail="Merge conflict could not be resolved")
+            merge_status = str(merge_result.get("status") or "")
+            if merge_status in {"merge_conflict", "dirty_overlapping", "git_error"}:
+                # Transition to blocked and surface a precise merge failure reason,
+                # mirroring what the task executor does for the pre-commit path.
+                task = container.tasks.get(task_id)
+                if not task:
+                    raise HTTPException(status_code=404, detail="Task not found")
+                ts = now_iso()
+                task.status = "blocked"
+                task.current_step = "commit"
+                task.metadata["pipeline_phase"] = "commit"
+                reason_code = str(merge_result.get("reason_code") or merge_status or "").strip() or None
+                if merge_status == "merge_conflict":
+                    task.error = "Merge conflict could not be resolved automatically"
+                else:
+                    task.error = str(merge_result.get("error") or "").strip() or "Git merge failed before conflict resolution"
+                review_history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
+                review_history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
+                with container.transaction():
+                    latest_run = None
+                    for run_id in reversed(task.run_ids):
+                        latest_run = container.runs.get(run_id)
+                        if latest_run:
+                            break
+                    if latest_run and latest_run.status not in {"done", "blocked"}:
+                        latest_run.status = "blocked"
+                        latest_run.finished_at = latest_run.finished_at or ts
+                        if reason_code == "dirty_overlapping":
+                            latest_run.summary = "Blocked due to overlapping local integration changes"
+                        elif reason_code == "git_error":
+                            latest_run.summary = "Blocked due to git merge error"
+                        else:
+                            latest_run.summary = "Blocked due to unresolved merge conflict"
+                        container.runs.upsert(latest_run)
+                    container.tasks.upsert(task)
+                bus.emit(
+                    channel="tasks",
+                    event_type="task.blocked",
+                    entity_id=task.id,
+                    payload={"error": task.error, "reason_code": reason_code},
+                )
+                return {"task": _task_payload(task, container, orchestrator)}
             # Re-fetch task after merge (approve_and_merge upserts)
             task = container.tasks.get(task_id)
             if not task:

@@ -318,6 +318,11 @@ class SkipToPrecommitRequest(BaseModel):
     guidance: Optional[str] = None
 
 
+class FinalizeMergeConflictRequest(BaseModel):
+    """Optional request body for finalizing manually resolved merge conflicts."""
+    guidance: Optional[str] = None
+
+
 class AddFeedbackRequest(BaseModel):
     """Request body for storing structured reviewer feedback on a task."""
     task_id: str
@@ -711,6 +716,18 @@ def _task_payload(
     payload["can_skip_to_precommit"] = bool(can_skip_to_precommit)
     payload["skip_to_precommit_reason_code"] = (
         str(skip_to_precommit_reason_code).strip() if skip_to_precommit_reason_code else None
+    )
+    can_finalize_merge_conflict = False
+    finalize_merge_conflict_reason_code: str | None = None
+    if orchestrator is not None:
+        try:
+            can_finalize_merge_conflict, finalize_merge_conflict_reason_code = orchestrator.can_finalize_merge_conflict(task)
+        except Exception:
+            can_finalize_merge_conflict = False
+            finalize_merge_conflict_reason_code = "eligibility_unavailable"
+    payload["can_finalize_merge_conflict"] = bool(can_finalize_merge_conflict)
+    payload["finalize_merge_conflict_reason_code"] = (
+        str(finalize_merge_conflict_reason_code).strip() if finalize_merge_conflict_reason_code else None
     )
     if container is not None:
         timing_summary = _build_task_timing_summary(task, container)

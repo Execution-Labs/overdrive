@@ -52,6 +52,8 @@ type TaskRecord = {
   human_review_actions?: ReviewAction[]
   can_skip_to_precommit?: boolean
   skip_to_precommit_reason_code?: string | null
+  can_finalize_merge_conflict?: boolean
+  finalize_merge_conflict_reason_code?: string | null
   error?: string | null
   timing_summary?: TaskTimingSummary | null
   execution_summary?: ExecutionSummary | null
@@ -59,7 +61,7 @@ type TaskRecord = {
 }
 
 type ReviewAction = {
-  action: 'approve' | 'request_changes' | 'retry'
+  action: 'approve' | 'request_changes' | 'retry' | 'finalize_merge_conflict'
   ts: string
   guidance: string
   previous_error?: string
@@ -4523,6 +4525,29 @@ export default function App() {
     )
   }
 
+  async function finalizeMergeConflict(taskId: string): Promise<void> {
+    await runTaskMutation(
+      'transition',
+      async () => {
+        await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/finalize-merge-conflict`, projectDir), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ guidance: reviewGuidance.trim() || undefined }),
+        })
+        setReviewGuidance('')
+        await reloadAll()
+        if (selectedTaskIdRef.current === taskId) {
+          await loadTaskDetail(taskId)
+        }
+      },
+      {
+        successMessage: 'Task finalized after manual merge verification.',
+        errorPrefix: 'Failed to finalize manual merge',
+        detail: 'finalize_merge_conflict',
+      },
+    )
+  }
+
   async function approveTask(taskId: string): Promise<void> {
     await runTaskMutation(
       'transition',
@@ -5027,8 +5052,20 @@ export default function App() {
               <div className="review-history-box">
                 <p className="review-history-header">Review history</p>
                 {selectedTaskView.human_review_actions.map((entry, idx) => {
-                  const actionLabel = entry.action === 'approve' ? 'Approved' : entry.action === 'request_changes' ? 'Changes requested' : entry.action === 'retry' ? 'Retry with guidance' : entry.action
-                  const badgeClass = entry.action === 'approve' ? 'status-done' : entry.action === 'request_changes' ? 'status-review' : 'status-blocked'
+                  const actionLabel = entry.action === 'approve'
+                    ? 'Approved'
+                    : entry.action === 'request_changes'
+                      ? 'Changes requested'
+                      : entry.action === 'retry'
+                        ? 'Retry with guidance'
+                        : entry.action === 'finalize_merge_conflict'
+                          ? 'Finalized manual merge'
+                          : entry.action
+                  const badgeClass = entry.action === 'approve' || entry.action === 'finalize_merge_conflict'
+                    ? 'status-done'
+                    : entry.action === 'request_changes'
+                      ? 'status-review'
+                      : 'status-blocked'
                   return (
                     <div className="review-history-entry" key={`review-action-${idx}`}>
                       <div className="review-history-entry-head">
@@ -7207,6 +7244,20 @@ export default function App() {
                   <>
                     {selectedTaskView.can_skip_to_precommit ? (
                       <button className="button button-primary" onClick={() => void skipToPrecommit(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'skip_to_precommit' ? 'Moving...' : 'Skip to Pre-commit Review'}</button>
+                    ) : null}
+                    {selectedTaskView.metadata?.merge_conflict ? (
+                      <button
+                        className="button button-primary"
+                        onClick={() => void finalizeMergeConflict(selectedTaskView.id)}
+                        disabled={isTaskActionBusy || !selectedTaskView.can_finalize_merge_conflict}
+                        title={!selectedTaskView.can_finalize_merge_conflict && selectedTaskView.finalize_merge_conflict_reason_code
+                          ? `Unavailable: ${humanizeLabel(selectedTaskView.finalize_merge_conflict_reason_code)}`
+                          : undefined}
+                      >
+                        {taskActionPending === 'transition' && taskActionDetail === 'finalize_merge_conflict'
+                          ? 'Finalizing...'
+                          : 'Finalize Manual Merge'}
+                      </button>
                     ) : null}
                     <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'cancelled' ? 'Cancelling...' : 'Cancel'}</button>
                   </>

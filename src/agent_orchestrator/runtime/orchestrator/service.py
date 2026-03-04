@@ -1598,6 +1598,164 @@ class OrchestratorService:
             return False, "no_task_changes"
         return True, None
 
+    def _list_unmerged_files(self) -> list[str]:
+        """Return currently unmerged paths in the project index."""
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "--diff-filter=U"],
+                cwd=self.container.project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            return []
+        if result.returncode != 0:
+            return []
+        return [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+
+    def _latest_run_commit_ref(self, task: Task) -> str | None:
+        """Return newest commit SHA captured in task run steps, if present."""
+        for run_id in reversed(task.run_ids):
+            run = self.container.runs.get(run_id)
+            if not run:
+                continue
+            for step_data in reversed(run.steps or []):
+                if not isinstance(step_data, dict):
+                    continue
+                commit_ref = str(step_data.get("commit") or "").strip()
+                if commit_ref:
+                    return commit_ref
+        return None
+
+    def _is_ancestor_ref(self, ancestor_ref: str, base_ref: str) -> bool:
+        """Return whether ancestor_ref is merged into base_ref."""
+        if not ancestor_ref.strip():
+            return False
+        try:
+            result = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", ancestor_ref, base_ref],
+                cwd=self.container.project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0
+
+    def _evaluate_manual_merge_finalize(
+        self,
+        task: Task,
+    ) -> tuple[bool, str | None, str | None, str | None]:
+        """Evaluate merge-conflict finalize eligibility and provide verification refs."""
+        if task.status != "blocked":
+            return False, "task_not_blocked", None, None
+        blocked_step = self._task_blocked_step(task)
+        if blocked_step != "commit":
+            return False, "blocked_step_not_commit", None, None
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        if not metadata.get("merge_conflict"):
+            return False, "not_merge_conflict_block", None, None
+        if not (self.container.project_dir / ".git").exists():
+            return False, "git_required", None, None
+        if self._list_unmerged_files():
+            return False, "unmerged_entries_present", None, None
+
+        base_ref = self._run_branch or self._current_project_branch()
+        candidate_refs: list[str] = []
+        preserved_branch = str(metadata.get("preserved_branch") or "").strip()
+        if preserved_branch and self._local_branch_exists(preserved_branch):
+            candidate_refs.append(preserved_branch)
+        task_context = metadata.get("task_context") if isinstance(metadata.get("task_context"), dict) else {}
+        task_branch = str(task_context.get("task_branch") or "").strip()
+        if task_branch and self._local_branch_exists(task_branch) and task_branch not in candidate_refs:
+            candidate_refs.append(task_branch)
+        fallback_branch = f"task-{task.id}"
+        if self._local_branch_exists(fallback_branch) and fallback_branch not in candidate_refs:
+            candidate_refs.append(fallback_branch)
+        latest_commit = self._latest_run_commit_ref(task)
+        if latest_commit and latest_commit not in candidate_refs:
+            candidate_refs.append(latest_commit)
+
+        for candidate in candidate_refs:
+            if self._is_ancestor_ref(candidate, base_ref):
+                return True, None, base_ref, candidate
+        return False, "merge_not_integrated", base_ref, None
+
+    def can_finalize_merge_conflict(self, task: Task) -> tuple[bool, str | None]:
+        """Return whether a blocked merge-conflict task can be finalized manually."""
+        allowed, reason_code, _, _ = self._evaluate_manual_merge_finalize(task)
+        return allowed, reason_code
+
+    def finalize_merge_conflict(self, task_id: str, *, guidance: str = "") -> Task:
+        """Mark a manually-resolved merge-conflict task as done after Git verification."""
+        with self._lock:
+            task = self.container.tasks.get(task_id)
+            if not task:
+                raise ValueError(f"Task not found: {task_id}")
+            allowed, reason_code, base_ref, verified_ref = self._evaluate_manual_merge_finalize(task)
+            if not allowed:
+                raise ValueError(
+                    f"Task {task_id} cannot finalize manual merge conflict resolution ({reason_code or 'not_allowed'})"
+                )
+
+            if not isinstance(task.metadata, dict):
+                task.metadata = {}
+            for key in (
+                "merge_conflict",
+                "merge_conflict_files",
+                "merge_conflict_attempt",
+                "merge_conflict_max_attempts",
+                "merge_conflict_previous_error",
+                "pending_precommit_approval",
+                "review_stage",
+                "pipeline_phase",
+            ):
+                task.metadata.pop(key, None)
+
+            ts = now_iso()
+            action_payload = {
+                "action": "finalize_merge_conflict",
+                "ts": ts,
+                "guidance": str(guidance or "").strip(),
+                "base_ref": str(base_ref or "").strip(),
+                "verified_ref": str(verified_ref or "").strip(),
+            }
+            history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
+            history.append(action_payload)
+            task.metadata["last_manual_merge_finalize"] = action_payload
+            task.status = "done"
+            task.current_step = None
+            task.pending_gate = None
+            task.current_agent_id = None
+            task.error = None
+            task.updated_at = ts
+
+            with self.container.transaction():
+                latest_run = None
+                for run_id in reversed(task.run_ids):
+                    latest_run = self.container.runs.get(run_id)
+                    if latest_run:
+                        break
+                if latest_run and latest_run.status != "done":
+                    latest_run.status = "done"
+                    latest_run.finished_at = latest_run.finished_at or ts
+                    if not latest_run.summary:
+                        latest_run.summary = "Completed after manual merge conflict resolution"
+                    self.container.runs.upsert(latest_run)
+                self.container.tasks.upsert(task)
+
+            self.bus.emit(
+                channel="tasks",
+                event_type="task.done",
+                entity_id=task.id,
+                payload={"source": "manual_merge_finalize", "verified_ref": str(verified_ref or "").strip()},
+            )
+            return task
+
     def skip_task_to_precommit(self, task_id: str, *, guidance: str = "") -> Task:
         """Move an eligible blocked task into pre-commit review without rerunning steps."""
         with self._lock:
@@ -2239,8 +2397,8 @@ class OrchestratorService:
         content = self._read_canonical_workdoc(canonical, task_id=task_id)
         return {"task_id": task_id, "content": content, "exists": True}
 
-    def _merge_and_cleanup(self, task: Task, worktree_dir: Path) -> None:
-        self._worktree_manager.merge_and_cleanup(task, worktree_dir)
+    def _merge_and_cleanup(self, task: Task, worktree_dir: Path) -> dict[str, Any]:
+        return self._worktree_manager.merge_and_cleanup(task, worktree_dir)
 
     def approve_and_merge(self, task: Task) -> dict[str, Any]:
         """Merge a preserved branch to the base branch on user approval.
@@ -2253,8 +2411,8 @@ class OrchestratorService:
 
         Returns:
             dict[str, Any]: Merge outcome payload with ``status``. Includes
-            ``commit_sha`` on successful merge and ``status='merge_conflict'``
-            when automatic conflict resolution fails.
+            ``commit_sha`` on successful merge. Failure statuses include
+            ``merge_conflict``, ``dirty_overlapping``, and ``git_error``.
         """
         return self._worktree_manager.approve_and_merge(task)
 

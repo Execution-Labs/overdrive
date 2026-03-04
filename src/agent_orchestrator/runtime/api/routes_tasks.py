@@ -41,6 +41,7 @@ CommitPlanRequest = impl.CommitPlanRequest
 CreatePlanRevisionRequest = impl.CreatePlanRevisionRequest
 CreateTaskRequest = impl.CreateTaskRequest
 GenerateTasksRequest = impl.GenerateTasksRequest
+FinalizeMergeConflictRequest = impl.FinalizeMergeConflictRequest
 PipelineClassificationRequest = impl.PipelineClassificationRequest
 PipelineClassificationResponse = impl.PipelineClassificationResponse
 PlanRefineRequest = impl.PlanRefineRequest
@@ -2040,10 +2041,6 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 payload={"status": cancelled.status},
             )
             return {"task": _task_payload(cancelled, container, orchestrator)}
-        if target == "queued":
-            unresolved = _has_unresolved_blockers(container, task)
-            if unresolved is not None:
-                raise HTTPException(status_code=400, detail=f"Unresolved blocker: {unresolved}")
         task.status = cast(TaskStatus, target)
         task.updated_at = now_iso()
         container.tasks.upsert(task)
@@ -2113,6 +2110,30 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         return {
             "task": _task_payload(updated, container, orchestrator),
             "message": "Task moved to pre-commit review. Approve to run commit.",
+        }
+
+    @router.post("/tasks/{task_id}/finalize-merge-conflict")
+    async def finalize_merge_conflict(
+        task_id: str,
+        body: Optional[FinalizeMergeConflictRequest] = None,
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        """Finalize a blocked merge-conflict task after manual Git resolution."""
+        container, _, orchestrator = deps.ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        guidance = str(body.guidance if body else "").strip()
+        try:
+            updated = orchestrator.finalize_merge_conflict(task_id, guidance=guidance)
+        except ValueError as exc:
+            message = str(exc)
+            if "Task not found" in message:
+                raise HTTPException(status_code=404, detail=message) from exc
+            raise HTTPException(status_code=409, detail=message) from exc
+        return {
+            "task": _task_payload(updated, container, orchestrator),
+            "message": "Task finalized after manual merge verification.",
         }
 
     @router.post("/tasks/{task_id}/retry")

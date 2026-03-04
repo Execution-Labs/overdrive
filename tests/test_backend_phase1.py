@@ -2769,6 +2769,81 @@ def test_review_approve_rejects_blocked_task_status(tmp_path: Path) -> None:
         assert "not in_review" in str(resp.json().get("detail") or "")
 
 
+def test_review_approve_blocks_on_dirty_overlapping_merge_failure(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Dirty overlap on approve"}).json()["task"]
+        task_branch = f"task-{task['id']}"
+        _git(["checkout", "-b", task_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("task branch change\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "task branch commit",
+            ],
+            tmp_path,
+        )
+        _git(["checkout", base_branch], tmp_path)
+        # Overlapping local dirty edit should block merge.
+        (tmp_path / "tracked.txt").write_text("local dirty change\n", encoding="utf-8")
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "in_review"
+        stored.current_step = "review"
+        stored.metadata["preserved_branch"] = task_branch
+        container.tasks.upsert(stored)
+
+        resp = client.post(f"/api/review/{task['id']}/approve", json={})
+        assert resp.status_code == 200
+        payload = resp.json()["task"]
+        assert payload["status"] == "blocked"
+        assert payload["current_step"] == "commit"
+        assert "local changes" in str(payload.get("error") or "").lower()
+        assert payload["metadata"].get("merge_failure_reason_code") == "dirty_overlapping"
+        assert payload["can_finalize_merge_conflict"] is False
+        assert payload["finalize_merge_conflict_reason_code"] == "not_merge_conflict_block"
+        updated = container.tasks.get(task["id"])
+        assert updated is not None
+        latest_run = None
+        for run_id in reversed(updated.run_ids):
+            latest_run = container.runs.get(run_id)
+            if latest_run:
+                break
+        if latest_run is not None:
+            assert "overlapping local integration changes" in str(latest_run.summary or "").lower()
+
+
 def test_task_payload_surfaces_skip_to_precommit_eligibility(tmp_path: Path) -> None:
     _git(["init"], tmp_path)
     (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
@@ -2975,6 +3050,320 @@ def test_skip_to_precommit_eligibility_rejects_no_material_preserved_work(tmp_pa
         resp = client.post(f"/api/tasks/{task['id']}/skip-to-precommit", json={})
         assert resp.status_code == 409
         assert "no_task_changes" in str(resp.json().get("detail") or "")
+
+
+def test_task_payload_surfaces_finalize_merge_conflict_eligibility(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Manual merge finalize eligible"}).json()["task"]
+        task_branch = f"task-{task['id']}"
+        _git(["checkout", "-b", task_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("base\nmanual merge content\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "task commit",
+            ],
+            tmp_path,
+        )
+        _git(["checkout", base_branch], tmp_path)
+        _git(["merge", "--ff", task_branch], tmp_path)
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "blocked"
+        stored.current_step = "commit"
+        stored.metadata["merge_conflict"] = True
+        stored.metadata["preserved_branch"] = task_branch
+        container.tasks.upsert(stored)
+
+        payload = client.get(f"/api/tasks/{task['id']}").json()["task"]
+        assert payload["can_finalize_merge_conflict"] is True
+        assert payload["finalize_merge_conflict_reason_code"] is None
+
+
+def test_finalize_merge_conflict_endpoint_marks_task_done(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Finalize manual merge"}).json()["task"]
+        task_branch = f"task-{task['id']}"
+        _git(["checkout", "-b", task_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("base\nmanual finalize\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "task commit",
+            ],
+            tmp_path,
+        )
+        branch_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        _git(["checkout", base_branch], tmp_path)
+        _git(["merge", "--ff", task_branch], tmp_path)
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        run = RunRecord(
+            task_id=stored.id,
+            status="in_progress",
+            started_at=now_iso(),
+            steps=[{"step": "commit", "status": "ok", "commit": branch_sha}],
+        )
+        container.runs.upsert(run)
+        stored.run_ids.append(run.id)
+        stored.status = "blocked"
+        stored.current_step = "commit"
+        stored.error = "Merge conflict could not be resolved automatically"
+        stored.metadata["merge_conflict"] = True
+        stored.metadata["preserved_branch"] = task_branch
+        stored.metadata["merge_conflict_files"] = {"tracked.txt": "<<<<<<< ours"}
+        stored.metadata["merge_conflict_attempt"] = 2
+        stored.metadata["merge_conflict_max_attempts"] = 3
+        stored.metadata["merge_conflict_previous_error"] = "worker failed"
+        container.tasks.upsert(stored)
+
+        resp = client.post(
+            f"/api/tasks/{task['id']}/finalize-merge-conflict",
+            json={"guidance": "Resolved manually in git."},
+        )
+        assert resp.status_code == 200
+        payload = resp.json()["task"]
+        assert payload["status"] == "done"
+        assert payload["current_step"] is None
+        assert payload["error"] is None
+        for key in (
+            "merge_conflict",
+            "merge_conflict_files",
+            "merge_conflict_attempt",
+            "merge_conflict_max_attempts",
+            "merge_conflict_previous_error",
+            "pending_precommit_approval",
+            "review_stage",
+            "pipeline_phase",
+        ):
+            assert key not in payload["metadata"]
+        actions = payload.get("human_review_actions") or []
+        assert actions and actions[-1]["action"] == "finalize_merge_conflict"
+        assert actions[-1]["guidance"] == "Resolved manually in git."
+        assert payload["metadata"]["last_manual_merge_finalize"]["verified_ref"] == task_branch
+
+        latest_run = container.runs.get(run.id)
+        assert latest_run is not None
+        assert latest_run.status == "done"
+        assert latest_run.finished_at is not None
+
+
+def test_finalize_merge_conflict_endpoint_rejects_unintegrated_and_invalid_state(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Not integrated"}).json()["task"]
+        task_branch = f"task-{task['id']}"
+        _git(["checkout", "-b", task_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("base\nbranch only\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "branch commit",
+            ],
+            tmp_path,
+        )
+        _git(["checkout", base_branch], tmp_path)
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "blocked"
+        stored.current_step = "commit"
+        stored.metadata["merge_conflict"] = True
+        stored.metadata["preserved_branch"] = task_branch
+        container.tasks.upsert(stored)
+
+        not_integrated = client.post(f"/api/tasks/{task['id']}/finalize-merge-conflict", json={})
+        assert not_integrated.status_code == 409
+        assert "merge_not_integrated" in str(not_integrated.json().get("detail") or "")
+
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "queued"
+        container.tasks.upsert(stored)
+        wrong_state = client.post(f"/api/tasks/{task['id']}/finalize-merge-conflict", json={})
+        assert wrong_state.status_code == 409
+        assert "task_not_blocked" in str(wrong_state.json().get("detail") or "")
+
+
+def test_finalize_merge_conflict_endpoint_rejects_unmerged_index_entries(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Unmerged index"}).json()["task"]
+        task_branch = f"task-{task['id']}"
+        _git(["checkout", "-b", task_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("task branch change\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "task branch commit",
+            ],
+            tmp_path,
+        )
+        _git(["checkout", base_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("base branch change\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "base branch commit",
+            ],
+            tmp_path,
+        )
+        merge_result = subprocess.run(
+            ["git", "merge", task_branch],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert merge_result.returncode != 0
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "blocked"
+        stored.current_step = "commit"
+        stored.metadata["merge_conflict"] = True
+        stored.metadata["preserved_branch"] = task_branch
+        container.tasks.upsert(stored)
+
+        resp = client.post(f"/api/tasks/{task['id']}/finalize-merge-conflict", json={})
+        assert resp.status_code == 409
+        assert "unmerged_entries_present" in str(resp.json().get("detail") or "")
 
 
 def test_precommit_review_approve_rejects_missing_context(tmp_path: Path) -> None:
