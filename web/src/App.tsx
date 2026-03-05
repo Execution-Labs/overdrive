@@ -23,6 +23,17 @@ type TaskGateContext = {
   status_kind: 'approval_wait' | 'intervention_wait' | null
 }
 
+type TaskWaitState = {
+  kind: 'approval_wait' | 'intervention_wait' | 'auto_recovery_wait' | string
+  step?: string | null
+  reason_code?: string | null
+  recoverable?: boolean
+  attempt?: number
+  max_attempts?: number
+  next_retry_at?: string | null
+  updated_at?: string | null
+}
+
 type TaskRecord = {
   id: string
   title: string
@@ -46,6 +57,7 @@ type TaskRecord = {
   dependency_policy?: 'permissive' | 'prudent' | 'strict'
   pending_gate?: string | null
   gate_context?: TaskGateContext | null
+  wait_state?: TaskWaitState | null
   quality_gate?: Record<string, number>
   metadata?: Record<string, unknown>
   human_blocking_issues?: HumanBlockingIssue[]
@@ -661,6 +673,10 @@ function gateApprovalButtonLabel(gate: string | null | undefined): string {
 type WaitingGateKind = 'approval_wait' | 'intervention_wait'
 
 function taskWaitingGateKind(task: TaskRecord | null | undefined): WaitingGateKind | null {
+  const waitKind = String(task?.wait_state?.kind || '').trim()
+  if (waitKind === 'intervention_wait') return 'intervention_wait'
+  if (waitKind === 'approval_wait') return 'approval_wait'
+  if (waitKind === 'auto_recovery_wait') return null
   const kind = String(task?.gate_context?.status_kind || '').trim()
   if (kind === 'approval_wait' || kind === 'intervention_wait') return kind
   const gate = String(task?.pending_gate || '').trim()

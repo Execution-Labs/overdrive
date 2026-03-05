@@ -306,6 +306,7 @@ class TaskExecutor:
                 task.status = "blocked"
                 task.current_agent_id = None
                 task.pending_gate = None
+                task.wait_state = None
                 task.error = "Retained task context is missing; request changes to regenerate implementation context."
                 task.current_step = task.current_step or None
                 svc._mark_task_context_retained(task, reason="context_attach_failed", expected_on_retry=True)
@@ -420,6 +421,7 @@ class TaskExecutor:
             task.current_step = start_step
             task.metadata["pipeline_phase"] = start_step
             task.status = "in_progress"
+            task.wait_state = None
             task.current_agent_id = svc._choose_agent_for_task(task)
             svc.container.tasks.upsert(task)
             svc.bus.emit(
@@ -440,11 +442,6 @@ class TaskExecutor:
             def _consume_human_guidance(step_name: str) -> None:
                 if consume_human_guidance_for_step(task, step=step_name, run_id=run.id):
                     svc.container.tasks.upsert(task)
-
-            def _consume_environment_auto_requeue() -> bool:
-                if not isinstance(task.metadata, dict):
-                    return False
-                return bool(task.metadata.get("environment_auto_requeue_pending"))
 
             mode = normalize_hitl_mode(getattr(task, "hitl_mode", "autopilot"))
             # Retry flows resumed from implement/review/commit should not require
@@ -494,16 +491,18 @@ class TaskExecutor:
                 if resume_implement_fix and step in _VERIFY_STEPS:
                     verify_failed = True
                     resume_implement_fix = False  # consume the flag
-                elif not svc._run_non_review_step(task, run, step, attempt=1):
-                    verify_failed = step in _VERIFY_STEPS
-                    if _consume_environment_auto_requeue():
-                        return
-                    if not verify_failed:
-                        return
-                if verify_failed:
-                    if svc._consume_verify_non_actionable_flag(task):
+                else:
+                    step_outcome = svc._run_non_review_step(task, run, step, attempt=1)
+                    if step_outcome == "ok":
+                        verify_failed = False
+                    elif step_outcome == "verify_failed":
+                        verify_failed = True
+                    elif step_outcome == "verify_degraded":
                         last_phase1_step = step
                         continue
+                    else:
+                        return
+                if verify_failed:
                     fixed = False
                     for fix_attempt in range(1, max_verify_fix_attempts + 1):
                         task.status = "in_progress"
@@ -520,7 +519,8 @@ class TaskExecutor:
                         task.current_step = "implement_fix"
                         task.metadata["pipeline_phase"] = step
                         svc.container.tasks.upsert(task)
-                        if not svc._run_non_review_step(task, run, "implement_fix", attempt=fix_attempt + 1):
+                        fix_outcome = svc._run_non_review_step(task, run, "implement_fix", attempt=fix_attempt + 1)
+                        if fix_outcome != "ok":
                             return
                         _consume_human_guidance("implement_fix")
                         task.metadata.pop("verify_failure", None)
@@ -528,17 +528,24 @@ class TaskExecutor:
                         task.current_step = step
                         task.metadata["pipeline_phase"] = step
                         svc.container.tasks.upsert(task)
-                        if svc._run_non_review_step(task, run, step, attempt=fix_attempt + 1):
+                        verify_outcome = svc._run_non_review_step(task, run, step, attempt=fix_attempt + 1)
+                        if verify_outcome == "ok":
                             _consume_human_guidance(step)
                             fixed = True
                             break
-                        if _consume_environment_auto_requeue():
+                        if verify_outcome == "verify_degraded":
+                            fixed = True
+                            break
+                        if verify_outcome == "auto_requeued":
+                            return
+                        if verify_outcome != "verify_failed":
                             return
                     if fixed:
                         last_phase1_step = step
                         continue
                     # All verify-fix attempts exhausted — ensure task is blocked.
                     task.status = "blocked"
+                    task.wait_state = None
                     task.error = task.error or f"Could not fix {step} after {max_verify_fix_attempts} attempts"
                     task.current_step = step
                     svc.container.tasks.upsert(task)
@@ -563,6 +570,7 @@ class TaskExecutor:
                 svc._cleanup_workdoc_for_commit(impl_dir)
                 if not svc._has_uncommitted_changes(impl_dir) and not svc._has_commits_ahead(impl_dir):
                     task.status = "blocked"
+                    task.wait_state = None
                     task.error = "No file changes detected after implementation"
                     task.current_step = last_phase1_step or "implement"
                     task.metadata["pipeline_phase"] = last_phase1_step or "implement"
@@ -647,6 +655,7 @@ class TaskExecutor:
                         task.status = "blocked"
                         task.error = review_result.summary or "Review step failed"
                         task.pending_gate = None
+                        task.wait_state = None
                         task.current_step = "review"
                         task.metadata["pipeline_phase"] = "review"
                         svc.container.tasks.upsert(task)
@@ -701,7 +710,8 @@ class TaskExecutor:
                     task.current_step = "implement_fix"
                     task.metadata["pipeline_phase"] = "review"
                     svc.container.tasks.upsert(task)
-                    if not svc._run_non_review_step(task, run, "implement_fix", attempt=review_attempt):
+                    review_fix_outcome = svc._run_non_review_step(task, run, "implement_fix", attempt=review_attempt)
+                    if review_fix_outcome != "ok":
                         return
                     _consume_human_guidance("implement_fix")
 
@@ -709,14 +719,17 @@ class TaskExecutor:
                         task.current_step = post_fix_validation_step
                         task.metadata["pipeline_phase"] = "review"
                         svc.container.tasks.upsert(task)
-                        if not svc._run_non_review_step(task, run, post_fix_validation_step, attempt=review_attempt):
-                            if _consume_environment_auto_requeue():
+                        validation_outcome = svc._run_non_review_step(task, run, post_fix_validation_step, attempt=review_attempt)
+                        if validation_outcome != "ok":
+                            if validation_outcome == "auto_requeued":
                                 return
-                            if svc._consume_verify_non_actionable_flag(task):
+                            if validation_outcome == "verify_degraded":
                                 task.current_step = "review"
                                 task.metadata["pipeline_phase"] = "review"
                                 svc.container.tasks.upsert(task)
                                 continue
+                            if validation_outcome != "verify_failed":
+                                return
                             validation_fixed = False
                             for vfix in range(1, max_verify_fix_attempts + 1):
                                 task.status = "in_progress"
@@ -733,7 +746,8 @@ class TaskExecutor:
                                 task.current_step = "implement_fix"
                                 task.metadata["pipeline_phase"] = "review"
                                 svc.container.tasks.upsert(task)
-                                if not svc._run_non_review_step(task, run, "implement_fix", attempt=vfix + 1):
+                                validation_fix_outcome = svc._run_non_review_step(task, run, "implement_fix", attempt=vfix + 1)
+                                if validation_fix_outcome != "ok":
                                     return
                                 _consume_human_guidance("implement_fix")
                                 task.metadata.pop("verify_failure", None)
@@ -741,14 +755,21 @@ class TaskExecutor:
                                 task.current_step = post_fix_validation_step
                                 task.metadata["pipeline_phase"] = "review"
                                 svc.container.tasks.upsert(task)
-                                if svc._run_non_review_step(task, run, post_fix_validation_step, attempt=vfix + 1):
+                                retry_validation_outcome = svc._run_non_review_step(task, run, post_fix_validation_step, attempt=vfix + 1)
+                                if retry_validation_outcome == "ok":
                                     _consume_human_guidance(post_fix_validation_step)
                                     validation_fixed = True
                                     break
-                                if _consume_environment_auto_requeue():
+                                if retry_validation_outcome == "verify_degraded":
+                                    validation_fixed = True
+                                    break
+                                if retry_validation_outcome == "auto_requeued":
+                                    return
+                                if retry_validation_outcome != "verify_failed":
                                     return
                             if not validation_fixed:
                                 task.status = "blocked"
+                                task.wait_state = None
                                 task.error = task.error or f"Could not fix {post_fix_validation_step} after {max_verify_fix_attempts} attempts"
                                 task.current_step = post_fix_validation_step
                                 svc.container.tasks.upsert(task)
@@ -773,6 +794,7 @@ class TaskExecutor:
                     task.metadata.pop("verify_environment_note", None)
                     task.metadata.pop("verify_environment_kind", None)
                     task.status = "blocked"
+                    task.wait_state = None
                     task.error = "Review attempt cap exceeded"
                     task.current_step = "review"
                     task.metadata["pipeline_phase"] = "review"
@@ -797,6 +819,7 @@ class TaskExecutor:
                     if not context_ok:
                         task.status = "blocked"
                         task.pending_gate = None
+                        task.wait_state = None
                         task.current_step = "review"
                         task.current_agent_id = None
                         task.metadata["pipeline_phase"] = "review"
@@ -867,6 +890,7 @@ class TaskExecutor:
                         git_present = (commit_cwd / ".git").exists() or (svc.container.project_dir / ".git").exists()
                         if git_present:
                             task.status = "blocked"
+                            task.wait_state = None
                             task.error = "Commit failed (no changes to commit)"
                             svc.container.tasks.upsert(task)
                             svc._finalize_run(task, run, status="blocked", summary="Blocked: commit produced no changes")
@@ -910,6 +934,7 @@ class TaskExecutor:
                 merge_failure_reason = str(task.metadata.get("merge_failure_reason_code") or "").strip()
                 if task.metadata.get("merge_conflict"):
                     task.status = "blocked"
+                    task.wait_state = None
                     task.error = "Merge conflict could not be resolved automatically"
                     svc.container.tasks.upsert(task)
                     svc._finalize_run(task, run, status="blocked", summary="Blocked due to unresolved merge conflict")
@@ -922,6 +947,7 @@ class TaskExecutor:
                     return
                 if merge_failure_reason in {"dirty_overlapping", "git_error"}:
                     task.status = "blocked"
+                    task.wait_state = None
                     if not str(task.error or "").strip():
                         if merge_failure_reason == "dirty_overlapping":
                             task.error = "Integration branch has local changes that overlap this merge"
@@ -939,6 +965,7 @@ class TaskExecutor:
 
                 svc._run_summarize_step(task, run)
                 task.status = "done"
+                task.wait_state = None
                 task.current_step = None
                 task.metadata.pop("pipeline_phase", None)
                 task.metadata.pop("pending_precommit_approval", None)
@@ -980,6 +1007,7 @@ class TaskExecutor:
 
                 svc._run_summarize_step(task, run)
                 task.status = "done"
+                task.wait_state = None
                 task.current_step = None
                 task.metadata.pop("pipeline_phase", None)
                 run.status = "done"

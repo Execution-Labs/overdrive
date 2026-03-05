@@ -1626,7 +1626,7 @@ def test_pipeline_generate_tasks_consumes_pending_policy_override(tmp_path: Path
     container.runs.upsert(run)
 
     ok = service._run_non_review_step(task, run, "generate_tasks", attempt=1)
-    assert ok is True
+    assert ok == "ok"
 
     updated = container.tasks.get(task.id)
     assert updated is not None

@@ -70,6 +70,9 @@ class OrchestratorService:
         "before_commit": "commit",
     }
     _HUMAN_INTERVENTION_GATE = "human_intervention"
+    _WAIT_KIND_APPROVAL = "approval_wait"
+    _WAIT_KIND_INTERVENTION = "intervention_wait"
+    _WAIT_KIND_AUTO_RECOVERY = "auto_recovery_wait"
     _SKIP_TO_PRECOMMIT_COMPATIBLE_BLOCKED_STEPS = {"verify", "benchmark"}
     _TASK_GENERATION_STATUS_VALUES = {"backlog", "queued"}
     _TASK_GENERATION_HITL_VALUES = {"inherit_parent", "autopilot", "supervised", "review_only"}
@@ -255,6 +258,7 @@ class OrchestratorService:
         checkpoint.pop("resume_requested_at", None)
         checkpoint["resumed_at"] = now_iso()
         self._save_execution_checkpoint(task, checkpoint)
+        self._clear_wait_state(task)
         self.container.tasks.upsert(task)
         self.bus.emit(
             channel="tasks",
@@ -284,6 +288,45 @@ class OrchestratorService:
         else:
             task.metadata.pop("retry_from_step", None)
         self._save_execution_checkpoint(task, checkpoint)
+        self._set_wait_state(
+            task,
+            kind=self._WAIT_KIND_INTERVENTION if gate_name == self._HUMAN_INTERVENTION_GATE else self._WAIT_KIND_APPROVAL,
+            step=resolved_resume_step or task.current_step,
+            reason_code=gate_name,
+            recoverable=False,
+        )
+
+    def _set_wait_state(
+        self,
+        task: Task,
+        *,
+        kind: str,
+        step: str | None = None,
+        reason_code: str | None = None,
+        recoverable: bool | None = None,
+        attempt: int | None = None,
+        max_attempts: int | None = None,
+        next_retry_at: str | None = None,
+    ) -> None:
+        wait_state: dict[str, Any] = {"kind": str(kind).strip() or "none"}
+        if step:
+            wait_state["step"] = str(step).strip()
+        if reason_code:
+            wait_state["reason_code"] = str(reason_code).strip()
+        if recoverable is not None:
+            wait_state["recoverable"] = bool(recoverable)
+        if attempt is not None:
+            wait_state["attempt"] = int(attempt)
+        if max_attempts is not None:
+            wait_state["max_attempts"] = int(max_attempts)
+        if next_retry_at:
+            wait_state["next_retry_at"] = str(next_retry_at).strip()
+        wait_state["updated_at"] = now_iso()
+        task.wait_state = wait_state
+
+    @staticmethod
+    def _clear_wait_state(task: Task) -> None:
+        task.wait_state = None
 
     def _gate_for_step(
         self,
@@ -1339,9 +1382,9 @@ class OrchestratorService:
         if isinstance(value, str):
             lowered = value.strip().lower()
             if lowered in {"true", "1", "yes", "on"}:
-                return True
+                return "ok"
             if lowered in {"false", "0", "no", "off"}:
-                return False
+                return "blocked"
         if isinstance(value, (int, float)):
             return bool(value)
         return default
@@ -2816,9 +2859,9 @@ class OrchestratorService:
             basename = Path(rel).name.lower()
             # Match both full path and basename when meaningful.
             if rel in text:
-                return True
+                return "ok"
             if len(basename) >= 5 and basename in text:
-                return True
+                return "ok"
         return False
 
     @staticmethod
@@ -3006,6 +3049,7 @@ class OrchestratorService:
         task.status = "in_progress"
         task.error = None
         task.pending_gate = None
+        self._clear_wait_state(task)
         self.container.tasks.upsert(task)
         run.status = "in_progress"
         run.finished_at = None
@@ -3037,23 +3081,23 @@ class OrchestratorService:
         run: RunRecord,
         step: str,
         attempt: int = 1,
-    ) -> bool:
+    ) -> Literal["ok", "verify_failed", "verify_degraded", "auto_requeued", "human_blocked", "blocked"]:
         self._heartbeat_execution_lease(task)
         self.container.tasks.upsert(task)
         try:
             if self._validate_task_workdoc(task) is None:
                 self._block_for_missing_workdoc(task, run, step=step)
-                return False
+                return "blocked"
         except ValueError as exc:
             self._block_for_invalid_workdoc(task, run, step=step, detail=str(exc))
-            return False
+            return "blocked"
         # Refresh workdoc before each step so the worker sees the latest version.
         step_project_dir = self._step_project_dir(task)
         try:
             self._refresh_workdoc_with_diagnostics(task, step_project_dir)
         except ValueError as exc:
             self._block_for_invalid_workdoc(task, run, step=step, detail=str(exc))
-            return False
+            return "blocked"
 
         # Ensure each verify invocation gets fresh classification context.
         if step in _VERIFY_STEPS and isinstance(task.metadata, dict):
@@ -3073,7 +3117,7 @@ class OrchestratorService:
             self._sync_workdoc_with_diagnostics(task, step, step_project_dir, result.summary, attempt=attempt)
         except ValueError as exc:
             self._block_for_invalid_workdoc(task, run, step=step, detail=str(exc))
-            return False
+            return "blocked"
 
         step_log: dict[str, Any] = {"step": step, "status": result.status, "ts": now_iso(), "started_at": step_started, "summary": result.summary}
         if result.human_blocking_issues:
@@ -3089,7 +3133,7 @@ class OrchestratorService:
         self.container.tasks.upsert(task)
         if result.human_blocking_issues:
             self._block_for_human_issues(task, run, step, result.summary, result.human_blocking_issues)
-            return False
+            return "human_blocked"
         if result.status != "ok":
             if step in _VERIFY_STEPS:
                 self._classify_verify_failure_for_scope(
@@ -3100,17 +3144,26 @@ class OrchestratorService:
                 )
             if step in _VERIFY_STEPS and self._is_non_actionable_verify_failure(task, result.summary):
                 self._mark_verify_degraded(task, run, step=step, summary=result.summary)
-                return False
+                return "verify_degraded"
             if self._handle_recoverable_environment_failure(
                 task,
                 run,
                 step=step,
                 summary=result.summary,
             ):
-                return False
+                return "auto_requeued"
+            if step in _VERIFY_STEPS:
+                task.status = "in_progress"
+                task.error = result.summary or f"{step} failed"
+                task.pending_gate = None
+                self._clear_wait_state(task)
+                task.current_step = step
+                self.container.tasks.upsert(task)
+                return "verify_failed"
             task.status = "blocked"
             task.error = result.summary or f"{step} failed"
             task.pending_gate = None
+            self._clear_wait_state(task)
             task.current_step = step
             self.container.tasks.upsert(task)
             run.status = "blocked"
@@ -3118,10 +3171,11 @@ class OrchestratorService:
             run.summary = f"Blocked during {step}"
             self.container.runs.upsert(run)
             self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
-            return False
+            return "blocked"
 
         self._clear_environment_recovery_tracking(task, step=step)
         task.metadata.pop("human_blocking_issues", None)
+        self._clear_wait_state(task)
 
         # Store plan output as first-class immutable plan revisions.
         if step in {"plan", "initiative_plan"} and result.summary:
@@ -3169,7 +3223,7 @@ class OrchestratorService:
                         "effective_policy": effective_policy,
                     },
                 )
-                return True
+                return "ok"
             created_ids = self._create_child_tasks(task, generated, effective_policy=effective_policy)
             self.bus.emit(
                 channel="tasks",
@@ -3190,11 +3244,11 @@ class OrchestratorService:
                     step=step,
                     violations=scope_violations,
                 )
-                return False
+                return "blocked"
 
         self._heartbeat_execution_lease(task)
         self.container.tasks.upsert(task)
-        return True
+        return "ok"
 
     def _clear_environment_recovery_tracking(self, task: Task, *, step: str) -> None:
         if not isinstance(task.metadata, dict):
@@ -3210,6 +3264,11 @@ class OrchestratorService:
                 task.metadata["environment_recovery_attempts_by_step"] = attempts
             else:
                 task.metadata.pop("environment_recovery_attempts_by_step", None)
+        if isinstance(task.wait_state, dict):
+            if str(task.wait_state.get("kind") or "").strip() == self._WAIT_KIND_AUTO_RECOVERY:
+                wait_step = str(task.wait_state.get("step") or "").strip()
+                if not wait_step or wait_step == step:
+                    self._clear_wait_state(task)
 
     def _environment_recovery_settings(self) -> tuple[int, bool]:
         cfg = self.container.config.load()
@@ -3286,6 +3345,16 @@ class OrchestratorService:
             "ts": now_iso(),
         }
         task.pending_gate = None
+        self._set_wait_state(
+            task,
+            kind=self._WAIT_KIND_AUTO_RECOVERY,
+            step=step,
+            reason_code="recoverable_environment_failure",
+            recoverable=True,
+            attempt=attempt_number,
+            max_attempts=max_auto_retries,
+            next_retry_at=next_retry_at,
+        )
         task.current_step = step
         task.error = str(summary or f"Environment issue detected during {step}. Auto-requeue scheduled.")
         task.status = "queued"
@@ -3410,6 +3479,16 @@ class OrchestratorService:
         task.pending_gate = self._HUMAN_INTERVENTION_GATE
         task.error = summary or "Human intervention required to continue"
         task.metadata["human_blocking_issues"] = issues
+        task.metadata.pop("environment_auto_requeue_pending", None)
+        task.metadata.pop("environment_next_retry_at", None)
+        task.metadata.pop("environment_recovery_backoff_seconds", None)
+        self._set_wait_state(
+            task,
+            kind=self._WAIT_KIND_INTERVENTION,
+            step=step,
+            reason_code="human_intervention_required",
+            recoverable=False,
+        )
         self.container.tasks.upsert(task)
 
         self._finalize_run(task, run, status="blocked", summary=f"Blocked during {step}: human intervention required")

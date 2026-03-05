@@ -2164,6 +2164,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.status = "queued"
         task.error = None
         task.pending_gate = None
+        task.wait_state = None
         task.metadata = task.metadata if isinstance(task.metadata, dict) else {}
         task.metadata.pop("execution_checkpoint", None)
         task.metadata.pop("human_blocking_issues", None)
@@ -2300,6 +2301,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             task.status = "queued"
             task.error = None
             task.pending_gate = None
+            task.wait_state = None
             task.current_agent_id = None
             task.metadata.pop("execution_checkpoint", None)
             if start_from_step:
@@ -2393,6 +2395,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             checkpoint_payload["resume_requested_at"] = acted_at
             task.metadata["execution_checkpoint"] = checkpoint_payload
         task.pending_gate = None
+        task.wait_state = None
         task.updated_at = acted_at
         container.tasks.upsert(task)
         bus.emit(

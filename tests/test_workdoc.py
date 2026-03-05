@@ -1295,7 +1295,7 @@ def test_run_non_review_step_blocks_when_workdoc_missing(
 
     ok = service._run_non_review_step(task, run, "implement", attempt=1)
 
-    assert ok is False
+    assert ok == "blocked"
     updated_task = service.container.tasks.get(task.id)
     assert updated_task is not None
     assert updated_task.status == "blocked"
@@ -1317,7 +1317,7 @@ def test_run_non_review_step_blocks_when_workdoc_invalid_encoding(
 
     ok = service._run_non_review_step(task, run, "implement", attempt=1)
 
-    assert ok is False
+    assert ok == "blocked"
     updated_task = service.container.tasks.get(task.id)
     assert updated_task is not None
     assert updated_task.status == "blocked"
@@ -1345,7 +1345,7 @@ def test_run_non_review_step_blocks_when_worktree_workdoc_missing_during_sync(
 
     ok = service._run_non_review_step(task, run, "plan", attempt=1)
 
-    assert ok is False
+    assert ok == "blocked"
     updated_task = service.container.tasks.get(task.id)
     assert updated_task is not None
     assert updated_task.status == "blocked"
@@ -1384,7 +1384,7 @@ def test_run_non_review_step_persists_sync_diagnostics_on_block(
 
     ok = service._run_non_review_step(task, run, "plan", attempt=2)
 
-    assert ok is False
+    assert ok == "blocked"
     updated_task = service.container.tasks.get(task.id)
     assert updated_task is not None
     assert updated_task.status == "blocked"

@@ -110,6 +110,33 @@ def apply_runtime_invariants(
     for task in tasks:
         changed = False
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        wait_state = task.wait_state if isinstance(task.wait_state, dict) else None
+        wait_kind = str(wait_state.get("kind") or "").strip() if isinstance(wait_state, dict) else ""
+
+        if wait_kind == "intervention_wait" and task.status != "blocked":
+            task.wait_state = None
+            changed = True
+            _record(
+                task,
+                code="stale_intervention_wait_state",
+                message="Cleared intervention wait-state on non-blocked task.",
+            )
+        if wait_kind == "approval_wait" and not task.pending_gate:
+            task.wait_state = None
+            changed = True
+            _record(
+                task,
+                code="stale_approval_wait_state",
+                message="Cleared approval wait-state without pending gate.",
+            )
+        if wait_kind == "auto_recovery_wait" and task.status == "blocked":
+            task.wait_state = None
+            changed = True
+            _record(
+                task,
+                code="stale_auto_recovery_wait_state",
+                message="Cleared auto-recovery wait-state on blocked task.",
+            )
 
         if task.status == "cancelled":
             if _clear_cancelled_gate_artifacts(task):

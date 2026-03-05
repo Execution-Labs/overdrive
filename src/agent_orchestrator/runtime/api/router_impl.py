@@ -511,6 +511,31 @@ def _normalize_human_blocking_issues(value: Any) -> list[dict[str, str]]:
     return out[:20]
 
 
+def _normalize_wait_state(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    kind = str(value.get("kind") or "").strip()
+    if not kind:
+        return None
+    wait_state: dict[str, Any] = {"kind": kind}
+    for key in ("step", "reason_code", "next_retry_at", "updated_at"):
+        text = str(value.get(key) or "").strip()
+        if text:
+            wait_state[key] = text
+    for key in ("recoverable",):
+        if key in value:
+            wait_state[key] = bool(value.get(key))
+    for key in ("attempt", "max_attempts"):
+        raw = value.get(key)
+        if raw is None:
+            continue
+        try:
+            wait_state[key] = int(raw)
+        except (TypeError, ValueError):
+            continue
+    return wait_state
+
+
 def _iso_delta_seconds(start: str, end: str) -> Optional[float]:
     """Compute elapsed seconds between two ISO-8601 timestamps."""
     try:
@@ -700,18 +725,31 @@ def _task_payload(
                 step_timeout_seconds = candidate
                 break
     payload["step_timeout_seconds"] = step_timeout_seconds
+    wait_state = _normalize_wait_state(task.wait_state)
+    if wait_state is None:
+        pending_gate = str(task.pending_gate or "").strip() or None
+        if pending_gate:
+            wait_state = {
+                "kind": "intervention_wait" if pending_gate == "human_intervention" else "approval_wait",
+                "step": str(task.current_step or metadata.get("pipeline_phase") or "").strip() or None,
+                "reason_code": pending_gate,
+            }
+    payload["wait_state"] = wait_state
     pending_gate = str(task.pending_gate or "").strip() or None
     gate_display = _GATE_DISPLAY_LABELS.get(pending_gate or "", humanize_label(pending_gate) if pending_gate else None)
+    status_kind = str((wait_state or {}).get("kind") or "").strip()
+    if status_kind not in {"approval_wait", "intervention_wait"}:
+        status_kind = (
+            "intervention_wait"
+            if pending_gate == "human_intervention"
+            else ("approval_wait" if pending_gate else "")
+        )
     payload["gate_context"] = {
-        "is_waiting": bool(pending_gate),
+        "is_waiting": bool(pending_gate) or status_kind in {"approval_wait", "intervention_wait"},
         "gate": pending_gate,
         "display": gate_display,
         "step": str(task.current_step or metadata.get("pipeline_phase") or "").strip() or None,
-        "status_kind": (
-            "intervention_wait"
-            if pending_gate == "human_intervention"
-            else ("approval_wait" if pending_gate else None)
-        ),
+        "status_kind": status_kind or None,
     }
     payload["human_blocking_issues"] = _normalize_human_blocking_issues(metadata.get("human_blocking_issues"))
     raw_actions = metadata.get("human_review_actions")
