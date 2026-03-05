@@ -594,6 +594,30 @@ def test_sync_fallback_writes_attempt_scoped_entries(service: OrchestratorServic
     assert "Attempt two verification" in content
 
 
+def test_sync_fallback_keeps_attempt_entries_inside_verification_sentinel(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Repeated verification summaries must stay inside the managed sentinel block."""
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+
+    service._sync_workdoc(task, "verify", project_dir, "first verify summary", attempt=1)
+    service._sync_workdoc(task, "verify", project_dir, "second verify summary", attempt=2)
+
+    content = canonical.read_text(encoding="utf-8")
+    start = content.index("<!-- WORKDOC:SECTION verification_results START -->")
+    end = content.index("<!-- WORKDOC:SECTION verification_results END -->")
+    body = content[start:end]
+    outside = content[end:]
+
+    assert "### Attempt 1" in body
+    assert "first verify summary" in body
+    assert "### Attempt 2" in body
+    assert "second verify summary" in body
+    assert "### Attempt 2" not in outside
+    assert "second verify summary" not in outside
+
+
 def test_sync_worker_changes_preserve_retry_history_sections(
     service: OrchestratorService, task: Task, project_dir: Path
 ) -> None:
@@ -616,6 +640,24 @@ def test_sync_worker_changes_preserve_retry_history_sections(
     assert "Worker-authored plan content" in content
     assert "## Retry Attempt 2" in content
     assert "## REMOVED BY WORKER" not in content
+
+
+def test_retry_attempt_marker_sanitizes_previous_error_to_single_line(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Retry marker should avoid dumping multiline transcript fragments into workdoc."""
+    service._init_workdoc(task, project_dir)
+    task.metadata["retry_guidance"] = {
+        "guidance": "",
+        "previous_error": "Worker stalled (no heartbeat)\nfrom noisy.trace import lines\nthinking\n...",
+    }
+
+    service._append_retry_attempt_marker(task, project_dir=project_dir, attempt=2, start_from_step="plan")
+
+    content = service._workdoc_canonical_path(task.id).read_text(encoding="utf-8")
+    assert "- Previous error: Worker stalled (no heartbeat)" in content
+    assert "from noisy.trace import lines" not in content
+    assert "\nthinking\n" not in content
 
 
 def test_sync_worker_changes_fallback_when_legacy_bounds_missing(

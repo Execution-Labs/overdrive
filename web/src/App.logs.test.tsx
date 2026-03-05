@@ -592,4 +592,66 @@ describe('Task logs loading', () => {
       expect(options[1]).toContain('Attempt 2')
     })
   }, 20_000)
+
+  it('shows a step chip even when only one step is available', async () => {
+    installFetchMock(() => ({
+      mode: 'active',
+      step: 'diagnose',
+      current_step: 'diagnose',
+      stdout: 'Working...\n',
+      stderr: '',
+      stdout_offset: 10,
+      stderr_offset: 0,
+      stdout_tail_start: 0,
+      stderr_tail_start: 0,
+      available_steps: ['diagnose'],
+      step_execution_counts: { diagnose: 1 },
+      step_latest_run: {},
+      step_history: [],
+      log_id: 'run-single-step',
+      stdout_chunk_start: 0,
+      stderr_chunk_start: 0,
+    }))
+
+    render(<App />)
+    await openTaskLogsTab()
+
+    await waitFor(() => {
+      expect(document.querySelector('.log-step-selector')).not.toBeNull()
+      expect(screen.getByRole('button', { name: /diagnose/i })).toBeInTheDocument()
+    })
+  }, 20_000)
+
+  it('shows structured-stream fallback when stdout has only input_json_delta events', async () => {
+    installFetchMock(() => ({
+      mode: 'active',
+      step: 'diagnose',
+      current_step: 'diagnose',
+      stdout: [
+        JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'input_json_delta', partial_json: '{"foo"' } } }),
+        JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'input_json_delta', partial_json: ': "bar"}' } } }),
+      ].join('\n') + '\n',
+      stderr: '',
+      stdout_offset: 150,
+      stderr_offset: 0,
+      stdout_tail_start: 0,
+      stderr_tail_start: 0,
+      available_steps: ['diagnose'],
+      step_execution_counts: { diagnose: 1 },
+      step_latest_run: {},
+      step_history: [],
+      log_id: 'run-structured-only',
+      stdout_chunk_start: 0,
+      stderr_chunk_start: 0,
+    }))
+
+    render(<App />)
+    await openTaskLogsTab()
+
+    await waitFor(() => {
+      expect(screen.getByText(/Streaming structured tool input \(no text output yet\)\./i)).toBeInTheDocument()
+      const panes = document.querySelectorAll('pre.task-log-output')
+      expect((panes[0]?.textContent || '')).toContain('(structured stream events only)')
+    })
+  }, 20_000)
 })

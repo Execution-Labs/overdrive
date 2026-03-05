@@ -2581,7 +2581,7 @@ def test_retry_run_appends_attempt_marker_to_workdoc(tmp_path: Path) -> None:
         content = workdoc_resp.json()["content"]
         assert "## Retry Attempt 2" in content
         assert "Resume from verify" in content
-        assert "### Attempt 2" in content
+        assert "### Attempt 1" in content
         assert "Retry verify completed" in content
 
         container = Container(tmp_path)

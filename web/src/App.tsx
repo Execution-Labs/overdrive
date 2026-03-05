@@ -5550,15 +5550,24 @@ export default function App() {
           const taskIsRunning = selectedTaskView.status === 'in_progress' || selectedTaskView.status === 'queued'
           const totalExecutions = Object.values(stepCounts).reduce((a, b) => a + b, 0)
           const extraSteps = totalExecutions - Object.keys(stepCounts).length
+          const stepSelectorSteps = orderedSteps.length > 0
+            ? orderedSteps
+            : (latestStep ? [latestStep] : [])
           const attemptsForActiveStep = activeLogStep
             ? stepHistory.filter((item) => item.step === activeLogStep)
             : []
           const orderedAttemptsForActiveStep = orderLogAttempts(attemptsForActiveStep)
+          const stdoutSuppressedStructured = (
+            !stdoutHistory
+            && !!stdoutRawHistory
+            && stdoutRenderStats.structured
+            && stdoutRenderStats.streamEvents > 0
+          )
           return (
             <div className="task-detail-section-body">
-              {orderedSteps.length > 1 ? (
+              {stepSelectorSteps.length > 0 ? (
                 <div className="log-step-selector">
-                  {orderedSteps.map((s) => {
+                  {stepSelectorSteps.map((s) => {
                     const isViewed = s === activeLogStep
                     const isLatest = s === latestStep
                     const count = stepCounts[s] || 0
@@ -5624,7 +5633,12 @@ export default function App() {
                     {stdoutRenderStats.structured ? (
                       <p className="task-meta">Parsed {stdoutRenderStats.parsedLines} JSON lines · {stdoutRenderStats.streamEvents} stream events</p>
                     ) : null}
-                    <pre className="task-log-output" ref={stdoutPreRef} onScroll={() => handleLogPaneScroll('stdout')}>{stdoutHistory || '(empty)'}</pre>
+                    {stdoutSuppressedStructured ? (
+                      <p className="task-meta">Streaming structured tool input (no text output yet).</p>
+                    ) : null}
+                    <pre className="task-log-output" ref={stdoutPreRef} onScroll={() => handleLogPaneScroll('stdout')}>
+                      {stdoutHistory || (stdoutSuppressedStructured ? '(structured stream events only)' : '(empty)')}
+                    </pre>
                   </div>
                   <div className="task-log-pane">
                     <p className="field-label">Stderr</p>

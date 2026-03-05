@@ -997,7 +997,14 @@ _Pending: will be populated by the report step._
                 attempt=attempt,
             )
             if summary_updated is None:
-                return
+                self._set_sync_diagnostics(
+                    task,
+                    error_type="orchestrator_append_failed",
+                    mode="blocked_invalid_structure",
+                    step=step,
+                    attempt=attempt,
+                )
+                raise ValueError(f"Unable to sync workdoc for step '{step}': orchestrator_append_failed")
             canonical.write_text(summary_updated, encoding="utf-8")
             worktree_copy.write_text(summary_updated, encoding="utf-8")
             changed = True
@@ -1115,7 +1122,12 @@ _Pending: will be populated by the report step._
         if guidance:
             lines.append(f"- Guidance: {guidance}")
         if previous_error:
-            lines.append(f"- Previous error: {previous_error}")
+            first_line = next((line.strip() for line in previous_error.splitlines() if line.strip()), "")
+            compact = first_line[:240]
+            if len(first_line) > 240:
+                compact += "..."
+            if compact:
+                lines.append(f"- Previous error: {compact}")
 
         block = "\n".join(lines)
         updated = text.rstrip() + "\n\n" + block + "\n"
@@ -1196,8 +1208,9 @@ _Pending: will be populated by the report step._
             return "valid", (start_content, end_content), True
         return "missing", None, True
 
-    @staticmethod
+    @classmethod
     def _append_summary_under_heading(
+        cls,
         canonical_text: str,
         *,
         heading: str,
@@ -1217,6 +1230,23 @@ _Pending: will be populated by the report step._
             trimmed = f"### Fix Cycle {attempt_num}\n{trimmed}"
         else:
             trimmed = f"### Attempt {attempt_num}\n{trimmed}"
+        section_id = cls._WORKDOC_SENTINEL_ID_MAP.get(step)
+        if section_id is not None:
+            state, bounds, _ = cls._sentinel_section_bounds(canonical_text, section_id)
+            if state == "valid" and bounds is not None:
+                start, end = bounds
+                body = canonical_text[start:end]
+                if placeholder in body:
+                    updated_body = body.replace(placeholder, trimmed, 1)
+                else:
+                    body_stripped = body.rstrip()
+                    if body_stripped:
+                        updated_body = f"{body_stripped}\n\n{trimmed}\n"
+                    else:
+                        updated_body = f"{trimmed}\n"
+                return canonical_text[:start] + updated_body + canonical_text[end:]
+            if state == "malformed":
+                return None
         if placeholder in canonical_text:
             return canonical_text.replace(placeholder, trimmed, 1)
         idx = canonical_text.find(heading)

@@ -488,7 +488,7 @@ class TaskExecutor:
                 if resume_implement_fix and step in _VERIFY_STEPS:
                     verify_failed = True
                     resume_implement_fix = False  # consume the flag
-                elif not svc._run_non_review_step(task, run, step, attempt=1, workdoc_attempt=run_attempt):
+                elif not svc._run_non_review_step(task, run, step, attempt=1):
                     verify_failed = step in _VERIFY_STEPS
                     if not verify_failed:
                         return

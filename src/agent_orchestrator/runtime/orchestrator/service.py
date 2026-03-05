@@ -2975,7 +2975,6 @@ class OrchestratorService:
         run: RunRecord,
         step: str,
         attempt: int = 1,
-        workdoc_attempt: int | None = None,
     ) -> bool:
         self._heartbeat_execution_lease(task)
         self.container.tasks.upsert(task)
@@ -3007,9 +3006,8 @@ class OrchestratorService:
             raise self._Cancelled()
 
         # Post-step workdoc sync (before other bookkeeping that may upsert task).
-        sync_attempt = int(workdoc_attempt) if workdoc_attempt is not None else attempt
         try:
-            self._sync_workdoc_with_diagnostics(task, step, step_project_dir, result.summary, attempt=sync_attempt)
+            self._sync_workdoc_with_diagnostics(task, step, step_project_dir, result.summary, attempt=attempt)
         except ValueError as exc:
             self._block_for_invalid_workdoc(task, run, step=step, detail=str(exc))
             return False
