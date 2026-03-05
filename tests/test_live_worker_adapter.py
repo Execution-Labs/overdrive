@@ -11,6 +11,8 @@ import pytest
 from agent_orchestrator.runtime.domain.models import RunRecord, Task
 from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
     LiveWorkerAdapter,
+    _detect_required_verify_commands,
+    _inject_required_verify_commands,
     _extract_json,
     _extract_json_value,
     _normalize_planning_text,
@@ -1595,6 +1597,61 @@ def test_verification_prompt_includes_required_prisma_gates_when_requested() -> 
     assert "./node_modules/.bin/prisma migrate deploy" in prompt
 
 
+def test_verification_prompt_includes_required_verify_gates_when_requested() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task,
+        step="verify",
+        attempt=1,
+        project_languages=["typescript"],
+        project_commands={"typescript": {"test": "npm test"}},
+        required_verify_commands=["npm --prefix frontend run build", "npm --prefix frontend run typecheck"],
+    )
+    assert "## Required verification gates" in prompt
+    assert "npm --prefix frontend run build" in prompt
+    assert "npm --prefix frontend run typecheck" in prompt
+
+
+def test_detect_required_verify_commands_uses_workspace_scripts(tmp_path: Path) -> None:
+    frontend = tmp_path / "frontend"
+    (frontend / "src").mkdir(parents=True)
+    (frontend / "package.json").write_text(
+        '{"name":"frontend","scripts":{"build":"vite build","typecheck":"tsc --noEmit"}}',
+        encoding="utf-8",
+    )
+    commands = _detect_required_verify_commands(
+        tmp_path,
+        changed_paths=["frontend/src/use-bar-queries.ts"],
+    )
+    assert commands == [
+        "npm --prefix frontend run build",
+        "npm --prefix frontend run typecheck",
+    ]
+
+
+def test_detect_required_verify_commands_empty_without_scripts(tmp_path: Path) -> None:
+    frontend = tmp_path / "frontend"
+    (frontend / "src").mkdir(parents=True)
+    (frontend / "package.json").write_text('{"name":"frontend"}', encoding="utf-8")
+    commands = _detect_required_verify_commands(
+        tmp_path,
+        changed_paths=["frontend/src/use-bar-queries.ts"],
+    )
+    assert commands == []
+
+
+def test_inject_required_verify_commands_appends_to_typecheck() -> None:
+    merged = _inject_required_verify_commands(
+        {"typescript": {"typecheck": "npx tsc --noEmit"}},
+        ["typescript"],
+        ["npm --prefix frontend run build"],
+    )
+    assert (
+        merged["typescript"]["typecheck"]
+        == "npx tsc --noEmit && npm --prefix frontend run build"
+    )
+
+
 def test_implementation_prompt_includes_project_commands() -> None:
     task = _make_task()
     prompt = build_step_prompt(
@@ -1833,6 +1890,46 @@ def test_run_step_verify_with_prisma_schema_injects_prisma_command_hints(
     assert result.status == "ok"
     assert "## Required Prisma verification gates" in captured_prompt["text"]
     assert "./node_modules/.bin/prisma migrate deploy" in captured_prompt["text"]
+
+
+def test_run_step_verify_includes_required_workspace_gates(
+    container: Container,
+    adapter: LiveWorkerAdapter,
+) -> None:
+    (container.project_dir / "tsconfig.json").write_text("{}", encoding="utf-8")
+    captured_prompt: dict[str, str] = {}
+    run_result = _make_run_result(exit_code=0)
+
+    def _capture_run_worker(**kwargs):
+        captured_prompt["text"] = kwargs["prompt"]
+        return run_result
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter._detect_required_verify_commands",
+            return_value=["npm --prefix frontend run build"],
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            side_effect=_capture_run_worker,
+        ),
+    ):
+        result = adapter.run_step(task=_make_task(), step="verify", attempt=1)
+
+    assert result.status == "ok"
+    assert "## Required verification gates" in captured_prompt["text"]
+    assert "npm --prefix frontend run build" in captured_prompt["text"]
 
 
 def test_run_step_reads_prompt_overrides_from_config(container: Container, adapter: LiveWorkerAdapter) -> None:

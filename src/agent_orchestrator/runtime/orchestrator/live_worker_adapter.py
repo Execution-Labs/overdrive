@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from ...pipelines.registry import PipelineRegistry
 from ...prompts import load as load_prompt
@@ -166,6 +166,22 @@ _DEFAULT_PROJECT_COMMANDS: dict[str, dict[str, str]] = {
         "lint": "cargo clippy -- -D warnings 2>/dev/null || true",
     },
 }
+
+_JS_TS_SOURCE_EXTENSIONS = {
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".vue",
+    ".svelte",
+}
+_FRONTEND_HINT_PREFIXES = (
+    "frontend/",
+    "web/",
+    "ui/",
+)
 
 
 def _instruction_prompt_name(step: str, task_type: str) -> str:
@@ -598,6 +614,162 @@ def _frontend_gate_root(project_dir: Path) -> Path | None:
     return None
 
 
+def _collect_changed_paths(project_dir: Path) -> list[str]:
+    """Return relative changed paths from git status (tracked + untracked)."""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    changed: list[str] = []
+    for raw in (result.stdout or "").splitlines():
+        line = str(raw).rstrip()
+        if not line:
+            continue
+        payload = line[3:] if len(line) >= 4 else line
+        payload = payload.strip()
+        if not payload:
+            continue
+        if " -> " in payload:
+            payload = payload.split(" -> ", 1)[1].strip()
+        changed.append(payload.strip('"'))
+    return changed
+
+
+def _load_package_scripts(package_json_path: Path) -> dict[str, str]:
+    """Load npm scripts from a package.json file."""
+    try:
+        payload = json.loads(package_json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    scripts = payload.get("scripts")
+    if not isinstance(scripts, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in scripts.items():
+        if isinstance(key, str) and isinstance(value, str) and value.strip():
+            out[key.strip()] = value.strip()
+    return out
+
+
+def _path_suggests_js_ts_workspace(relative_path: str) -> bool:
+    """Return True when a changed path suggests JS/TS workspace verification."""
+    normalized = str(relative_path or "").strip().replace("\\", "/")
+    if not normalized:
+        return False
+    if normalized.startswith(_FRONTEND_HINT_PREFIXES):
+        return True
+    return Path(normalized).suffix.lower() in _JS_TS_SOURCE_EXTENSIONS
+
+
+def _nearest_workspace_with_package(project_dir: Path, relative_path: str) -> Path | None:
+    """Return closest ancestor workspace containing package.json for a changed path."""
+    rel = Path(str(relative_path).replace("\\", "/"))
+    search = rel if rel.suffix == "" else rel.parent
+    while True:
+        candidate = (project_dir / search / "package.json").resolve()
+        if candidate.exists():
+            return candidate.parent
+        if search == Path("."):
+            break
+        search = search.parent
+    return None
+
+
+def _npm_run_script_command(*, workspace: Path, project_dir: Path, script: str) -> str:
+    """Render a stable npm run command for a workspace script."""
+    if workspace.resolve() == project_dir.resolve():
+        return f"npm run {script}"
+    rel = workspace.resolve().relative_to(project_dir.resolve())
+    return f"npm --prefix {str(rel)} run {script}"
+
+
+def _detect_required_verify_commands(
+    project_dir: Path,
+    *,
+    changed_paths: Sequence[str] | None = None,
+) -> list[str]:
+    """Detect required JS/TS workspace verification commands for changed files."""
+    paths = list(changed_paths or _collect_changed_paths(project_dir))
+    if not paths:
+        return []
+    workspaces: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        normalized = str(path or "").strip()
+        if not _path_suggests_js_ts_workspace(normalized):
+            continue
+        workspace = _nearest_workspace_with_package(project_dir, normalized)
+        if workspace is None:
+            continue
+        resolved = workspace.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        workspaces.append(resolved)
+    required: list[str] = []
+    for workspace in workspaces:
+        scripts = _load_package_scripts(workspace / "package.json")
+        for script in ("build", "typecheck"):
+            if script in scripts:
+                required.append(_npm_run_script_command(workspace=workspace, project_dir=project_dir, script=script))
+    deduped: list[str] = []
+    seen_cmds: set[str] = set()
+    for cmd in required:
+        if cmd in seen_cmds:
+            continue
+        seen_cmds.add(cmd)
+        deduped.append(cmd)
+    return deduped
+
+
+def _inject_required_verify_commands(
+    project_commands: dict[str, dict[str, str]] | None,
+    project_languages: list[str] | None,
+    required_commands: Sequence[str],
+) -> dict[str, dict[str, str]]:
+    """Merge required verify commands into the command hint map."""
+    merged: dict[str, dict[str, str]] = {
+        lang: dict(cmds)
+        for lang, cmds in (project_commands or {}).items()
+        if isinstance(cmds, dict)
+    }
+    normalized_required = [str(cmd).strip() for cmd in required_commands if str(cmd).strip()]
+    if not normalized_required:
+        return merged
+    preferred_lang = (
+        "typescript"
+        if (project_languages and "typescript" in project_languages)
+        else (
+            "javascript"
+            if (project_languages and "javascript" in project_languages)
+            else ("typescript" if "typescript" in merged else ("javascript" if "javascript" in merged else "typescript"))
+        )
+    )
+    lang_cmds = merged.get(preferred_lang, {})
+    if not isinstance(lang_cmds, dict):
+        lang_cmds = {}
+    existing_typecheck = str(lang_cmds.get("typecheck") or "").strip()
+    chain: list[str] = []
+    if existing_typecheck:
+        chain.append(existing_typecheck)
+    for cmd in normalized_required:
+        if existing_typecheck and cmd in existing_typecheck:
+            continue
+        chain.append(cmd)
+    lang_cmds["typecheck"] = " && ".join(chain) if chain else existing_typecheck
+    merged[preferred_lang] = lang_cmds
+    return merged
+
+
 def _has_prisma_schema(project_dir: Path) -> bool:
     """Return whether this task worktree contains a Prisma schema."""
     return (project_dir / "prisma" / "schema.prisma").exists()
@@ -787,6 +959,7 @@ def build_step_prompt(
     project_languages: list[str] | None = None,
     project_commands: dict[str, dict[str, str]] | None = None,
     require_prisma_verify: bool = False,
+    required_verify_commands: list[str] | None = None,
     prompt_overrides: dict[str, str] | None = None,
     prompt_injections: dict[str, str] | None = None,
 ) -> str:
@@ -802,6 +975,10 @@ def build_step_prompt(
             to populate language-specific guidance in the prompt.
         project_commands (dict[str, dict[str, str]] | None): Optional
             language-to-command mapping surfaced to workers as execution hints.
+        require_prisma_verify (bool): Whether to include mandatory Prisma
+            verification gates in the rendered prompt.
+        required_verify_commands (list[str] | None): Deterministic extra verify
+            gates inferred from changed JS/TS workspace files.
         prompt_overrides (dict[str, str] | None): Optional per-step prompt text
             overrides loaded from project settings.
         prompt_injections (dict[str, str] | None): Optional per-step prompt text
@@ -1205,6 +1382,13 @@ def build_step_prompt(
         parts.append("  - `./node_modules/.bin/prisma validate`")
         parts.append("  - retry `./node_modules/.bin/prisma migrate deploy` a few times if connection is still starting")
         parts.append("  - `./node_modules/.bin/prisma migrate deploy`")
+    if category == "verification" and required_verify_commands:
+        parts.append("")
+        parts.append("## Required verification gates")
+        parts.append("- The following checks are required for the changed JS/TS workspace files in this task.")
+        parts.append("- Run every command and report exit codes/evidence; do not skip them.")
+        for command in required_verify_commands:
+            parts.append(f"- `{command}`")
 
     # Inject dependency policy instruction
     dep_policy = getattr(task, "dependency_policy", "prudent") or "prudent"
@@ -1534,6 +1718,15 @@ class LiveWorkerAdapter:
         # Resolve relative executable paths against the *original* project dir
         # so workers in git worktrees can find binaries in gitignored dirs.
         require_prisma_verify = _step_category(step) == "verification" and _has_prisma_schema(project_dir)
+        required_verify_commands: list[str] = []
+        if _step_category(step) == "verification":
+            required_verify_commands = _detect_required_verify_commands(project_dir)
+            if required_verify_commands:
+                project_commands = _inject_required_verify_commands(
+                    project_commands,
+                    langs or None,
+                    required_verify_commands,
+                )
         if require_prisma_verify:
             project_commands = _inject_prisma_verify_command_hints(project_commands, langs or None)
         if project_commands:
@@ -1545,6 +1738,7 @@ class LiveWorkerAdapter:
             project_languages=langs or None,
             project_commands=project_commands,
             require_prisma_verify=require_prisma_verify,
+            required_verify_commands=required_verify_commands or None,
             prompt_overrides=prompt_overrides or None,
             prompt_injections=prompt_injections or None,
         )
