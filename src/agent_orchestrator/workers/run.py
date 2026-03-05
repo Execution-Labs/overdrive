@@ -49,13 +49,15 @@ def _build_codex_command(spec: WorkerProviderSpec) -> str:
     has_model_flag = "--model" in parts
     has_reasoning_flag = "--reasoning-effort" in parts
 
-    # Ensure full-auto mode so the worker can write files without approval
-    # prompts (there is no TTY to answer them).  Skip if the user already
-    # specified a sandbox or approval flag in their custom command.
+    # Ensure non-interactive execution mode when the command does not already
+    # specify a sandbox/approval mode.
     has_sandbox_flag = any(f in parts for f in ("--full-auto", "--sandbox", "--danger-full-access", "--yolo", "--dangerously-bypass-approvals-and-sandbox"))
     has_approval_flag = any(f in parts for f in ("--ask-for-approval", "-a"))
     if not has_sandbox_flag and not has_approval_flag:
-        parts.insert(1, "--full-auto")
+        if spec.execution_mode == "host_access":
+            parts.insert(1, "--danger-full-access")
+        else:
+            parts.insert(1, "--full-auto")
 
     if spec.model and not has_model_flag:
         parts.extend(["--model", str(spec.model)])
@@ -75,7 +77,7 @@ def _build_claude_command(spec: WorkerProviderSpec) -> str:
         parts = ["claude", "-p"]
     if "-p" not in parts and "--print" not in parts:
         parts.append("-p")
-    if "--dangerously-skip-permissions" not in parts:
+    if spec.execution_mode == "host_access" and "--dangerously-skip-permissions" not in parts:
         parts.append("--dangerously-skip-permissions")
 
     has_model_flag = "--model" in parts

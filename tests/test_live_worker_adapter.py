@@ -19,6 +19,10 @@ from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
     build_step_prompt,
     detect_project_languages,
 )
+from agent_orchestrator.runtime.orchestrator.environment_preflight import (
+    EnvironmentIssue,
+    EnvironmentPreflightResult,
+)
 from agent_orchestrator.runtime.storage.container import Container
 from agent_orchestrator.workers.config import WorkerProviderSpec
 from agent_orchestrator.workers.run import WorkerRunResult
@@ -123,6 +127,10 @@ def test_codex_success_maps_to_ok(adapter: LiveWorkerAdapter) -> None:
         patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=()),
         ),
         patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
@@ -234,6 +242,97 @@ def test_claude_uses_shared_prompt_construction(adapter: LiveWorkerAdapter) -> N
 
     assert result.status == "ok"
     assert "project_languages" in build_prompt_mock.call_args.kwargs
+
+
+def test_environment_preflight_failure_short_circuits_before_worker_run(adapter: LiveWorkerAdapter) -> None:
+    task = _make_task()
+    failed_preflight = EnvironmentPreflightResult(
+        ok=False,
+        required_capabilities=("docker",),
+        issues=(
+            EnvironmentIssue(
+                code="docker_unavailable",
+                summary="Docker daemon/socket is unavailable in the worker execution environment.",
+                capability="docker",
+                recoverable=False,
+            ),
+        ),
+    )
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=failed_preflight,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+        ) as run_worker_mock,
+    ):
+        result = adapter.run_step(task=task, step="implement", attempt=1)
+
+    assert result.status == "error"
+    assert "environment preflight failed" in str(result.summary or "").lower()
+    run_worker_mock.assert_not_called()
+
+
+def test_capability_fallback_selects_provider_with_required_capabilities(
+    adapter: LiveWorkerAdapter,
+) -> None:
+    run_result = _make_run_result(exit_code=0)
+    runtime = SimpleNamespace(
+        default_model="",
+        providers={
+            "codex": _CODEX_SPEC,
+            "claude-capable": WorkerProviderSpec(
+                name="claude-capable",
+                type="claude",
+                command="claude -p",
+                capabilities=("docker",),
+            ),
+        },
+    )
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
+            return_value=runtime,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.required_capabilities_for_step",
+            return_value=("docker",),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=(), required_capabilities=("docker",)),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ) as run_worker_mock,
+    ):
+        result = adapter.run_step(task=_make_task(), step="implement", attempt=1)
+
+    assert result.status == "ok"
+    assert run_worker_mock.call_args.kwargs["spec"].name == "claude-capable"
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +549,10 @@ def test_codex_failure_maps_to_error(adapter: LiveWorkerAdapter) -> None:
             return_value=(True, "ok"),
         ),
         patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=()),
+        ),
+        patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
@@ -479,6 +582,10 @@ def test_codex_timeout_maps_to_error(adapter: LiveWorkerAdapter) -> None:
         patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=()),
         ),
         patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
@@ -1280,6 +1387,17 @@ def test_verify_environment_note_normalizes_prisma_missing_local_cli(
     adapter: LiveWorkerAdapter,
     container: Container,
 ) -> None:
+    cfg = container.config.load()
+    workers_cfg = dict(cfg.get("workers") or {})
+    workers_cfg["environment"] = {
+        "auto_prepare": False,
+        "max_auto_retries": 3,
+        "capability_fallback": True,
+        "required_capabilities_by_step": {},
+    }
+    cfg["workers"] = workers_cfg
+    container.config.save(cfg)
+
     prisma_dir = container.project_dir / "prisma"
     prisma_dir.mkdir(parents=True, exist_ok=True)
     (prisma_dir / "schema.prisma").write_text('generator client { provider = "prisma-client-js" }', encoding="utf-8")
@@ -1307,6 +1425,10 @@ def test_verify_environment_note_normalizes_prisma_missing_local_cli(
         patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=()),
         ),
         patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
@@ -1837,6 +1959,10 @@ def test_run_step_reads_project_commands_from_config(container: Container, adapt
             return_value=(True, "ok"),
         ),
         patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=()),
+        ),
+        patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             side_effect=_capture_run_worker,
         ),
@@ -1879,6 +2005,10 @@ def test_run_step_verify_with_prisma_schema_injects_prisma_command_hints(
         patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=()),
         ),
         patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",

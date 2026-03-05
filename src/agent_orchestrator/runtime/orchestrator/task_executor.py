@@ -257,6 +257,7 @@ class TaskExecutor:
         try:
             if not isinstance(task.metadata, dict):
                 task.metadata = {}
+            task.metadata.pop("environment_auto_requeue_pending", None)
             task_context_raw = task.metadata.get("task_context")
             task_context = task_context_raw if isinstance(task_context_raw, dict) else {}
             expected_on_retry = bool(task_context.get("expected_on_retry"))
@@ -440,6 +441,11 @@ class TaskExecutor:
                 if consume_human_guidance_for_step(task, step=step_name, run_id=run.id):
                     svc.container.tasks.upsert(task)
 
+            def _consume_environment_auto_requeue() -> bool:
+                if not isinstance(task.metadata, dict):
+                    return False
+                return bool(task.metadata.get("environment_auto_requeue_pending"))
+
             mode = normalize_hitl_mode(getattr(task, "hitl_mode", "autopilot"))
             # Retry flows resumed from implement/review/commit should not require
             # re-approval of the original plan gate.
@@ -490,6 +496,8 @@ class TaskExecutor:
                     resume_implement_fix = False  # consume the flag
                 elif not svc._run_non_review_step(task, run, step, attempt=1):
                     verify_failed = step in _VERIFY_STEPS
+                    if _consume_environment_auto_requeue():
+                        return
                     if not verify_failed:
                         return
                 if verify_failed:
@@ -524,6 +532,8 @@ class TaskExecutor:
                             _consume_human_guidance(step)
                             fixed = True
                             break
+                        if _consume_environment_auto_requeue():
+                            return
                     if fixed:
                         last_phase1_step = step
                         continue
@@ -627,6 +637,13 @@ class TaskExecutor:
                         review_step_log["status"] = review_result.status or "error"
                         run.steps.append(review_step_log)
                         svc.container.runs.upsert(run)
+                        if svc._handle_recoverable_environment_failure(
+                            task,
+                            run,
+                            step="review",
+                            summary=review_result.summary,
+                        ):
+                            return
                         task.status = "blocked"
                         task.error = review_result.summary or "Review step failed"
                         task.pending_gate = None
@@ -666,6 +683,7 @@ class TaskExecutor:
                         entity_id=task.id,
                         payload={"attempt": review_attempt, "decision": cycle.decision, "open_counts": open_counts},
                     )
+                    svc._clear_environment_recovery_tracking(task, step="review")
                     _consume_human_guidance("review")
 
                     if cycle.decision == "approved":
@@ -692,6 +710,8 @@ class TaskExecutor:
                         task.metadata["pipeline_phase"] = "review"
                         svc.container.tasks.upsert(task)
                         if not svc._run_non_review_step(task, run, post_fix_validation_step, attempt=review_attempt):
+                            if _consume_environment_auto_requeue():
+                                return
                             if svc._consume_verify_non_actionable_flag(task):
                                 task.current_step = "review"
                                 task.metadata["pipeline_phase"] = "review"
@@ -725,6 +745,8 @@ class TaskExecutor:
                                     _consume_human_guidance(post_fix_validation_step)
                                     validation_fixed = True
                                     break
+                                if _consume_environment_auto_requeue():
+                                    return
                             if not validation_fixed:
                                 task.status = "blocked"
                                 task.error = task.error or f"Could not fix {post_fix_validation_step} after {max_verify_fix_attempts} attempts"
@@ -982,7 +1004,9 @@ class TaskExecutor:
             metadata_changed = False
             exception_in_flight = sys.exc_info()[1] is not None
             if worktree_dir and worktree_dir.exists():
-                keep_active_context = task.status in {"in_progress", "in_review"}
+                keep_active_context = task.status in {"in_progress", "in_review"} or (
+                    task.status == "queued" and bool(task.metadata.get("environment_auto_requeue_pending"))
+                )
                 if task.status == "blocked" or exception_in_flight:
                     task.metadata["worktree_dir"] = str(worktree_dir)
                     svc._record_task_context(task, worktree_dir=worktree_dir, task_branch=f"task-{task.id}")

@@ -672,6 +672,7 @@ _Pending: will be populated by the report step._
             },
             "review": {
                 "analyze": ("## Review Analysis", "analyze"),
+                "implement_fix": ("## Review Findings", "review"),
             },
             "bug_fix": {
                 "diagnose": ("## Diagnosis", "diagnose"),

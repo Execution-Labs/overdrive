@@ -591,6 +591,7 @@ describe('App action coverage', () => {
     fireEvent.change(screen.getByLabelText(/Configure provider/i), { target: { value: 'codex' } })
     fireEvent.change(screen.getByLabelText(/Codex command/i), { target: { value: 'codex exec' } })
     fireEvent.change(screen.getByLabelText(/Codex model/i), { target: { value: 'gpt-5-codex' } })
+    fireEvent.change(screen.getByLabelText(/Codex execution mode/i), { target: { value: 'host_access' } })
     fireEvent.change(screen.getByLabelText(/Codex effort/i), { target: { value: 'high' } })
     fireEvent.change(screen.getByLabelText(/Configure provider/i), { target: { value: 'ollama' } })
     fireEvent.change(screen.getByLabelText(/Ollama endpoint/i), { target: { value: 'http://localhost:11434' } })
@@ -598,6 +599,7 @@ describe('App action coverage', () => {
     fireEvent.change(screen.getByLabelText(/Configure provider/i), { target: { value: 'claude' } })
     fireEvent.change(screen.getByLabelText(/Claude command/i), { target: { value: 'claude -p' } })
     fireEvent.change(screen.getByLabelText(/Claude model/i), { target: { value: 'sonnet' } })
+    fireEvent.change(screen.getByLabelText(/Claude execution mode/i), { target: { value: 'sandboxed' } })
     fireEvent.change(screen.getByLabelText(/Claude effort/i), { target: { value: 'high' } })
     fireEvent.change(
       screen.getByLabelText(/Project commands by language/i),
@@ -630,6 +632,7 @@ describe('App action coverage', () => {
         type: 'codex',
         command: 'codex exec',
         model: 'gpt-5-codex',
+        execution_mode: 'host_access',
         reasoning_effort: 'high',
       })
       expect(body.workers.providers.ollama).toEqual({
@@ -641,6 +644,7 @@ describe('App action coverage', () => {
         type: 'claude',
         command: 'claude -p',
         model: 'sonnet',
+        execution_mode: 'sandboxed',
         reasoning_effort: 'high',
       })
       expect(body.project.commands.python.test).toBe('pytest -n auto')

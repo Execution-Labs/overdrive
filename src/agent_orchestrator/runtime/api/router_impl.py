@@ -227,10 +227,20 @@ class WorkerProviderSettingsRequest(BaseModel):
     type: str = "codex"
     command: Optional[str] = None
     reasoning_effort: Optional[str] = None
+    execution_mode: Optional[Literal["sandboxed", "host_access"]] = None
+    capabilities: Optional[list[str]] = None
     endpoint: Optional[str] = None
     model: Optional[str] = None
     temperature: Optional[float] = None
     num_ctx: Optional[int] = None
+
+
+class WorkerEnvironmentSettingsRequest(BaseModel):
+    """Patch payload for worker environment preflight/remediation policy."""
+    auto_prepare: bool = True
+    max_auto_retries: int = Field(3, ge=0, le=20)
+    capability_fallback: bool = True
+    required_capabilities_by_step: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class WorkersSettingsRequest(BaseModel):
@@ -241,6 +251,7 @@ class WorkersSettingsRequest(BaseModel):
     heartbeat_grace_seconds: Optional[int] = Field(None, ge=1, le=7200)
     routing: dict[str, str] = Field(default_factory=dict)
     providers: dict[str, WorkerProviderSettingsRequest] = Field(default_factory=dict)
+    environment: Optional[WorkerEnvironmentSettingsRequest] = None
 
 
 class QualityGateSettingsRequest(BaseModel):
@@ -895,6 +906,22 @@ def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
             default_command = "codex exec" if provider_type == "codex" else "claude -p"
             command = str(raw_item.get("command") or default_command).strip() or default_command
             provider: dict[str, Any] = {"type": provider_type, "command": command}
+            raw_execution_mode = str(raw_item.get("execution_mode") or "").strip().lower()
+            if raw_execution_mode in {"sandboxed", "host_access"}:
+                provider["execution_mode"] = raw_execution_mode
+            elif provider_type == "claude":
+                provider["execution_mode"] = "host_access"
+            else:
+                provider["execution_mode"] = "sandboxed"
+            raw_capabilities = raw_item.get("capabilities")
+            if isinstance(raw_capabilities, list):
+                normalized_caps: list[str] = []
+                for cap in raw_capabilities:
+                    text = str(cap or "").strip().lower()
+                    if text and text not in normalized_caps:
+                        normalized_caps.append(text)
+                if normalized_caps:
+                    provider["capabilities"] = normalized_caps
             model = str(raw_item.get("model") or "").strip()
             if model:
                 provider["model"] = model
@@ -923,17 +950,60 @@ def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
     codex_command = "codex exec"
     codex_model = None
     codex_reasoning = None
+    codex_execution_mode = "sandboxed"
     if isinstance(codex, dict):
         codex_command = str(codex.get("command") or "codex exec").strip() or "codex exec"
         codex_model = str(codex.get("model") or "").strip() or None
         raw_reasoning = str(codex.get("reasoning_effort") or "").strip().lower()
         codex_reasoning = raw_reasoning if raw_reasoning in {"low", "medium", "high"} else None
-    providers["codex"] = {"type": "codex", "command": codex_command}
+        raw_execution_mode = str(codex.get("execution_mode") or "").strip().lower()
+        if raw_execution_mode in {"sandboxed", "host_access"}:
+            codex_execution_mode = raw_execution_mode
+    providers["codex"] = {"type": "codex", "command": codex_command, "execution_mode": codex_execution_mode}
+    if isinstance(codex, dict):
+        raw_caps = codex.get("capabilities")
+        if isinstance(raw_caps, list):
+            codex_caps: list[str] = []
+            for cap in raw_caps:
+                text = str(cap or "").strip().lower()
+                if text and text not in codex_caps:
+                    codex_caps.append(text)
+            if codex_caps:
+                providers["codex"]["capabilities"] = codex_caps
     if codex_model:
         providers["codex"]["model"] = codex_model
     if codex_reasoning:
         providers["codex"]["reasoning_effort"] = codex_reasoning
     return providers
+
+
+def _normalize_workers_environment(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    auto_prepare = _coerce_bool(raw.get("auto_prepare"), True)
+    max_auto_retries = _coerce_int(raw.get("max_auto_retries"), 3, minimum=0, maximum=20)
+    capability_fallback = _coerce_bool(raw.get("capability_fallback"), True)
+
+    normalized_required: dict[str, list[str]] = {}
+    raw_required = raw.get("required_capabilities_by_step")
+    if isinstance(raw_required, dict):
+        for raw_step, raw_caps in raw_required.items():
+            step = str(raw_step or "").strip()
+            if not step or not isinstance(raw_caps, list):
+                continue
+            caps: list[str] = []
+            for item in raw_caps:
+                cap = str(item or "").strip().lower()
+                if cap and cap not in caps:
+                    caps.append(cap)
+            if caps:
+                normalized_required[step] = caps
+
+    return {
+        "auto_prepare": auto_prepare,
+        "max_auto_retries": max_auto_retries,
+        "capability_fallback": capability_fallback,
+        "required_capabilities_by_step": normalized_required,
+    }
 
 
 def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -944,6 +1014,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     task_generation = dict(defaults.get("task_generation") or {})
     workers_cfg = dict(cfg.get("workers") or {})
     workers_providers = _normalize_workers_providers(workers_cfg.get("providers"))
+    workers_environment = _normalize_workers_environment(workers_cfg.get("environment"))
     workers_default = str(workers_cfg.get("default") or "codex").strip() or "codex"
     workers_default_model = str(workers_cfg.get("default_model") or "").strip()
     workers_heartbeat_seconds = _coerce_int(workers_cfg.get("heartbeat_seconds"), 60, minimum=1, maximum=3600)
@@ -1044,6 +1115,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
             "heartbeat_grace_seconds": workers_heartbeat_grace_seconds,
             "routing": _normalize_str_map(workers_cfg.get("routing")),
             "providers": workers_providers,
+            "environment": workers_environment,
         },
         "project": {
             "commands": dict(project_cfg.get("commands") or {}),

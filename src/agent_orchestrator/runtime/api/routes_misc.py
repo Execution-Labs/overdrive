@@ -564,6 +564,8 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
                 workers_cfg["routing"] = dict(incoming_workers.get("routing") or {})
             if "providers" in incoming_workers:
                 workers_cfg["providers"] = dict(incoming_workers.get("providers") or {})
+            if "environment" in incoming_workers:
+                workers_cfg["environment"] = dict(incoming_workers.get("environment") or {})
 
             normalized_workers = _settings_payload({"workers": workers_cfg})["workers"]
             cfg["workers"] = normalized_workers

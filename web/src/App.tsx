@@ -263,6 +263,7 @@ type WorkerProviderSettings = {
   type: 'codex' | 'ollama' | 'claude'
   command?: string
   reasoning_effort?: 'low' | 'medium' | 'high'
+  execution_mode?: 'sandboxed' | 'host_access'
   endpoint?: string
   model?: string
   temperature?: number
@@ -556,7 +557,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
     default_model: '',
     routing: {},
     providers: {
-      codex: { type: 'codex', command: 'codex exec' },
+      codex: { type: 'codex', command: 'codex exec', execution_mode: 'sandboxed' },
     },
   },
   project: {
@@ -994,6 +995,12 @@ function parseWorkerProviders(input: string): Record<string, WorkerProviderSetti
       const defaultCommand = type === 'codex' ? 'codex exec' : 'claude -p'
       const command = String(record.command || defaultCommand).trim() || defaultCommand
       const provider: WorkerProviderSettings = { type, command }
+      const executionMode = String(record.execution_mode || '').trim().toLowerCase()
+      if (executionMode === 'sandboxed' || executionMode === 'host_access') {
+        provider.execution_mode = executionMode
+      } else {
+        provider.execution_mode = type === 'claude' ? 'host_access' : 'sandboxed'
+      }
       const model = String(record.model || '').trim()
       if (model) provider.model = model
       const reasoningEffort = String(record.reasoning_effort || '').trim().toLowerCase()
@@ -1064,6 +1071,12 @@ function normalizeWorkers(payload: Partial<SystemSettings['workers']> | null | u
         type,
         command: String(value.command || defaultCommand).trim() || defaultCommand,
       }
+      const executionMode = String(value.execution_mode || '').trim().toLowerCase()
+      if (executionMode === 'sandboxed' || executionMode === 'host_access') {
+        provider.execution_mode = executionMode
+      } else {
+        provider.execution_mode = type === 'claude' ? 'host_access' : 'sandboxed'
+      }
       const model = String(value.model || '').trim()
       if (model) provider.model = model
       const reasoningEffort = String(value.reasoning_effort || '').trim().toLowerCase()
@@ -1085,7 +1098,7 @@ function normalizeWorkers(payload: Partial<SystemSettings['workers']> | null | u
     providers[name] = provider
   }
   if (!providers.codex || providers.codex.type !== 'codex') {
-    providers.codex = { type: 'codex', command: 'codex exec' }
+    providers.codex = { type: 'codex', command: 'codex exec', execution_mode: 'sandboxed' }
   }
   const effectiveDefault = providers[defaultWorker] ? defaultWorker : 'codex'
   return {
@@ -2005,9 +2018,11 @@ export default function App() {
   const [settingsCodexCommand, setSettingsCodexCommand] = useState('codex exec')
   const [settingsCodexModel, setSettingsCodexModel] = useState('')
   const [settingsCodexEffort, setSettingsCodexEffort] = useState('')
+  const [settingsCodexExecutionMode, setSettingsCodexExecutionMode] = useState<'sandboxed' | 'host_access'>('sandboxed')
   const [settingsClaudeCommand, setSettingsClaudeCommand] = useState('claude -p')
   const [settingsClaudeModel, setSettingsClaudeModel] = useState('')
   const [settingsClaudeEffort, setSettingsClaudeEffort] = useState('')
+  const [settingsClaudeExecutionMode, setSettingsClaudeExecutionMode] = useState<'sandboxed' | 'host_access'>('host_access')
   const [settingsOllamaEndpoint, setSettingsOllamaEndpoint] = useState('http://localhost:11434')
   const [settingsOllamaModel, setSettingsOllamaModel] = useState('')
   const [settingsOllamaTemperature, setSettingsOllamaTemperature] = useState('')
@@ -2251,10 +2266,12 @@ export default function App() {
       setSettingsCodexCommand(String(provider.command || 'codex exec'))
       setSettingsCodexModel(String(provider.model || ''))
       setSettingsCodexEffort(String(provider.reasoning_effort || ''))
+      setSettingsCodexExecutionMode(provider.execution_mode === 'host_access' ? 'host_access' : 'sandboxed')
     } else {
       setSettingsCodexCommand('codex exec')
       setSettingsCodexModel('')
       setSettingsCodexEffort('')
+      setSettingsCodexExecutionMode('sandboxed')
     }
 
     const claudeEntry = entries.find(([name, provider]) => name === 'claude' && provider?.type === 'claude')
@@ -2264,10 +2281,12 @@ export default function App() {
       setSettingsClaudeCommand(String(provider.command || 'claude -p'))
       setSettingsClaudeModel(String(provider.model || ''))
       setSettingsClaudeEffort(String(provider.reasoning_effort || ''))
+      setSettingsClaudeExecutionMode(provider.execution_mode === 'sandboxed' ? 'sandboxed' : 'host_access')
     } else {
       setSettingsClaudeCommand('claude -p')
       setSettingsClaudeModel('')
       setSettingsClaudeEffort('')
+      setSettingsClaudeExecutionMode('host_access')
     }
 
     const ollamaEntry = entries.find(([name, provider]) => name === 'ollama' && provider?.type === 'ollama')
@@ -4239,6 +4258,7 @@ export default function App() {
     const codexProvider: WorkerProviderSettings = {
       type: 'codex',
       command: settingsCodexCommand.trim() || 'codex exec',
+      execution_mode: settingsCodexExecutionMode,
     }
     const codexModel = settingsCodexModel.trim()
     if (codexModel) codexProvider.model = codexModel
@@ -4251,6 +4271,7 @@ export default function App() {
     const claudeProvider: WorkerProviderSettings = {
       type: 'claude',
       command: settingsClaudeCommand.trim() || 'claude -p',
+      execution_mode: settingsClaudeExecutionMode,
     }
     const claudeModel = settingsClaudeModel.trim()
     if (claudeModel) claudeProvider.model = claudeModel
@@ -6525,6 +6546,15 @@ export default function App() {
                     onChange={(event) => setSettingsCodexModel(event.target.value)}
                     placeholder="gpt-5.3-codex"
                   />
+                  <label className="field-label" htmlFor="settings-codex-execution-mode">Codex execution mode</label>
+                  <select
+                    id="settings-codex-execution-mode"
+                    value={settingsCodexExecutionMode}
+                    onChange={(event) => setSettingsCodexExecutionMode(event.target.value as 'sandboxed' | 'host_access')}
+                  >
+                    <option value="sandboxed">sandboxed</option>
+                    <option value="host_access">host_access</option>
+                  </select>
                   <label className="field-label" htmlFor="settings-codex-effort">Codex effort (optional)</label>
                   <select
                     id="settings-codex-effort"
@@ -6588,6 +6618,15 @@ export default function App() {
                     onChange={(event) => setSettingsClaudeModel(event.target.value)}
                     placeholder="sonnet"
                   />
+                  <label className="field-label" htmlFor="settings-claude-execution-mode">Claude execution mode</label>
+                  <select
+                    id="settings-claude-execution-mode"
+                    value={settingsClaudeExecutionMode}
+                    onChange={(event) => setSettingsClaudeExecutionMode(event.target.value as 'sandboxed' | 'host_access')}
+                  >
+                    <option value="host_access">host_access</option>
+                    <option value="sandboxed">sandboxed</option>
+                  </select>
                   <label className="field-label" htmlFor="settings-claude-effort">Claude effort (optional)</label>
                   <select
                     id="settings-claude-effort"

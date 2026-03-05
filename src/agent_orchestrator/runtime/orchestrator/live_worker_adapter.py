@@ -20,6 +20,12 @@ from ...workers.run import WorkerRunResult, run_worker
 from ..domain.models import RunRecord, Task, now_iso
 from ..domain.scope_contract import normalize_scope_contract
 from ..storage.container import Container
+from .environment_preflight import (
+    provider_has_capabilities,
+    required_capabilities_for_step,
+    run_environment_preflight,
+    workers_environment_config,
+)
 from .human_guidance import render_human_guidance_prompt
 from .worker_adapter import StepResult
 
@@ -1664,11 +1670,45 @@ class LiveWorkerAdapter:
         return self._execute_step(task=task, step=step, attempt=attempt, persist=False)
 
     def _execute_step(self, *, task: Task, step: str, attempt: int, persist: bool) -> StepResult:
+        worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
+        project_dir = Path(worktree_path) if worktree_path else self._container.project_dir
+
         # 1. Resolve worker
         try:
             cfg = self._container.config.load()
             runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
             spec = resolve_worker_for_step(runtime, step)
+            env_cfg = workers_environment_config(cfg)
+            required_caps = required_capabilities_for_step(step=step, project_dir=project_dir, cfg=cfg)
+            if env_cfg.get("capability_fallback", True) and required_caps:
+                if not provider_has_capabilities(
+                    provider_capabilities=spec.capabilities,
+                    required_capabilities=required_caps,
+                ):
+                    fallback_name: str | None = None
+                    fallback_spec = None
+                    for candidate_name, candidate_spec in runtime.providers.items():
+                        if candidate_name == spec.name:
+                            continue
+                        if candidate_spec.type not in {"codex", "claude", "ollama"}:
+                            continue
+                        if provider_has_capabilities(
+                            provider_capabilities=candidate_spec.capabilities,
+                            required_capabilities=required_caps,
+                        ):
+                            fallback_name = candidate_name
+                            fallback_spec = candidate_spec
+                            break
+                    if fallback_spec is not None and fallback_name is not None:
+                        if isinstance(task.metadata, dict):
+                            task.metadata["environment_provider_fallback"] = {
+                                "step": step,
+                                "from_provider": spec.name,
+                                "to_provider": fallback_name,
+                                "required_capabilities": list(required_caps),
+                                "ts": now_iso(),
+                            }
+                        spec = fallback_spec
             if spec.type in {"codex", "claude"}:
                 task_model = str(getattr(task, "worker_model", "") or "").strip()
                 if not task_model and isinstance(task.metadata, dict):
@@ -1683,9 +1723,37 @@ class LiveWorkerAdapter:
         except (ValueError, KeyError) as exc:
             return StepResult(status="error", summary=f"Cannot resolve worker: {exc}")
 
-        # 2. Build prompt
-        worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
-        project_dir = Path(worktree_path) if worktree_path else self._container.project_dir
+        # 2. Environment preflight and best-effort auto-remediation.
+        preflight = run_environment_preflight(step=step, project_dir=project_dir, cfg=cfg)
+        if isinstance(task.metadata, dict):
+            if preflight.ok:
+                task.metadata.pop("environment_preflight", None)
+            else:
+                task.metadata["environment_preflight"] = {
+                    "step": step,
+                    "required_capabilities": list(preflight.required_capabilities),
+                    "attempted_remediation": preflight.attempted_remediation,
+                    "issues": [
+                        {
+                            "code": issue.code,
+                            "summary": issue.summary,
+                            "capability": issue.capability,
+                            "recoverable": issue.recoverable,
+                        }
+                        for issue in preflight.issues
+                    ],
+                    "remediation_log": preflight.remediation_log,
+                    "ts": now_iso(),
+                }
+        if not preflight.ok:
+            issue_text = "; ".join(issue.summary for issue in preflight.issues[:4])
+            remediation_text = f" Remediation: {preflight.remediation_log}" if preflight.remediation_log else ""
+            return StepResult(
+                status="error",
+                summary=f"Environment preflight failed: {issue_text}.{remediation_text}",
+            )
+
+        # 3. Build prompt
         langs = detect_project_languages(project_dir)
         raw_commands = (cfg.get("project") or {}).get("commands") or {}
         raw_prompt_overrides = (cfg.get("project") or {}).get("prompt_overrides")
@@ -1743,7 +1811,7 @@ class LiveWorkerAdapter:
             prompt_injections=prompt_injections or None,
         )
 
-        # 3. Execute
+        # 4. Execute
         run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
         progress_path = run_dir / "progress.json"
         stdout_path = run_dir / "stdout.log"
@@ -1794,12 +1862,12 @@ class LiveWorkerAdapter:
             if persist:
                 self._container.tasks.upsert(task)
 
-        # 4. Map result
+        # 5. Map result
         step_result = self._map_result(result, spec, step, task, project_dir)
         raw_json = _extract_json(result.response_text) if result.response_text else None
         raw_is_json = isinstance(raw_json, dict)
 
-        # 5. For verification steps that fell through to default "ok"
+        # 6. For verification steps that fell through to default "ok"
         #    (no structured summary), run a lightweight LLM formatter to parse the
         #    freeform output into pass/fail.
         category = _step_category(step)
@@ -1816,7 +1884,7 @@ class LiveWorkerAdapter:
                 task=task,
             )
 
-        # 6. For review steps that fell through with no findings,
+        # 7. For review steps that fell through with no findings,
         #    run a lightweight LLM formatter to extract structured findings.
         if (
             category == "review"
@@ -1831,7 +1899,7 @@ class LiveWorkerAdapter:
                 project_dir=project_dir,
             )
 
-        # 7. For task generation steps that fell through with no
+        # 8. For task generation steps that fell through with no
         #    generated_tasks, run a lightweight LLM formatter to extract them.
         if (
             category == "task_generation"

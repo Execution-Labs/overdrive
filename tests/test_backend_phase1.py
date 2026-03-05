@@ -963,6 +963,12 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert baseline.json()["workers"]["heartbeat_seconds"] == 60
         assert baseline.json()["workers"]["heartbeat_grace_seconds"] == 240
         assert baseline.json()["workers"]["providers"]["codex"]["type"] == "codex"
+        assert baseline.json()["workers"]["environment"] == {
+            "auto_prepare": True,
+            "max_auto_retries": 3,
+            "capability_fallback": True,
+            "required_capabilities_by_step": {},
+        }
 
         updated = client.patch(
             "/api/settings",
@@ -997,12 +1003,22 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
                     "heartbeat_seconds": 90,
                     "heartbeat_grace_seconds": 360,
                     "routing": {"plan": "codex", "implement": "ollama-dev"},
+                    "environment": {
+                        "auto_prepare": True,
+                        "max_auto_retries": 5,
+                        "capability_fallback": True,
+                        "required_capabilities_by_step": {
+                            "verify": ["docker", "network"],
+                        },
+                    },
                     "providers": {
                         "codex": {
                             "type": "codex",
                             "command": "codex exec",
                             "model": "gpt-5-codex",
                             "reasoning_effort": "high",
+                            "execution_mode": "host_access",
+                            "capabilities": ["docker", "network"],
                         },
                         "ollama-dev": {
                             "type": "ollama",
@@ -1016,6 +1032,7 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
                             "command": "claude -p",
                             "model": "sonnet",
                             "reasoning_effort": "medium",
+                            "execution_mode": "sandboxed",
                         },
                     },
                 },
@@ -1050,15 +1067,24 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert body["workers"]["heartbeat_grace_seconds"] == 360
         assert body["workers"]["routing"]["plan"] == "codex"
         assert body["workers"]["routing"]["implement"] == "ollama-dev"
+        assert body["workers"]["environment"] == {
+            "auto_prepare": True,
+            "max_auto_retries": 5,
+            "capability_fallback": True,
+            "required_capabilities_by_step": {"verify": ["docker", "network"]},
+        }
         assert body["workers"]["providers"]["codex"]["type"] == "codex"
         assert body["workers"]["providers"]["codex"]["model"] == "gpt-5-codex"
         assert body["workers"]["providers"]["codex"]["reasoning_effort"] == "high"
+        assert body["workers"]["providers"]["codex"]["execution_mode"] == "host_access"
+        assert body["workers"]["providers"]["codex"]["capabilities"] == ["docker", "network"]
         assert body["workers"]["providers"]["ollama-dev"]["type"] == "ollama"
         assert body["workers"]["providers"]["ollama-dev"]["model"] == "llama3.1:8b"
         assert body["workers"]["providers"]["claude"]["type"] == "claude"
         assert body["workers"]["providers"]["claude"]["command"] == "claude -p"
         assert body["workers"]["providers"]["claude"]["model"] == "sonnet"
         assert body["workers"]["providers"]["claude"]["reasoning_effort"] == "medium"
+        assert body["workers"]["providers"]["claude"]["execution_mode"] == "sandboxed"
 
         reloaded = client.get("/api/settings")
         assert reloaded.status_code == 200

@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatch
 from hashlib import sha256
 from pathlib import Path
@@ -34,6 +34,7 @@ from ..events.bus import EventBus
 from ..storage.container import Container
 from ...worker import WorkerCancelledError
 from .dependency_manager import DependencyManager
+from .environment_preflight import workers_environment_config
 from .integration_health import IntegrationHealthChecker
 from .reconciler import OrchestratorReconciler
 from .live_worker_adapter import _VERIFY_STEPS
@@ -96,6 +97,15 @@ class OrchestratorService:
         "cancel_cleanup_reason",
         _TASK_GENERATION_OVERRIDE_KEY,
     )
+    _ENVIRONMENT_FAILURE_SUMMARY_PATTERNS = (
+        re.compile(r"environment preflight failed", re.IGNORECASE),
+        re.compile(r"docker daemon/socket is unavailable", re.IGNORECASE),
+        re.compile(r"node dependencies are missing", re.IGNORECASE),
+        re.compile(r"prisma cli is missing", re.IGNORECASE),
+        re.compile(r"network dns probe failed", re.IGNORECASE),
+    )
+    _ENVIRONMENT_RETRY_BASE_SECONDS = 15
+    _ENVIRONMENT_RETRY_MAX_SECONDS = 300
 
     def __init__(
         self,
@@ -3091,6 +3101,13 @@ class OrchestratorService:
             if step in _VERIFY_STEPS and self._is_non_actionable_verify_failure(task, result.summary):
                 self._mark_verify_degraded(task, run, step=step, summary=result.summary)
                 return False
+            if self._handle_recoverable_environment_failure(
+                task,
+                run,
+                step=step,
+                summary=result.summary,
+            ):
+                return False
             task.status = "blocked"
             task.error = result.summary or f"{step} failed"
             task.pending_gate = None
@@ -3103,6 +3120,7 @@ class OrchestratorService:
             self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
             return False
 
+        self._clear_environment_recovery_tracking(task, step=step)
         task.metadata.pop("human_blocking_issues", None)
 
         # Store plan output as first-class immutable plan revisions.
@@ -3176,6 +3194,128 @@ class OrchestratorService:
 
         self._heartbeat_execution_lease(task)
         self.container.tasks.upsert(task)
+        return True
+
+    def _clear_environment_recovery_tracking(self, task: Task, *, step: str) -> None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        task.metadata.pop("environment_auto_requeue_pending", None)
+        task.metadata.pop("environment_next_retry_at", None)
+        task.metadata.pop("environment_recovery_backoff_seconds", None)
+        attempts_raw = task.metadata.get("environment_recovery_attempts_by_step")
+        if isinstance(attempts_raw, dict):
+            attempts = dict(attempts_raw)
+            attempts.pop(step, None)
+            if attempts:
+                task.metadata["environment_recovery_attempts_by_step"] = attempts
+            else:
+                task.metadata.pop("environment_recovery_attempts_by_step", None)
+
+    def _environment_recovery_settings(self) -> tuple[int, bool]:
+        cfg = self.container.config.load()
+        env_cfg = workers_environment_config(cfg)
+        max_auto_retries = int(env_cfg.get("max_auto_retries", 3) or 0)
+        if max_auto_retries < 0:
+            max_auto_retries = 0
+        auto_prepare = bool(env_cfg.get("auto_prepare", True))
+        return max_auto_retries, auto_prepare
+
+    def _is_environment_recoverable_failure(self, task: Task, summary: str | None) -> bool:
+        text = str(summary or "").strip()
+        if text and any(pattern.search(text) for pattern in self._ENVIRONMENT_FAILURE_SUMMARY_PATTERNS):
+            return True
+        if isinstance(task.metadata, dict):
+            preflight = task.metadata.get("environment_preflight")
+            if isinstance(preflight, dict):
+                issues = preflight.get("issues")
+                if isinstance(issues, list) and issues:
+                    return True
+        return False
+
+    def _handle_recoverable_environment_failure(
+        self,
+        task: Task,
+        run: RunRecord,
+        *,
+        step: str,
+        summary: str | None,
+    ) -> bool:
+        if not self._is_environment_recoverable_failure(task, summary):
+            return False
+
+        max_auto_retries, _ = self._environment_recovery_settings()
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        attempts_map_raw = task.metadata.get("environment_recovery_attempts_by_step")
+        attempts_map = dict(attempts_map_raw) if isinstance(attempts_map_raw, dict) else {}
+        current_attempts = int(attempts_map.get(step) or 0)
+
+        if current_attempts >= max_auto_retries:
+            self._clear_environment_recovery_tracking(task, step=step)
+            issues = task.metadata.get("environment_preflight")
+            issue_summary = str(summary or f"Environment recovery retry limit reached for step '{step}'.").strip()
+            details = str(issues) if isinstance(issues, dict) else ""
+            escalation = [{"summary": issue_summary, "details": details}] if issue_summary else []
+            self._block_for_human_issues(
+                task,
+                run,
+                step,
+                summary or f"Environment recovery retry limit reached for step '{step}'.",
+                escalation or [{"summary": f"Environment recovery retry limit reached for step '{step}'."}],
+            )
+            return True
+
+        attempts_map[step] = current_attempts + 1
+        attempt_number = attempts_map[step]
+        backoff_seconds = min(
+            self._ENVIRONMENT_RETRY_MAX_SECONDS,
+            self._ENVIRONMENT_RETRY_BASE_SECONDS * (2 ** max(0, attempt_number - 1)),
+        )
+        next_retry_at = (datetime.now(timezone.utc) + timedelta(seconds=backoff_seconds)).isoformat()
+        task.metadata["environment_recovery_attempts_by_step"] = attempts_map
+        task.metadata["environment_auto_requeue_pending"] = True
+        task.metadata["environment_next_retry_at"] = next_retry_at
+        task.metadata["environment_recovery_backoff_seconds"] = backoff_seconds
+        task.metadata["environment_last_auto_recovery"] = {
+            "step": step,
+            "attempt": attempt_number,
+            "max_auto_retries": max_auto_retries,
+            "backoff_seconds": backoff_seconds,
+            "next_retry_at": next_retry_at,
+            "summary": str(summary or "").strip(),
+            "ts": now_iso(),
+        }
+        task.pending_gate = None
+        task.current_step = step
+        task.error = str(summary or f"Environment issue detected during {step}. Auto-requeue scheduled.")
+        task.status = "queued"
+        task.current_agent_id = None
+        self.container.tasks.upsert(task)
+
+        run.status = "error"
+        run.finished_at = now_iso()
+        run.summary = f"Auto-requeue: recoverable environment issue during {step}"
+        self.container.runs.upsert(run)
+
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.auto_recovering",
+            entity_id=task.id,
+            payload={
+                "step": step,
+                "attempt": attempt_number,
+                "max_auto_retries": max_auto_retries,
+                "backoff_seconds": backoff_seconds,
+                "next_retry_at": next_retry_at,
+                "error": task.error,
+            },
+        )
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.queued",
+            entity_id=task.id,
+            payload={"reason": "environment_auto_recovery", "step": step},
+        )
         return True
 
     def _create_child_tasks(

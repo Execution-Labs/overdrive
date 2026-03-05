@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import uuid
+from datetime import datetime, timezone
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Generic, List, Optional, TypeVar
@@ -39,6 +40,19 @@ T = TypeVar("T")
 
 def _priority_rank(priority: str) -> int:
     return {"P0": 0, "P1": 1, "P2": 2, "P3": 3}.get(priority, 99)
+
+
+def _is_retry_backoff_elapsed(task: Task) -> bool:
+    if task.status != "queued" or not isinstance(task.metadata, dict):
+        return True
+    raw_not_before = str(task.metadata.get("environment_next_retry_at") or "").strip()
+    if not raw_not_before:
+        return True
+    try:
+        not_before = datetime.fromisoformat(raw_not_before.replace("Z", "+00:00"))
+    except Exception:
+        return True
+    return datetime.now(timezone.utc) >= not_before
 
 
 class _YamlCollectionRepo(Generic[T]):
@@ -218,6 +232,8 @@ class FileTaskRepository(TaskRepository):
                     if task.status not in {"queued", "in_progress"}:
                         return False
                     if task.status == "queued" and task.pending_gate:
+                        return False
+                    if task.status == "queued" and not _is_retry_backoff_elapsed(task):
                         return False
                     if task.status == "in_progress" and not _resume_requested(task):
                         return False
