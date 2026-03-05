@@ -2997,6 +2997,7 @@ class OrchestratorService:
         if step in _VERIFY_STEPS and isinstance(task.metadata, dict):
             task.metadata.pop("verify_reason_code", None)
             task.metadata.pop("verify_environment_note", None)
+            task.metadata.pop("verify_environment_kind", None)
             task.metadata.pop("verify_scope_classification", None)
 
         step_started = now_iso()

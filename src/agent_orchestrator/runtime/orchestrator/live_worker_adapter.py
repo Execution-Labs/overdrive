@@ -583,6 +583,67 @@ def _normalize_planning_text(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _frontend_gate_root(project_dir: Path) -> Path | None:
+    """Best-effort locate frontend workspace root for tsc/vite gate checks."""
+    direct_pkg = project_dir / "package.json"
+    if direct_pkg.exists():
+        try:
+            if '"vite"' in direct_pkg.read_text(encoding="utf-8", errors="replace"):
+                return project_dir
+        except Exception:
+            pass
+    nested = project_dir / "frontend"
+    if (nested / "package.json").exists():
+        return nested
+    return None
+
+
+def _normalize_verify_environment_note(
+    *,
+    note: str,
+    reason_code: str,
+    project_dir: Path,
+    task: Task,
+) -> tuple[str, str | None]:
+    """Rewrite common frontend gate infra failures into deterministic diagnostics."""
+    text = str(note or "").strip()
+    if not text:
+        return text, None
+    lower = text.lower()
+    task_context = f"{task.title}\n{task.description}".lower()
+    mentions_frontend_gate = any(
+        token in lower or token in task_context
+        for token in ("tsc --noemit", "vite build", "build gate")
+    )
+    if not mentions_frontend_gate:
+        return text, None
+    if reason_code not in {"tool_missing", "config_missing", "infrastructure", "unknown", "os_incompatibility"}:
+        return text, None
+
+    frontend_root = _frontend_gate_root(project_dir)
+    if frontend_root is None:
+        return text, None
+    missing: list[str] = []
+    if not (frontend_root / "node_modules").is_dir():
+        missing.append("frontend/node_modules")
+    if not (frontend_root / "node_modules" / ".bin" / "tsc").exists():
+        missing.append("tsc binary")
+    if not (frontend_root / "node_modules" / ".bin" / "vite").exists():
+        missing.append("vite binary")
+    if not missing:
+        return text, None
+
+    rel = frontend_root.relative_to(project_dir) if frontend_root != project_dir else Path(".")
+    rel_display = str(rel).rstrip("/") or "."
+    normalized = (
+        "Frontend build gate is blocked in this task worktree: missing local frontend toolchain "
+        f"({', '.join(missing)}) under `{rel_display}`. Install dependencies in the same environment "
+        f"(for example: `cd {rel_display} && npm ci`) and re-run verify. "
+        "[reason_code=tool_missing; env_kind=frontend_toolchain_missing]"
+    )
+    return normalized, "frontend_toolchain_missing"
+
+
 def _load_workdoc_snapshot(task: Task, project_dir: Path) -> str:
     """Load canonical/worktree workdoc text for run-end summary context."""
     candidates: list[Path] = []
@@ -1409,7 +1470,7 @@ class LiveWorkerAdapter:
                 self._container.tasks.upsert(task)
 
         # 4. Map result
-        step_result = self._map_result(result, spec, step, task)
+        step_result = self._map_result(result, spec, step, task, project_dir)
         raw_json = _extract_json(result.response_text) if result.response_text else None
         raw_is_json = isinstance(raw_json, dict)
 
@@ -1512,8 +1573,18 @@ class LiveWorkerAdapter:
             return StepResult(status="error", summary=str(summary) if summary else response_text[:500])
         if status_val == "environment":
             note = str(summary) if summary else response_text[:500]
+            note, env_kind = _normalize_verify_environment_note(
+                note=note,
+                reason_code=reason_code,
+                project_dir=project_dir,
+                task=task,
+            )
             if isinstance(task.metadata, dict):
                 task.metadata["verify_environment_note"] = note
+                if env_kind:
+                    task.metadata["verify_environment_kind"] = env_kind
+                else:
+                    task.metadata.pop("verify_environment_kind", None)
             return StepResult(status="ok", summary=note)
         return StepResult(status="ok", summary=str(summary) if summary else None)
 
@@ -1617,7 +1688,14 @@ class LiveWorkerAdapter:
 
         return StepResult(status="error", summary="Task generation output formatter returned no tasks list")
 
-    def _map_result(self, result: WorkerRunResult, spec: Any, step: str, task: Task) -> StepResult:
+    def _map_result(
+        self,
+        result: WorkerRunResult,
+        spec: Any,
+        step: str,
+        task: Task,
+        project_dir: Path,
+    ) -> StepResult:
         if result.human_blocking_issues:
             return StepResult(
                 status="human_blocked",
@@ -1677,8 +1755,18 @@ class LiveWorkerAdapter:
                     return StepResult(status="error", summary=str(verify_summary) if verify_summary else "Verification failed")
                 if status_val == "environment":
                     note = str(verify_summary) if verify_summary else "Verification blocked by environment constraints"
+                    note, env_kind = _normalize_verify_environment_note(
+                        note=note,
+                        reason_code=reason_code,
+                        project_dir=project_dir,
+                        task=task,
+                    )
                     if isinstance(task.metadata, dict):
                         task.metadata["verify_environment_note"] = note
+                        if env_kind:
+                            task.metadata["verify_environment_kind"] = env_kind
+                        else:
+                            task.metadata.pop("verify_environment_kind", None)
                     return StepResult(status="ok", summary=note)
                 return StepResult(status="ok", summary=str(verify_summary) if verify_summary else "")
 

@@ -1143,6 +1143,87 @@ def test_verify_formatter_environment_sets_note_with_reason(adapter: LiveWorkerA
     assert task.metadata.get("verify_reason_code") == "permission_denied"
 
 
+def test_verify_environment_note_normalizes_missing_frontend_toolchain(
+    adapter: LiveWorkerAdapter,
+    container: Container,
+) -> None:
+    frontend = container.project_dir / "frontend"
+    frontend.mkdir(parents=True, exist_ok=True)
+    (frontend / "package.json").write_text('{"name":"frontend","scripts":{"build":"vite build"}}', encoding="utf-8")
+    task = _make_task(description="Build gate: tsc --noEmit && vite build passes.")
+    raw_result = _make_run_result(exit_code=0, response_text="verify output")
+    fmt_result = _make_run_result(
+        exit_code=0,
+        response_text='{"status":"environment","reason_code":"tool_missing","summary":"npx tsc --noEmit && npx vite build failed"}',
+    )
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            side_effect=[raw_result, fmt_result],
+        ),
+    ):
+        result = adapter.run_step(task=task, step="verify", attempt=1)
+
+    assert result.status == "ok"
+    assert result.summary is not None
+    assert "frontend toolchain" in result.summary.lower()
+    assert "frontend/node_modules" in result.summary
+    assert "env_kind=frontend_toolchain_missing" in result.summary
+    assert task.metadata.get("verify_environment_kind") == "frontend_toolchain_missing"
+
+
+def test_verify_json_environment_path_does_not_raise_and_sets_env_kind(
+    adapter: LiveWorkerAdapter,
+    container: Container,
+) -> None:
+    frontend = container.project_dir / "frontend"
+    frontend.mkdir(parents=True, exist_ok=True)
+    (frontend / "package.json").write_text('{"name":"frontend","scripts":{"build":"vite build"}}', encoding="utf-8")
+    task = _make_task(description="Build gate: tsc --noEmit && vite build passes.")
+    run_result = _make_run_result(
+        exit_code=0,
+        response_text='{"status":"environment","reason_code":"tool_missing","summary":"npx tsc --noEmit && npx vite build failed"}',
+    )
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ),
+    ):
+        result = adapter.run_step(task=task, step="verify", attempt=1)
+
+    assert result.status == "ok"
+    assert result.summary is not None
+    assert "frontend/node_modules" in result.summary
+    assert "env_kind=frontend_toolchain_missing" in result.summary
+    assert task.metadata.get("verify_reason_code") == "tool_missing"
+    assert task.metadata.get("verify_environment_kind") == "frontend_toolchain_missing"
+
+
 def test_task_generation_parses_top_level_array(adapter: LiveWorkerAdapter) -> None:
     response = "```json\n[{\"title\":\"Task A\",\"task_type\":\"feature\",\"priority\":\"P1\"}]\n```"
     run_result = _make_run_result(exit_code=0, response_text=response)

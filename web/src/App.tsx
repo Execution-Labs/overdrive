@@ -657,10 +657,31 @@ function gateApprovalButtonLabel(gate: string | null | undefined): string {
   return 'Approve gate'
 }
 
+type WaitingGateKind = 'approval_wait' | 'intervention_wait'
+
+function taskWaitingGateKind(task: TaskRecord | null | undefined): WaitingGateKind | null {
+  const kind = String(task?.gate_context?.status_kind || '').trim()
+  if (kind === 'approval_wait' || kind === 'intervention_wait') return kind
+  const gate = String(task?.pending_gate || '').trim()
+  if (!gate) return null
+  return gate === 'human_intervention' ? 'intervention_wait' : 'approval_wait'
+}
+
+function taskWaitingGateLabel(task: TaskRecord | null | undefined): string | null {
+  const kind = taskWaitingGateKind(task)
+  if (kind === 'intervention_wait') return 'Needs Intervention'
+  if (kind === 'approval_wait') return 'Awaiting Approval'
+  return null
+}
+
 function taskStatusDisplay(task: TaskRecord | null | undefined): { label: string; classStatus: string } {
   if (!task) return { label: 'Unknown', classStatus: 'unknown' }
   if (task.status !== 'cancelled' && task.status === 'in_progress' && String(task.pending_gate || '').trim()) {
-    return { label: 'Awaiting Approval', classStatus: 'in_review' }
+    const kind = taskWaitingGateKind(task)
+    return {
+      label: taskWaitingGateLabel(task) || 'Awaiting Approval',
+      classStatus: kind === 'intervention_wait' ? 'blocked' : 'in_review',
+    }
   }
   return {
     label: humanizeLabel(task.status || 'unknown'),
@@ -5767,8 +5788,9 @@ export default function App() {
 
   function renderBoard(): JSX.Element {
     const inProgressTasks = board.columns.in_progress || []
-    const waitingApprovalCount = inProgressTasks.filter((task) => !!task.pending_gate).length
-    const runningNowCount = inProgressTasks.length - waitingApprovalCount
+    const waitingApprovalCount = inProgressTasks.filter((task) => taskWaitingGateKind(task) === 'approval_wait').length
+    const waitingInterventionCount = inProgressTasks.filter((task) => taskWaitingGateKind(task) === 'intervention_wait').length
+    const runningNowCount = inProgressTasks.length - waitingApprovalCount - waitingInterventionCount
     return (
       <section className="panel">
         <header className="panel-head">
@@ -5788,20 +5810,26 @@ export default function App() {
               <h3>{humanizeLabel(column)}</h3>
               <div className="card-list">
                 {(board.columns[column] || []).map((task) => (
-                  <button
-                    className={`task-card task-card-button${boardCompact ? ' task-card-compact' : ''}${task.status !== 'cancelled' && task.pending_gate ? ' task-card-awaiting-gate' : ''}`}
-                    key={task.id}
-                    onClick={() => handleTaskSelect(task.id, (task.pending_gate === 'before_implement' || task.pending_gate === 'before_generate_tasks') ? 'plan' : undefined)}
-                  >
-                    <p className="task-title">{task.title}</p>
-                    {!boardCompact && <p className="task-meta">{task.priority} · {task.id.replace(/^task-/, '')}{task.parent_id ? ' · from plan' : ''}</p>}
-                    {!boardCompact && task.status !== 'cancelled' && task.pending_gate ? (
-                      <p className="task-meta">
-                        <span className="status-pill status-pill-inline status-pill-no-offset status-review">Awaiting Approval</span>
-                      </p>
-                    ) : null}
-                    {!boardCompact && task.description ? <p className="task-desc">{task.description}</p> : null}
-                  </button>
+                  (() => {
+                    const waitingLabel = task.status !== 'cancelled' ? taskWaitingGateLabel(task) : null
+                    const waitingKind = taskWaitingGateKind(task)
+                    return (
+                      <button
+                        className={`task-card task-card-button${boardCompact ? ' task-card-compact' : ''}${waitingLabel ? ' task-card-awaiting-gate' : ''}`}
+                        key={task.id}
+                        onClick={() => handleTaskSelect(task.id, (task.pending_gate === 'before_implement' || task.pending_gate === 'before_generate_tasks') ? 'plan' : undefined)}
+                      >
+                        <p className="task-title">{task.title}</p>
+                        {!boardCompact && <p className="task-meta">{task.priority} · {task.id.replace(/^task-/, '')}{task.parent_id ? ' · from plan' : ''}</p>}
+                        {!boardCompact && waitingLabel ? (
+                          <p className="task-meta">
+                            <span className={`status-pill status-pill-inline status-pill-no-offset ${waitingKind === 'intervention_wait' ? 'status-blocked' : 'status-review'}`}>{waitingLabel}</span>
+                          </p>
+                        ) : null}
+                        {!boardCompact && task.description ? <p className="task-desc">{task.description}</p> : null}
+                      </button>
+                    )
+                  })()
                 ))}
               </div>
             </article>
@@ -5812,6 +5840,7 @@ export default function App() {
           <span className="field-label">In progress: {orchestrator?.in_progress ?? 0}</span>
           <span className="field-label">Running now: {runningNowCount}</span>
           <span className="field-label">Waiting approval: {waitingApprovalCount}</span>
+          <span className="field-label">Needs intervention: {waitingInterventionCount}</span>
           <span className="field-label">Workers: {agents.length}</span>
           {dispatchBlockedReasonLabel(orchestrator?.dispatch_blocked_reason) ? (
             <span className="field-label">Dispatch: {dispatchBlockedReasonLabel(orchestrator?.dispatch_blocked_reason)}</span>
@@ -5855,8 +5884,9 @@ export default function App() {
     }
     const blockedCount = (board.columns.blocked || []).length
     const inProgressTasks = board.columns.in_progress || []
-    const waitingApprovalCount = inProgressTasks.filter((task) => !!task.pending_gate).length
-    const runningNowCount = inProgressTasks.length - waitingApprovalCount
+    const waitingApprovalCount = inProgressTasks.filter((task) => taskWaitingGateKind(task) === 'approval_wait').length
+    const waitingInterventionCount = inProgressTasks.filter((task) => taskWaitingGateKind(task) === 'intervention_wait').length
+    const runningNowCount = inProgressTasks.length - waitingApprovalCount - waitingInterventionCount
     return (
       <section className="panel">
         <header className="panel-head">
@@ -5884,6 +5914,10 @@ export default function App() {
           <button className="status-card">
             <span>Waiting approval</span>
             <strong>{waitingApprovalCount}</strong>
+          </button>
+          <button className="status-card">
+            <span>Needs intervention</span>
+            <strong>{waitingInterventionCount}</strong>
           </button>
           <button className={`status-card status-card-clickable${pipelineHighlightStatus === 'blocked' ? ' status-card-active' : ''}`} onClick={() => setPipelineHighlightStatus((prev) => prev === 'blocked' ? '' : 'blocked')}>
             <span>Blocked</span>
