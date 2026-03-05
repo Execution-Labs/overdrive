@@ -1224,6 +1224,103 @@ def test_verify_json_environment_path_does_not_raise_and_sets_env_kind(
     assert task.metadata.get("verify_environment_kind") == "frontend_toolchain_missing"
 
 
+def test_verify_environment_note_normalizes_prisma_missing_database_url(
+    adapter: LiveWorkerAdapter,
+    container: Container,
+) -> None:
+    prisma_dir = container.project_dir / "prisma"
+    prisma_dir.mkdir(parents=True, exist_ok=True)
+    (prisma_dir / "schema.prisma").write_text(
+        'datasource db { provider = "postgresql" url = env("DATABASE_URL") }',
+        encoding="utf-8",
+    )
+    (container.project_dir / "package.json").write_text(
+        '{"name":"app","devDependencies":{"prisma":"^6.5.0"}}',
+        encoding="utf-8",
+    )
+    task = _make_task(description="Run prisma migrate dev --name init and prisma validate.")
+    run_result = _make_run_result(
+        exit_code=0,
+        response_text=(
+            '{"status":"environment","reason_code":"infrastructure",'
+            '"summary":"prisma validate failed: Environment variable not found: DATABASE_URL"}'
+        ),
+    )
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ),
+    ):
+        result = adapter.run_step(task=task, step="verify", attempt=1)
+
+    assert result.status == "ok"
+    assert result.summary is not None
+    assert "database_url" in result.summary.lower()
+    assert "env_kind=prisma_env_missing" in result.summary
+    assert task.metadata.get("verify_environment_kind") == "prisma_env_missing"
+    assert task.metadata.get("verify_reason_code") == "config_missing"
+
+
+def test_verify_environment_note_normalizes_prisma_missing_local_cli(
+    adapter: LiveWorkerAdapter,
+    container: Container,
+) -> None:
+    prisma_dir = container.project_dir / "prisma"
+    prisma_dir.mkdir(parents=True, exist_ok=True)
+    (prisma_dir / "schema.prisma").write_text('generator client { provider = "prisma-client-js" }', encoding="utf-8")
+    (container.project_dir / "package.json").write_text(
+        '{"name":"app","devDependencies":{"prisma":"^6.5.0"}}',
+        encoding="utf-8",
+    )
+    task = _make_task(description="Validate Prisma migration workflow in verify.")
+    run_result = _make_run_result(
+        exit_code=0,
+        response_text=(
+            '{"status":"environment","reason_code":"infrastructure",'
+            '"summary":"npx prisma migrate dev failed; getaddrinfo ENOTFOUND registry.npmjs.org"}'
+        ),
+    )
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ),
+    ):
+        result = adapter.run_step(task=task, step="verify", attempt=1)
+
+    assert result.status == "ok"
+    assert result.summary is not None
+    assert "local prisma cli is missing" in result.summary.lower()
+    assert "env_kind=prisma_cli_missing" in result.summary
+    assert task.metadata.get("verify_environment_kind") == "prisma_cli_missing"
+    assert task.metadata.get("verify_reason_code") == "tool_missing"
+
+
 def test_task_generation_parses_top_level_array(adapter: LiveWorkerAdapter) -> None:
     response = "```json\n[{\"title\":\"Task A\",\"task_type\":\"feature\",\"priority\":\"P1\"}]\n```"
     run_result = _make_run_result(exit_code=0, response_text=response)
@@ -1483,6 +1580,21 @@ def test_verification_prompt_includes_project_commands() -> None:
     assert ".venv/bin/ruff check ." in prompt
 
 
+def test_verification_prompt_includes_required_prisma_gates_when_requested() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task,
+        step="verify",
+        attempt=1,
+        project_languages=["typescript"],
+        project_commands={"typescript": {"test": "npm test"}},
+        require_prisma_verify=True,
+    )
+    assert "## Required Prisma verification gates" in prompt
+    assert "./node_modules/.bin/prisma validate" in prompt
+    assert "./node_modules/.bin/prisma migrate deploy" in prompt
+
+
 def test_implementation_prompt_includes_project_commands() -> None:
     task = _make_task()
     prompt = build_step_prompt(
@@ -1678,6 +1790,49 @@ def test_run_step_reads_project_commands_from_config(container: Container, adapt
     prompt = captured_prompt["text"]
     assert "## Project commands" in prompt
     assert ".venv/bin/pytest -x" in prompt
+
+
+def test_run_step_verify_with_prisma_schema_injects_prisma_command_hints(
+    container: Container,
+    adapter: LiveWorkerAdapter,
+) -> None:
+    (container.project_dir / "tsconfig.json").write_text("{}", encoding="utf-8")
+    prisma_dir = container.project_dir / "prisma"
+    prisma_dir.mkdir(parents=True, exist_ok=True)
+    (prisma_dir / "schema.prisma").write_text(
+        "generator client { provider = \"prisma-client-js\" }",
+        encoding="utf-8",
+    )
+
+    captured_prompt: dict[str, str] = {}
+    run_result = _make_run_result(exit_code=0)
+
+    def _capture_run_worker(**kwargs):
+        captured_prompt["text"] = kwargs["prompt"]
+        return run_result
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            side_effect=_capture_run_worker,
+        ),
+    ):
+        result = adapter.run_step(task=_make_task(), step="verify", attempt=1)
+
+    assert result.status == "ok"
+    assert "## Required Prisma verification gates" in captured_prompt["text"]
+    assert "./node_modules/.bin/prisma migrate deploy" in captured_prompt["text"]
 
 
 def test_run_step_reads_prompt_overrides_from_config(container: Container, adapter: LiveWorkerAdapter) -> None:

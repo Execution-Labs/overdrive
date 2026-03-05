@@ -598,31 +598,145 @@ def _frontend_gate_root(project_dir: Path) -> Path | None:
     return None
 
 
+def _has_prisma_schema(project_dir: Path) -> bool:
+    """Return whether this task worktree contains a Prisma schema."""
+    return (project_dir / "prisma" / "schema.prisma").exists()
+
+
+def _inject_prisma_verify_command_hints(
+    project_commands: dict[str, dict[str, str]] | None,
+    project_languages: list[str] | None,
+) -> dict[str, dict[str, str]]:
+    """Inject deterministic Prisma verification commands into command hints."""
+    merged: dict[str, dict[str, str]] = {
+        lang: dict(cmds)
+        for lang, cmds in (project_commands or {}).items()
+        if isinstance(cmds, dict)
+    }
+    preferred_lang = (
+        "typescript"
+        if (project_languages and "typescript" in project_languages)
+        else ("javascript" if (project_languages and "javascript" in project_languages) else "typescript")
+    )
+    lang_cmds = merged.get(preferred_lang, {})
+    if not isinstance(lang_cmds, dict):
+        lang_cmds = {}
+    prisma_verify = (
+        "docker compose up -d postgres && "
+        "sh -lc 'for i in $(seq 1 30); do "
+        "docker compose ps --format json 2>/dev/null | rg -q \"healthy\" && exit 0; "
+        "sleep 1; done; exit 1' && "
+        "./node_modules/.bin/prisma format && "
+        "./node_modules/.bin/prisma validate && "
+        "sh -lc 'for i in $(seq 1 5); do "
+        "./node_modules/.bin/prisma migrate deploy && exit 0; "
+        "sleep 2; done; exit 1'"
+    )
+    existing_format = str(lang_cmds.get("format") or "").strip()
+    if existing_format:
+        if prisma_verify not in existing_format:
+            lang_cmds["format"] = f"{existing_format} && {prisma_verify}"
+    else:
+        lang_cmds["format"] = prisma_verify
+    merged[preferred_lang] = lang_cmds
+    return merged
+
+
 def _normalize_verify_environment_note(
     *,
     note: str,
     reason_code: str,
     project_dir: Path,
     task: Task,
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, str | None]:
     """Rewrite common frontend gate infra failures into deterministic diagnostics."""
     text = str(note or "").strip()
     if not text:
-        return text, None
+        return text, None, None
     lower = text.lower()
     task_context = f"{task.title}\n{task.description}".lower()
+    verify_reason_override: str | None = None
+
+    # Prefer deterministic Prisma blockers by priority:
+    # missing env var > docker unavailable > local toolchain missing > network.
+    mentions_prisma = any(
+        token in lower or token in task_context
+        for token in ("prisma", "migrate dev", "schema.prisma", "database_url")
+    )
+    if mentions_prisma and reason_code in {"tool_missing", "config_missing", "infrastructure", "unknown", "os_incompatibility"}:
+        has_prisma_schema = (project_dir / "prisma" / "schema.prisma").exists()
+        has_package_json = (project_dir / "package.json").exists()
+        prisma_bin = project_dir / "node_modules" / ".bin" / "prisma"
+        node_modules_dir = project_dir / "node_modules"
+        missing_database_url = (
+            "environment variable not found: database_url" in lower
+            or ("database_url" in lower and "not found" in lower)
+        )
+        docker_unavailable = any(
+            token in lower
+            for token in (
+                "cannot connect to the docker daemon",
+                "is the docker daemon running",
+                "/var/run/docker.sock",
+                "docker.sock",
+            )
+        )
+        registry_unavailable = any(
+            token in lower
+            for token in (
+                "enotfound registry.npmjs.org",
+                "getaddrinfo enotfound registry.npmjs.org",
+            )
+        )
+        prisma_toolchain_missing = has_prisma_schema and has_package_json and (
+            not node_modules_dir.is_dir() or not prisma_bin.exists()
+        )
+
+        if missing_database_url:
+            normalized = (
+                "Prisma verification is blocked in this task worktree: required environment variable "
+                "`DATABASE_URL` is missing. Set `DATABASE_URL` for the task environment and re-run verify. "
+                "[reason_code=config_missing; env_kind=prisma_env_missing]"
+            )
+            return normalized, "prisma_env_missing", "config_missing"
+
+        if docker_unavailable:
+            normalized = (
+                "Prisma verification is blocked in this environment: Docker daemon is unavailable for the "
+                "required Postgres migration flow (for example `prisma migrate dev`). Start Docker/Compose "
+                "and re-run verify. [reason_code=infrastructure; env_kind=docker_unavailable]"
+            )
+            return normalized, "docker_unavailable", "infrastructure"
+
+        if prisma_toolchain_missing:
+            normalized = (
+                "Prisma verification is blocked in this task worktree: local Prisma CLI is missing "
+                f"(expected `{prisma_bin}`). Install dependencies in the same environment (for example: "
+                "`npm install`) and re-run verify. "
+                "[reason_code=tool_missing; env_kind=prisma_cli_missing]"
+            )
+            return normalized, "prisma_cli_missing", "tool_missing"
+
+        if registry_unavailable:
+            normalized = (
+                "Prisma verification is blocked by network constraints in this environment: npm registry "
+                "is unreachable (`registry.npmjs.org`). Restore network access and re-run verify. "
+                "[reason_code=infrastructure; env_kind=network_unavailable]"
+            )
+            return normalized, "network_unavailable", "infrastructure"
+
     mentions_frontend_gate = any(
         token in lower or token in task_context
         for token in ("tsc --noemit", "vite build", "build gate")
     )
     if not mentions_frontend_gate:
-        return text, None
+        return text, None, None
     if reason_code not in {"tool_missing", "config_missing", "infrastructure", "unknown", "os_incompatibility"}:
-        return text, None
+        return text, None, None
 
     frontend_root = _frontend_gate_root(project_dir)
     if frontend_root is None:
-        return text, None
+        return text, None, None
     missing: list[str] = []
     if not (frontend_root / "node_modules").is_dir():
         missing.append("frontend/node_modules")
@@ -631,7 +745,7 @@ def _normalize_verify_environment_note(
     if not (frontend_root / "node_modules" / ".bin" / "vite").exists():
         missing.append("vite binary")
     if not missing:
-        return text, None
+        return text, None, None
 
     rel = frontend_root.relative_to(project_dir) if frontend_root != project_dir else Path(".")
     rel_display = str(rel).rstrip("/") or "."
@@ -641,7 +755,8 @@ def _normalize_verify_environment_note(
         f"(for example: `cd {rel_display} && npm ci`) and re-run verify. "
         "[reason_code=tool_missing; env_kind=frontend_toolchain_missing]"
     )
-    return normalized, "frontend_toolchain_missing"
+    verify_reason_override = "tool_missing"
+    return normalized, "frontend_toolchain_missing", verify_reason_override
 
 
 def _load_workdoc_snapshot(task: Task, project_dir: Path) -> str:
@@ -671,6 +786,7 @@ def build_step_prompt(
     attempt: int,
     project_languages: list[str] | None = None,
     project_commands: dict[str, dict[str, str]] | None = None,
+    require_prisma_verify: bool = False,
     prompt_overrides: dict[str, str] | None = None,
     prompt_injections: dict[str, str] | None = None,
 ) -> str:
@@ -1078,6 +1194,17 @@ def build_step_prompt(
         if cmds_block:
             parts.append("")
             parts.append(cmds_block)
+    if category == "verification" and require_prisma_verify:
+        parts.append("")
+        parts.append("## Required Prisma verification gates")
+        parts.append("- If `prisma/schema.prisma` exists in this worktree, run Prisma checks using the local CLI (do not use bare `npx prisma`).")
+        parts.append("- Required commands:")
+        parts.append("  - `docker compose up -d postgres`")
+        parts.append("  - wait until Postgres is healthy before migration checks")
+        parts.append("  - `./node_modules/.bin/prisma format`")
+        parts.append("  - `./node_modules/.bin/prisma validate`")
+        parts.append("  - retry `./node_modules/.bin/prisma migrate deploy` a few times if connection is still starting")
+        parts.append("  - `./node_modules/.bin/prisma migrate deploy`")
 
     # Inject dependency policy instruction
     dep_policy = getattr(task, "dependency_policy", "prudent") or "prudent"
@@ -1406,6 +1533,9 @@ class LiveWorkerAdapter:
                 project_commands = None
         # Resolve relative executable paths against the *original* project dir
         # so workers in git worktrees can find binaries in gitignored dirs.
+        require_prisma_verify = _step_category(step) == "verification" and _has_prisma_schema(project_dir)
+        if require_prisma_verify:
+            project_commands = _inject_prisma_verify_command_hints(project_commands, langs or None)
         if project_commands:
             project_commands = _resolve_command_paths(
                 project_commands, self._container.project_dir,
@@ -1414,6 +1544,7 @@ class LiveWorkerAdapter:
             task=task, step=step, attempt=attempt,
             project_languages=langs or None,
             project_commands=project_commands,
+            require_prisma_verify=require_prisma_verify,
             prompt_overrides=prompt_overrides or None,
             prompt_injections=prompt_injections or None,
         )
@@ -1573,7 +1704,7 @@ class LiveWorkerAdapter:
             return StepResult(status="error", summary=str(summary) if summary else response_text[:500])
         if status_val == "environment":
             note = str(summary) if summary else response_text[:500]
-            note, env_kind = _normalize_verify_environment_note(
+            note, env_kind, normalized_reason = _normalize_verify_environment_note(
                 note=note,
                 reason_code=reason_code,
                 project_dir=project_dir,
@@ -1581,6 +1712,8 @@ class LiveWorkerAdapter:
             )
             if isinstance(task.metadata, dict):
                 task.metadata["verify_environment_note"] = note
+                if normalized_reason:
+                    task.metadata["verify_reason_code"] = normalized_reason
                 if env_kind:
                     task.metadata["verify_environment_kind"] = env_kind
                 else:
@@ -1755,7 +1888,7 @@ class LiveWorkerAdapter:
                     return StepResult(status="error", summary=str(verify_summary) if verify_summary else "Verification failed")
                 if status_val == "environment":
                     note = str(verify_summary) if verify_summary else "Verification blocked by environment constraints"
-                    note, env_kind = _normalize_verify_environment_note(
+                    note, env_kind, normalized_reason = _normalize_verify_environment_note(
                         note=note,
                         reason_code=reason_code,
                         project_dir=project_dir,
@@ -1763,6 +1896,8 @@ class LiveWorkerAdapter:
                     )
                     if isinstance(task.metadata, dict):
                         task.metadata["verify_environment_note"] = note
+                        if normalized_reason:
+                            task.metadata["verify_reason_code"] = normalized_reason
                         if env_kind:
                             task.metadata["verify_environment_kind"] = env_kind
                         else:

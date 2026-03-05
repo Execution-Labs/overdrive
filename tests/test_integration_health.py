@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from agent_orchestrator.runtime.domain.models import Task, now_iso
+from agent_orchestrator.runtime.domain.models import RunRecord, Task, now_iso
 from agent_orchestrator.runtime.events.bus import EventBus
 from agent_orchestrator.runtime.orchestrator.integration_health import (
     HealthCheckResult,
@@ -444,6 +444,48 @@ def test_reconciler_keeps_degraded_when_fix_not_done(tmp_path: Path) -> None:
         source="test",
     )
     assert health._status == "degraded"
+
+
+def test_reconciler_repairs_blocked_missing_workdoc_after_done_commit(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    svc = _make_service(tmp_path)
+    task = Task(
+        title="Recovered done task",
+        status="blocked",
+        current_step="plan",
+        error=f"Missing worktree workdoc during sync for task task-x: {tmp_path / '.workdoc.md'}",
+        pipeline_template=["plan", "implement", "verify", "review", "commit"],
+    )
+    svc.container.tasks.upsert(task)
+    run = RunRecord(
+        task_id=task.id,
+        status="done",
+        started_at=now_iso(),
+        finished_at=now_iso(),
+        steps=[
+            {"step": "plan", "status": "ok", "ts": now_iso()},
+            {"step": "implement", "status": "ok", "ts": now_iso()},
+            {"step": "verify", "status": "ok", "ts": now_iso()},
+            {"step": "review", "status": "approved", "ts": now_iso()},
+            {"step": "commit", "status": "ok", "ts": now_iso(), "commit": "abc123"},
+        ],
+        summary="Pipeline completed",
+    )
+    svc.container.runs.upsert(run)
+    task.run_ids.append(run.id)
+    svc.container.tasks.upsert(task)
+
+    result = apply_runtime_invariants(
+        svc,
+        active_future_task_ids=set(),
+        source="test",
+    )
+    repaired = svc.container.tasks.get(task.id)
+    assert repaired is not None
+    assert repaired.status == "done"
+    assert repaired.error is None
+    assert repaired.current_step is None
+    assert any(item.get("code") == "blocked_missing_workdoc_terminal_repair" for item in result["items"])
 
 
 # ------------------------------------------------------------------

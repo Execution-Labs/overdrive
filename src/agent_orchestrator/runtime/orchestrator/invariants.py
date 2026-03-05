@@ -48,6 +48,39 @@ def _clear_cancelled_gate_artifacts(task: Task) -> bool:
     return changed
 
 
+def _latest_run_for_task(service: "OrchestratorService", task: Task) -> RunRecord | None:
+    """Return the newest persisted run for a task, if any."""
+    for run_id in reversed(task.run_ids or []):
+        run = service.container.runs.get(run_id)
+        if run is not None:
+            return run
+    return None
+
+
+def _run_contains_successful_commit(run: RunRecord) -> bool:
+    """Return True when the run captured a successful commit step."""
+    for step_data in reversed(run.steps or []):
+        if not isinstance(step_data, dict):
+            continue
+        if str(step_data.get("step") or "").strip() != "commit":
+            continue
+        return str(step_data.get("status") or "").strip().lower() == "ok"
+    return False
+
+
+def _task_has_done_commit_run(service: "OrchestratorService", task: Task) -> bool:
+    """Return True when task history contains a completed run with successful commit."""
+    for run_id in reversed(task.run_ids or []):
+        run = service.container.runs.get(run_id)
+        if run is None:
+            continue
+        if run.status != "done":
+            continue
+        if _run_contains_successful_commit(run):
+            return True
+    return False
+
+
 def apply_runtime_invariants(
     service: "OrchestratorService",
     *,
@@ -142,6 +175,27 @@ def apply_runtime_invariants(
                     )
 
         if task.status == "blocked" and git_backed:
+            latest_run = _latest_run_for_task(service, task)
+            blocked_error = str(task.error or "").strip()
+            if (
+                blocked_error.startswith("Missing worktree workdoc during sync for task")
+                and _task_has_done_commit_run(service, task)
+            ):
+                task.status = "done"
+                task.error = None
+                task.pending_gate = None
+                task.current_step = None
+                task.current_agent_id = None
+                metadata.pop("pipeline_phase", None)
+                metadata.pop("execution_checkpoint", None)
+                metadata.pop("pending_precommit_approval", None)
+                metadata.pop("review_stage", None)
+                changed = True
+                _record(
+                    task,
+                    code="blocked_missing_workdoc_terminal_repair",
+                    message="Recovered blocked task to done because latest run had successful commit.",
+                )
             context_raw = metadata.get("task_context")
             context = context_raw if isinstance(context_raw, dict) else {}
             expected_on_retry = bool(context.get("expected_on_retry"))

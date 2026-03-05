@@ -993,6 +993,7 @@ class OrchestratorService:
         if not in_progress_ids:
             return
 
+        completed_task_ids: set[str] = set()
         for run in self.container.runs.list():
             if run.task_id in in_progress_ids and run.status == "in_progress" and not run.finished_at:
                 task = task_by_id.get(run.task_id)
@@ -1004,6 +1005,10 @@ class OrchestratorService:
                     continue
                 if task and self._is_resume_requested(task):
                     continue
+                if task and self._run_contains_successful_commit(run):
+                    self._finalize_recovered_completed_task(task, run)
+                    completed_task_ids.add(task.id)
+                    continue
                 run.status = "interrupted"
                 run.finished_at = now_iso()
                 run.summary = run.summary or "Interrupted by orchestrator restart"
@@ -1011,6 +1016,8 @@ class OrchestratorService:
 
         for task in tasks:
             if task.id not in in_progress_ids:
+                continue
+            if task.id in completed_task_ids:
                 continue
             if isinstance(task.metadata, dict):
                 self._mark_task_context_retained(task, reason="orchestrator_restart", expected_on_retry=False)
@@ -1038,6 +1045,51 @@ class OrchestratorService:
                 entity_id=task.id,
                 payload={"reason": "orchestrator_restart"},
             )
+
+    @staticmethod
+    def _run_contains_successful_commit(run: RunRecord) -> bool:
+        """Return True when a run already recorded a successful commit step."""
+        for step_data in reversed(run.steps or []):
+            if not isinstance(step_data, dict):
+                continue
+            if str(step_data.get("step") or "").strip() != "commit":
+                continue
+            step_status = str(step_data.get("status") or "").strip().lower()
+            return step_status == "ok"
+        return False
+
+    def _finalize_recovered_completed_task(self, task: Task, run: RunRecord) -> None:
+        """Finalize a recovered in-progress task as done when commit already succeeded."""
+        finished_at = now_iso()
+        run.status = "done"
+        run.finished_at = run.finished_at or finished_at
+        run.summary = run.summary or "Pipeline completed"
+        self.container.runs.upsert(run)
+
+        task.status = "done"
+        task.current_step = None
+        task.current_agent_id = None
+        task.pending_gate = None
+        task.error = None
+        task.updated_at = finished_at
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        for key in (
+            "pipeline_phase",
+            "execution_checkpoint",
+            "pending_precommit_approval",
+            "review_stage",
+            "worktree_dir",
+            "task_context",
+        ):
+            task.metadata.pop(key, None)
+        self.container.tasks.upsert(task)
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.done",
+            entity_id=task.id,
+            payload={"source": "orchestrator_recovery"},
+        )
 
     def _sweep_futures(self) -> None:
         """Remove completed futures and log any unexpected errors."""
