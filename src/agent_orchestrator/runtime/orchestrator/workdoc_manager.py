@@ -20,6 +20,7 @@ class WorkdocManager:
     _WORKDOC_SECTION_MAP: dict[str, tuple[str, str | None]] = {
         "plan": ("## Plan", "plan"),
         "initiative_plan": ("## Plan", "plan"),
+        "commit_review": ("## Plan", "plan"),
         "analyze": ("## Analysis", "analyze"),
         "diagnose": ("## Analysis", "analyze"),
         "scan_deps": ("## Dependency Scan Findings", "scan_deps"),
@@ -36,6 +37,7 @@ class WorkdocManager:
     _WORKDOC_SENTINEL_ID_MAP: dict[str, str] = {
         "plan": "plan",
         "initiative_plan": "plan",
+        "commit_review": "plan",
         "analyze": "analysis",
         "diagnose": "analysis",
         "scan_deps": "dependency_scan_findings",
@@ -311,6 +313,42 @@ _Pending: will be populated by the review step._
 ## Final Report
 
 _Pending: will be populated by the report step._
+"""
+
+    _COMMIT_REVIEW_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Plan
+
+_Pending: will be populated by the commit review step with findings and fix tasks._
+
+## Implementation Log
+
+_Pending: will be populated by the implement step._
+
+## Verification Results
+
+_Pending: will be populated by the verify step._
+
+## Review Findings
+
+_Pending: will be populated by the review step._
+
+## Fix Log
+
+_Pending: will be populated as needed._
 """
 
     _BUG_FIX_WORKDOC_TEMPLATE = """\
@@ -642,6 +680,7 @@ _Pending: will be populated by the report step._
             "repo_review": self._REPO_REVIEW_WORKDOC_TEMPLATE,
             "security_audit": self._SECURITY_AUDIT_WORKDOC_TEMPLATE,
             "review": self._REVIEW_WORKDOC_TEMPLATE,
+            "commit_review": self._COMMIT_REVIEW_WORKDOC_TEMPLATE,
             "performance": self._PERFORMANCE_WORKDOC_TEMPLATE,
             "hotfix": self._HOTFIX_WORKDOC_TEMPLATE,
             "spike": self._SPIKE_WORKDOC_TEMPLATE,

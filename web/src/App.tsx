@@ -11,7 +11,7 @@ import './styles/orchestrator.css'
 type RouteKey = 'board' | 'planning' | 'execution' | 'agents' | 'settings'
 type CreateTab = 'task' | 'import'
 type TaskDetailTab = 'overview' | 'plan' | 'workdoc' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
-type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate'
+type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate' | 'review_commit'
 type GeneratedTaskStatus = 'backlog' | 'queued'
 type GeneratedTaskHitlSelection = 'inherit_parent' | 'autopilot' | 'supervised' | 'review_only'
 
@@ -463,6 +463,7 @@ const TASK_TYPE_OPTIONS = [
   'test',
   'docs',
   'review',
+  'commit_review',
   'security',
   'performance',
   'verify_only',
@@ -1887,6 +1888,16 @@ export default function App() {
   }, [selectedTaskId, taskGenerationSystemDefaults])
 
   // taskEditMode removed — configLocked (status-based) controls editability
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; taskId: string } | null>(null)
+  useEffect(() => {
+    if (!contextMenu) return
+    const dismiss = () => setContextMenu(null)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') dismiss() }
+    document.addEventListener('click', dismiss)
+    document.addEventListener('keydown', onKey)
+    window.addEventListener('resize', dismiss)
+    return () => { document.removeEventListener('click', dismiss); document.removeEventListener('keydown', onKey); window.removeEventListener('resize', dismiss) }
+  }, [contextMenu])
   const [taskActionPending, setTaskActionPending] = useState<TaskActionKey | null>(null)
   const [taskActionDetail, setTaskActionDetail] = useState('')
   const [taskActionMessage, setTaskActionMessage] = useState('')
@@ -4560,6 +4571,28 @@ export default function App() {
     )
   }
 
+  async function reviewCommit(taskId: string): Promise<void> {
+    await runTaskMutation(
+      'review_commit',
+      async () => {
+        const result = await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/review-commit`, projectDir), {
+          method: 'POST',
+        })
+        await reloadAll()
+        if (result.task?.id) {
+          modalDismissedRef.current = false
+          modalExplicitRef.current = true
+          setSelectedTaskId(result.task.id)
+          await loadTaskDetail(result.task.id)
+        }
+      },
+      {
+        successMessage: 'Commit review task created.',
+        errorPrefix: 'Failed to create commit review',
+      },
+    )
+  }
+
   async function skipToPrecommit(taskId: string): Promise<void> {
     await runTaskMutation(
       'transition',
@@ -4926,7 +4959,7 @@ export default function App() {
   const taskDetailContent = selectedTaskView ? (
       <div className="detail-card">
         {selectedTaskDetailLoading ? <p className="field-label">Loading full task detail...</p> : null}
-        <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {humanizeLabel(normalizeHitlMode(selectedTaskView.hitl_mode || 'autopilot'))} · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}</p>
+        <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {humanizeLabel(normalizeHitlMode(selectedTaskView.hitl_mode || 'autopilot'))} · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}{(() => { const ch = selectedTaskView.execution_summary?.steps?.map(s => s.commit).filter(Boolean).pop(); return ch ? <>{' · '}<span className="execution-step-commit" title={`Click to copy: ${ch}`} onClick={(e) => { e.stopPropagation(); void navigator.clipboard.writeText(ch) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(ch) } }}>{ch.slice(0, 8)}</span></> : null })()}</p>
         {selectedTaskTotalSeconds != null ? (
           <p className="task-meta">
             Total time taken: {formatDuration(selectedTaskTotalSeconds) || '0s'}
@@ -5855,6 +5888,14 @@ export default function App() {
                         className={`task-card task-card-button${boardCompact ? ' task-card-compact' : ''}${waitingLabel ? ' task-card-awaiting-gate' : ''}`}
                         key={task.id}
                         onClick={() => handleTaskSelect(task.id, (task.pending_gate === 'before_implement' || task.pending_gate === 'before_generate_tasks') ? 'plan' : undefined)}
+                        onContextMenu={(e) => {
+                          if (task.status === 'done') {
+                            e.preventDefault()
+                            const menuW = 180
+                            const menuH = 50
+                            setContextMenu({ x: Math.max(0, Math.min(e.clientX, window.innerWidth - menuW)), y: Math.max(0, Math.min(e.clientY, window.innerHeight - menuH)), taskId: task.id })
+                          }
+                        }}
                       >
                         <p className="task-title">{task.title}</p>
                         {!boardCompact && <p className="task-meta">{task.priority} · {task.id.replace(/^task-/, '')}{task.parent_id ? ' · from plan' : ''}</p>}
@@ -7374,6 +7415,9 @@ export default function App() {
                 {taskStatus === 'done' && showViewPlan ? (
                   <button className="button button-primary" onClick={() => { setPlanningTaskId(selectedTaskView.id); handleRouteChange('planning'); modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') }}>View Plan</button>
                 ) : null}
+                {taskStatus === 'done' && selectedTaskView.execution_summary?.steps.some((s) => s.commit) ? (
+                  <button className="button" onClick={() => void reviewCommit(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'review_commit' ? 'Creating...' : 'Review Commit'}</button>
+                ) : null}
                 {taskStatus === 'done' ? (
                   <button className="button button-danger" onClick={() => void deleteTask(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'delete' ? 'Deleting...' : 'Delete'}</button>
                 ) : null}
@@ -7382,6 +7426,12 @@ export default function App() {
               </div>
             </footer>
           </div>
+        </div>
+      ) : null}
+
+      {contextMenu ? (
+        <div className="context-menu" role="menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
+          <button role="menuitem" disabled={isTaskActionBusy} onClick={() => { setContextMenu(null); void reviewCommit(contextMenu.taskId) }}>Review Commit</button>
         </div>
       ) : null}
 

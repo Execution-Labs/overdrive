@@ -290,6 +290,18 @@ Run dependency inference across tasks and return inferred edges.
 ### `POST /api/tasks/{task_id}/reset-dep-analysis`
 Remove inferred dependency metadata and inferred blocker links for a task.
 
+### `POST /api/tasks/{task_id}/review-commit`
+Create a commit-review task from a completed task's commit.
+
+Behavior:
+- Validates source task exists and has status `done`.
+- Extracts commit SHA from the latest run's commit step.
+- Fetches the git diff and source task plan/description.
+- Creates a new `commit_review` task pre-loaded with source context.
+
+Response:
+- `task` — the newly created review task payload.
+
 ### `GET /api/tasks/{task_id}/workdoc`
 Return task work document payload.
 

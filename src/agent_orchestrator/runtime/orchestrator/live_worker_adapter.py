@@ -32,7 +32,7 @@ from .worker_adapter import StepResult
 logger = logging.getLogger(__name__)
 
 # Step category mapping
-_PLANNING_STEPS = {"plan", "analyze", "plan_refine", "initiative_plan", "initiative_plan_refine"}
+_PLANNING_STEPS = {"plan", "analyze", "plan_refine", "initiative_plan", "initiative_plan_refine", "commit_review"}
 _IMPL_STEPS = {"implement", "prototype"}
 _FIX_STEPS = {"implement_fix"}
 _VERIFY_STEPS = {"verify", "benchmark"}
@@ -88,6 +88,7 @@ _SETTINGS_PROMPT_STEPS: tuple[str, ...] = (
     "analyze",
     "analyze_deps",
     "benchmark",
+    "commit_review",
     "diagnose",
     "generate_tasks",
     "implement",
@@ -194,6 +195,8 @@ def _instruction_prompt_name(step: str, task_type: str) -> str:
     """Resolve the markdown prompt template path for a pipeline step."""
     category = _step_category(step)
     pipeline_id = PipelineRegistry().resolve_for_task_type(task_type).id
+    if step == "commit_review":
+        return "steps/commit_review.md"
     if step == "plan_refine":
         return "steps/plan_refine.md"
     if step == "initiative_plan_refine":
@@ -1086,6 +1089,25 @@ def build_step_prompt(
     if workdoc_block:
         parts.append("")
         parts.append(workdoc_block)
+
+    # Inject source context for commit_review steps.
+    if step == "commit_review" and isinstance(task.metadata, dict):
+        _cr_desc = str(task.metadata.get("source_description") or "").strip()
+        _cr_plan = str(task.metadata.get("source_plan") or "").strip()
+        _cr_diff = str(task.metadata.get("source_diff") or "").strip()
+        _cr_sha = str(task.metadata.get("source_commit_sha") or "").strip()
+        if _cr_desc:
+            parts.append("")
+            parts.append("## Original task description")
+            parts.append(_cr_desc)
+        if _cr_plan:
+            parts.append("")
+            parts.append("## Original task plan")
+            parts.append(_cr_plan)
+        if _cr_diff:
+            parts.append("")
+            parts.append(f"## Commit diff to review ({_cr_sha[:12]})" if _cr_sha else "## Commit diff to review")
+            parts.append(f"```diff\n{_cr_diff}\n```")
 
     # Inject outputs from prior pipeline steps.
     # For implement/implement_fix, rely on the workdoc as the single source of truth.

@@ -785,6 +785,13 @@ def _task_payload(
         summary = _build_execution_summary(task, container)
         if summary is not None:
             payload["execution_summary"] = summary
+    # Strip bulky source-context metadata keys (diff, plan, description) that are
+    # only consumed by the worker adapter.  source_task_id and source_commit_sha
+    # are intentionally kept for UI provenance display.
+    payload_meta = payload.get("metadata")
+    if isinstance(payload_meta, dict):
+        for key in ("source_diff", "source_plan", "source_description"):
+            payload_meta.pop(key, None)
     return payload
 
 

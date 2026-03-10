@@ -87,6 +87,11 @@ _INTERNAL_TASK_METADATA_KEYS = {
     "step_outputs",
     "task_generation_defaults",
     "task_generation_override",
+    "source_task_id",
+    "source_commit_sha",
+    "source_description",
+    "source_plan",
+    "source_diff",
 }
 
 
@@ -2828,3 +2833,104 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             "source_revision_id": resolved_revision_id,
             "effective_policy": effective_policy,
         }
+
+    @router.post("/tasks/{task_id}/review-commit")
+    async def review_commit(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Create a commit-review task from a completed task's commit.
+
+        Extracts the commit SHA, diff, description, and plan from the source
+        task and creates a new ``commit_review`` task pre-loaded with that
+        context so the pipeline can analyze and fix any issues found.
+
+        Args:
+            task_id: Identifier of the completed source task to review.
+            project_dir: Optional project directory for runtime state resolution.
+
+        Returns:
+            A payload containing the newly created review task.
+
+        Raises:
+            HTTPException: If the source task is missing (404), not done (400),
+                or has no commit (400).
+        """
+        container, bus, orchestrator = deps.ctx(project_dir)
+        source_task = container.tasks.get(task_id)
+        if not source_task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        if source_task.status != "done":
+            raise HTTPException(status_code=400, detail="Only completed tasks can be reviewed")
+
+        # Idempotency: reject if a commit_review task already exists for this source.
+        for existing in container.tasks.list():
+            if (
+                existing.task_type == "commit_review"
+                and isinstance(existing.metadata, dict)
+                and existing.metadata.get("source_task_id") == task_id
+                and existing.status not in ("failed", "cancelled")
+            ):
+                raise HTTPException(status_code=409, detail=f"A commit review task already exists: {existing.id}")
+
+        # Extract commit SHA from the latest run's steps.
+        commit_sha: str | None = None
+        for run_id in reversed(source_task.run_ids):
+            run_record = container.runs.get(run_id)
+            if not run_record:
+                continue
+            for step_entry in reversed(run_record.steps or []):
+                if isinstance(step_entry, dict) and step_entry.get("step") == "commit" and step_entry.get("commit"):
+                    commit_sha = str(step_entry["commit"]).strip()
+                    break
+            if commit_sha:
+                break
+
+        if not commit_sha:
+            raise HTTPException(status_code=400, detail="No commit found on source task")
+
+        # Fetch diff (truncate to ~100K characters to stay within prompt limits).
+        _MAX_DIFF_CHARS = 100_000
+        git_dir = container.project_dir
+        try:
+            diff_result = subprocess.run(
+                ["git", "diff", f"{commit_sha}~1..{commit_sha}"],
+                cwd=git_dir, capture_output=True, text=True, check=True, timeout=15,
+            )
+            diff_text = diff_result.stdout
+            if len(diff_text) > _MAX_DIFF_CHARS:
+                diff_text = diff_text[:_MAX_DIFF_CHARS].rsplit("\n", 1)[0]
+                diff_text += "\n\n[DIFF TRUNCATED — exceeded 100K character limit]"
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            diff_text = ""
+
+        # Extract plan text from source task (committed revision → step outputs → empty).
+        plan_text = ""
+        source_meta = source_task.metadata if isinstance(source_task.metadata, dict) else {}
+        for rev_key in ("committed_plan_revision_id", "latest_plan_revision_id"):
+            rev_id = str(source_meta.get(rev_key) or "").strip()
+            if not rev_id:
+                continue
+            revision = container.plan_revisions.get(rev_id)
+            if revision and revision.task_id == task_id and str(revision.content or "").strip():
+                plan_text = str(revision.content).strip()
+                break
+        if not plan_text:
+            so = source_meta.get("step_outputs")
+            if isinstance(so, dict):
+                plan_text = str(so.get("plan") or "").strip()
+
+        review_task = Task(
+            title=f"Review: {source_task.title}",
+            description=f"Review commit {commit_sha[:12]} from task {task_id}.",
+            task_type="commit_review",
+            status="queued",
+            source="commit_review",
+            metadata={
+                "source_task_id": task_id,
+                "source_commit_sha": commit_sha,
+                "source_description": source_task.description or "",
+                "source_plan": plan_text,
+                "source_diff": diff_text,
+            },
+        )
+        container.tasks.upsert(review_task)
+        bus.emit(channel="tasks", event_type="task.created", entity_id=review_task.id, payload={"status": review_task.status})
+        return {"task": _task_payload(review_task, orchestrator=orchestrator)}

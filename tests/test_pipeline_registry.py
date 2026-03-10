@@ -15,8 +15,8 @@ class TestPipelineTemplate:
         """Test that builtin templates exist."""
         expected = {
             "feature", "bug_fix", "refactor", "research", "docs",
-            "test", "repo_review", "security_audit", "review", "performance",
-            "hotfix", "spike", "chore", "plan_only", "verify_only",
+            "test", "repo_review", "security_audit", "review", "commit_review",
+            "performance", "hotfix", "spike", "chore", "plan_only", "verify_only",
         }
         assert expected == set(BUILTIN_TEMPLATES.keys())
 
@@ -88,7 +88,7 @@ class TestPipelineRegistry:
         """Test that list templates."""
         reg = PipelineRegistry()
         templates = reg.list_templates()
-        assert len(templates) == 15
+        assert len(templates) == 16
 
     def test_get_template(self):
         """Test that get template."""

@@ -189,6 +189,21 @@ REVIEW_PIPELINE = PipelineTemplate(
     ),
 )
 
+COMMIT_REVIEW_PIPELINE = PipelineTemplate(
+    id="commit_review",
+    display_name="Commit Review",
+    description="Review a completed task's commit, fix issues found, and verify corrections.",
+    task_types=("commit_review",),
+    steps=(
+        StepDef(name="commit_review", display_name="Review Commit"),
+        StepDef(name="implement", display_name="Implement Fixes"),
+        StepDef(name="verify", display_name="Verify"),
+        StepDef(name="review", display_name="Review"),
+        StepDef(name="commit", display_name="Commit"),
+    ),
+    metadata={"supports_skip_to_precommit": True},
+)
+
 PERFORMANCE_PIPELINE = PipelineTemplate(
     id="performance",
     display_name="Performance Optimization",
@@ -281,6 +296,7 @@ BUILTIN_TEMPLATES: dict[str, PipelineTemplate] = {
         REPO_REVIEW_PIPELINE,
         SECURITY_AUDIT_PIPELINE,
         REVIEW_PIPELINE,
+        COMMIT_REVIEW_PIPELINE,
         PERFORMANCE_PIPELINE,
         HOTFIX_PIPELINE,
         SPIKE_PIPELINE,
