@@ -19,6 +19,7 @@ from .interfaces import (
     TerminalSessionRepository,
 )
 from .sqlite_db import SQLiteDB
+from .task_helpers import is_retry_backoff_elapsed, is_resume_requested, priority_rank
 
 
 def _json_dumps(payload: dict[str, Any]) -> str:
@@ -33,8 +34,9 @@ def _json_loads(value: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _priority_rank(priority: str) -> int:
-    return {"P0": 0, "P1": 1, "P2": 2, "P3": 3}.get(priority, 99)
+_priority_rank = priority_rank
+_is_retry_backoff_elapsed = is_retry_backoff_elapsed
+_resume_requested = is_resume_requested
 
 
 class SqliteTaskRepository(TaskRepository):
@@ -99,20 +101,10 @@ class SqliteTaskRepository(TaskRepository):
             rows = conn.execute("SELECT payload FROM tasks").fetchall()
             tasks = [Task.from_dict(_json_loads(str(row["payload"]))) for row in rows]
 
-            def _resume_requested(task: Task) -> bool:
-                if task.status != "in_progress" or task.pending_gate:
-                    return False
-                if not isinstance(task.metadata, dict):
-                    return False
-                checkpoint = task.metadata.get("execution_checkpoint")
-                if not isinstance(checkpoint, dict):
-                    return False
-                return bool(str(checkpoint.get("resume_requested_at") or "").strip())
-
             in_progress = [
                 task
                 for task in tasks
-                if task.status == "in_progress" and not task.pending_gate and not _resume_requested(task)
+                if task.status == "in_progress" and not task.pending_gate and not is_resume_requested(task)
             ]
             if len(in_progress) >= max_in_progress:
                 return None
@@ -124,6 +116,8 @@ class SqliteTaskRepository(TaskRepository):
                 if task.status not in {"queued", "in_progress"}:
                     return False
                 if task.status == "queued" and task.pending_gate:
+                    return False
+                if task.status == "queued" and not _is_retry_backoff_elapsed(task):
                     return False
                 if task.status == "in_progress" and not _resume_requested(task):
                     return False
@@ -339,8 +333,12 @@ class SqliteTerminalSessionRepository(TerminalSessionRepository):
 class SqliteEventRepository(EventRepository):
     """SQLite-backed event repository."""
 
+    _RETENTION_LIMIT = 10_000
+    _PRUNE_INTERVAL = 500
+
     def __init__(self, db: SQLiteDB) -> None:
         self._db = db
+        self._append_count = 0
 
     def append(
         self,
@@ -378,7 +376,20 @@ class SqliteEventRepository(EventRepository):
                 _json_dumps(event_payload),
             ),
         )
+        self._append_count += 1
+        if self._append_count % self._PRUNE_INTERVAL == 0:
+            self._prune()
         return event
+
+    def _prune(self) -> None:
+        """Delete events beyond the retention limit, keeping the newest."""
+        self._db.execute(
+            """
+            DELETE FROM events
+            WHERE seq <= (SELECT seq FROM events ORDER BY seq DESC LIMIT 1 OFFSET ?)
+            """,
+            (self._RETENTION_LIMIT,),
+        )
 
     def list_recent(self, limit: int = 100) -> List[dict[str, Any]]:
         if limit <= 0:

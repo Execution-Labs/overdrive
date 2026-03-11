@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, Optional, cast
 
 WorkerProviderType = Literal["codex", "ollama", "claude"]
+WorkerExecutionMode = Literal["sandboxed", "host_access"]
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,8 @@ class WorkerProviderSpec:
         command: Shell command used to invoke CLI-backed providers (Codex/Claude).
         model: Model identifier configured for this provider.
         reasoning_effort: Optional reasoning level for providers that support it.
+        execution_mode: Execution access level for CLI-backed providers.
+        capabilities: Optional capability tags (for example ``"docker"``).
         endpoint: Base URL for Ollama-compatible HTTP providers.
         temperature: Sampling temperature for Ollama requests.
         num_ctx: Context window size override for Ollama requests.
@@ -28,6 +31,8 @@ class WorkerProviderSpec:
     command: Optional[str] = None
     model: Optional[str] = None
     reasoning_effort: Optional[str] = None
+    execution_mode: WorkerExecutionMode = "sandboxed"
+    capabilities: tuple[str, ...] = ()
     # ollama
     endpoint: Optional[str] = None
     temperature: Optional[float] = None
@@ -106,6 +111,27 @@ def get_workers_runtime_config(
 
     providers: dict[str, WorkerProviderSpec] = {}
 
+    def _execution_mode_for(provider_type: str, raw_mode: Any) -> WorkerExecutionMode:
+        mode = str(raw_mode or "").strip().lower()
+        if mode in {"sandboxed", "host_access"}:
+            return cast(WorkerExecutionMode, mode)
+        # Preserve existing behavior for Claude providers that historically
+        # always ran with --dangerously-skip-permissions.
+        if provider_type == "claude":
+            return "host_access"
+        return "sandboxed"
+
+    def _normalize_capabilities(raw_value: Any) -> tuple[str, ...]:
+        if not isinstance(raw_value, list):
+            return ()
+        out: list[str] = []
+        for item in raw_value:
+            cap = str(item or "").strip().lower()
+            if not cap or cap in out:
+                continue
+            out.append(cap)
+        return tuple(out)
+
     # Always provide a built-in codex provider; config can override fields.
     codex_cfg = _as_dict(providers_cfg.get("codex"))
     codex_command = str(codex_cfg.get("command") or codex_command_fallback).strip()
@@ -119,6 +145,8 @@ def get_workers_runtime_config(
         command=codex_command,
         model=codex_model,
         reasoning_effort=codex_reasoning,
+        execution_mode=_execution_mode_for("codex", codex_cfg.get("execution_mode")),
+        capabilities=_normalize_capabilities(codex_cfg.get("capabilities")),
     )
 
     for name, raw in providers_cfg.items():
@@ -144,6 +172,8 @@ def get_workers_runtime_config(
                 command=cmd,
                 model=model,
                 reasoning_effort=reasoning_effort,
+                execution_mode=_execution_mode_for(provider_type, item.get("execution_mode")),
+                capabilities=_normalize_capabilities(item.get("capabilities")),
             )
             continue
 
@@ -158,6 +188,7 @@ def get_workers_runtime_config(
             model=model,
             temperature=float(temperature) if isinstance(temperature, (int, float)) else None,
             num_ctx=int(num_ctx) if isinstance(num_ctx, int) else None,
+            capabilities=_normalize_capabilities(item.get("capabilities")),
         )
 
     # Normalize routing values to strings.

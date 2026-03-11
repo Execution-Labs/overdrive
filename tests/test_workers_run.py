@@ -174,6 +174,8 @@ def test_run_worker_codex_adds_model_and_reasoning_flags(
     assert "gpt-5-codex" in captured["command"]
     assert "--reasoning-effort" in captured["command"]
     assert "medium" in captured["command"]
+    assert "--full-auto" in captured["command"]
+    assert "--danger-full-access" not in captured["command"]
 
 
 def test_run_worker_codex_skips_reasoning_flag_when_unsupported(
@@ -231,6 +233,59 @@ def test_run_worker_codex_skips_reasoning_flag_when_unsupported(
     assert "--reasoning-effort" not in captured["command"]
 
 
+def test_run_worker_codex_host_access_injects_danger_flag(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    progress_path = run_dir / "progress.json"
+    captured: dict[str, str] = {}
+
+    def _fake_codex_worker(**kwargs: object) -> dict[str, object]:
+        captured["command"] = str(kwargs.get("command") or "")
+        return {
+            "prompt_path": str(run_dir / "prompt.txt"),
+            "stdout_path": str(run_dir / "stdout.log"),
+            "stderr_path": str(run_dir / "stderr.log"),
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-01T00:00:10Z",
+            "runtime_seconds": 10,
+            "exit_code": 0,
+            "timed_out": False,
+            "no_heartbeat": False,
+        }
+
+    monkeypatch.setattr(
+        "agent_orchestrator.workers.run._run_codex_worker",
+        _fake_codex_worker,
+    )
+    monkeypatch.setattr(
+        "agent_orchestrator.workers.run._codex_supports_reasoning_effort",
+        lambda _exe: True,
+    )
+
+    run_worker(
+        spec=WorkerProviderSpec(
+            name="codex",
+            type="codex",
+            command="codex",
+            execution_mode="host_access",
+        ),
+        prompt="test",
+        project_dir=project_dir,
+        run_dir=run_dir,
+        timeout_seconds=60,
+        heartbeat_seconds=30,
+        heartbeat_grace_seconds=15,
+        progress_path=progress_path,
+    )
+
+    assert "--danger-full-access" in captured["command"]
+    assert "--full-auto" not in captured["command"]
+
+
 def test_run_worker_claude_adds_model_and_effort_flags(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -271,6 +326,7 @@ def test_run_worker_claude_adds_model_and_effort_flags(
             command="claude -p",
             model="sonnet",
             reasoning_effort="medium",
+            execution_mode="host_access",
         ),
         prompt="test",
         project_dir=project_dir,
@@ -328,6 +384,7 @@ def test_run_worker_claude_skips_effort_when_unsupported(
             command="claude -p",
             model="sonnet",
             reasoning_effort="high",
+            execution_mode="host_access",
         ),
         prompt="test",
         project_dir=project_dir,
@@ -382,6 +439,7 @@ def test_run_worker_claude_defaults_to_stream_json_output(
             name="claude",
             type="claude",
             command="claude -p",
+            execution_mode="host_access",
         ),
         prompt="test",
         project_dir=project_dir,
@@ -397,6 +455,58 @@ def test_run_worker_claude_defaults_to_stream_json_output(
     assert "--include-partial-messages" in captured["command"]
     assert "--verbose" in captured["command"]
     assert "--dangerously-skip-permissions" in captured["command"]
+
+
+def test_run_worker_claude_sandboxed_does_not_force_danger_permission_flag(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    progress_path = run_dir / "progress.json"
+    captured: dict[str, str] = {}
+
+    def _fake_worker(**kwargs: object) -> dict[str, object]:
+        captured["command"] = str(kwargs.get("command") or "")
+        return {
+            "prompt_path": str(run_dir / "prompt.txt"),
+            "stdout_path": str(run_dir / "stdout.log"),
+            "stderr_path": str(run_dir / "stderr.log"),
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-01T00:00:10Z",
+            "runtime_seconds": 10,
+            "exit_code": 0,
+            "timed_out": False,
+            "no_heartbeat": False,
+        }
+
+    monkeypatch.setattr(
+        "agent_orchestrator.workers.run._run_codex_worker",
+        _fake_worker,
+    )
+    monkeypatch.setattr(
+        "agent_orchestrator.workers.run._claude_supports_effort",
+        lambda _exe: True,
+    )
+
+    run_worker(
+        spec=WorkerProviderSpec(
+            name="claude",
+            type="claude",
+            command="claude -p",
+            execution_mode="sandboxed",
+        ),
+        prompt="test",
+        project_dir=project_dir,
+        run_dir=run_dir,
+        timeout_seconds=60,
+        heartbeat_seconds=30,
+        heartbeat_grace_seconds=15,
+        progress_path=progress_path,
+    )
+
+    assert "--dangerously-skip-permissions" not in captured["command"]
 
 
 def test_run_worker_claude_stream_json_extracts_assistant_text(

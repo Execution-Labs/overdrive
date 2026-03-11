@@ -14,7 +14,7 @@ from ..orchestrator.human_guidance import (
     clear_active_human_guidance,
     set_active_human_guidance,
 )
-from ..domain.models import now_iso
+from ..domain.models import Task, now_iso
 from .deps import RouteDeps
 from . import router_impl as impl
 
@@ -133,8 +133,12 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         Returns:
             A payload containing in-review tasks and total count.
         """
-        container, _, _ = deps.ctx(project_dir)
-        items = [_task_payload(task) for task in container.tasks.list() if task.status == "in_review"]
+        container, _, orchestrator = deps.ctx(project_dir)
+        items = [
+            _task_payload(task, orchestrator=orchestrator)
+            for task in container.tasks.list()
+            if task.status == "in_review"
+        ]
         return {"tasks": items, "total": len(items)}
 
     @router.post("/review/{task_id}/approve")
@@ -156,8 +160,8 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        if task.status not in ("in_review", "blocked"):
-            raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review or blocked")
+        if task.status != "in_review":
+            raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review")
 
         is_precommit_review = bool(task.metadata.get("pending_precommit_approval"))
 
@@ -275,13 +279,53 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
                     container.runs.upsert(latest_run)
                 container.tasks.upsert(task)
             bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={"stage": "pre_commit", "guidance": body.guidance or ""})
-            return {"task": _task_payload(task, container)}
+            return {"task": _task_payload(task, container, orchestrator)}
 
         # If there's a preserved branch, merge it before marking done
         if task.metadata.get("preserved_branch"):
             merge_result = orchestrator.approve_and_merge(task)
-            if merge_result.get("status") == "merge_conflict":
-                raise HTTPException(status_code=409, detail="Merge conflict could not be resolved")
+            merge_status = str(merge_result.get("status") or "")
+            if merge_status in {"merge_conflict", "dirty_overlapping", "git_error"}:
+                # Transition to blocked and surface a precise merge failure reason,
+                # mirroring what the task executor does for the pre-commit path.
+                task = container.tasks.get(task_id)
+                if not task:
+                    raise HTTPException(status_code=404, detail="Task not found")
+                ts = now_iso()
+                task.status = "blocked"
+                task.current_step = "commit"
+                task.metadata["pipeline_phase"] = "commit"
+                reason_code = str(merge_result.get("reason_code") or merge_status or "").strip() or None
+                if merge_status == "merge_conflict":
+                    task.error = "Merge conflict could not be resolved automatically"
+                else:
+                    task.error = str(merge_result.get("error") or "").strip() or "Git merge failed before conflict resolution"
+                review_history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
+                review_history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
+                with container.transaction():
+                    latest_run = None
+                    for run_id in reversed(task.run_ids):
+                        latest_run = container.runs.get(run_id)
+                        if latest_run:
+                            break
+                    if latest_run and latest_run.status not in {"done", "blocked"}:
+                        latest_run.status = "blocked"
+                        latest_run.finished_at = latest_run.finished_at or ts
+                        if reason_code == "dirty_overlapping":
+                            latest_run.summary = "Blocked due to overlapping local integration changes"
+                        elif reason_code == "git_error":
+                            latest_run.summary = "Blocked due to git merge error"
+                        else:
+                            latest_run.summary = "Blocked due to unresolved merge conflict"
+                        container.runs.upsert(latest_run)
+                    container.tasks.upsert(task)
+                bus.emit(
+                    channel="tasks",
+                    event_type="task.blocked",
+                    entity_id=task.id,
+                    payload={"error": task.error, "reason_code": reason_code},
+                )
+                return {"task": _task_payload(task, container, orchestrator)}
             # Re-fetch task after merge (approve_and_merge upserts)
             task = container.tasks.get(task_id)
             if not task:
@@ -291,8 +335,8 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.error = None
         ts = now_iso()
         task.metadata["last_review_approval"] = {"ts": ts, "guidance": body.guidance}
-        review_history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
-        review_history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
+        approve_history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
+        approve_history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
 
         with container.transaction():
             latest_run = None
@@ -309,7 +353,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
 
             container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={"guidance": body.guidance or ""})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.post("/review/{task_id}/request-changes")
     async def request_review_changes(task_id: str, body: ReviewActionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -326,7 +370,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task is missing or not in review.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -367,7 +411,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
                 container.runs.upsert(latest_run)
             container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.changes_requested", entity_id=task.id, payload={"guidance": guidance})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.get("/orchestrator/status")
     async def orchestrator_status(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -458,7 +502,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         Returns:
             The normalized settings payload after persistence.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         cfg = container.config.load()
         touched_sections: list[str] = []
 
@@ -486,6 +530,17 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
                 defaults_cfg["dependency_policy"] = dep_policy
             if "hitl_mode" in incoming_defaults:
                 defaults_cfg["hitl_mode"] = normalize_hitl_mode(incoming_defaults.get("hitl_mode"))
+            incoming_task_generation = incoming_defaults.get("task_generation")
+            if isinstance(incoming_task_generation, dict):
+                task_generation_cfg = orchestrator.resolve_task_generation_policy(
+                    Task(hitl_mode=defaults_cfg.get("hitl_mode") or "autopilot"),
+                    request_overrides=incoming_task_generation,
+                )
+                defaults_cfg["task_generation"] = {
+                    "child_status": task_generation_cfg.get("child_status"),
+                    "child_hitl_mode": task_generation_cfg.get("child_hitl_mode_selection"),
+                    "infer_deps": bool(task_generation_cfg.get("infer_deps", True)),
+                }
             cfg["defaults"] = defaults_cfg
             touched_sections.append("defaults")
 
@@ -509,6 +564,8 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
                 workers_cfg["routing"] = dict(incoming_workers.get("routing") or {})
             if "providers" in incoming_workers:
                 workers_cfg["providers"] = dict(incoming_workers.get("providers") or {})
+            if "environment" in incoming_workers:
+                workers_cfg["environment"] = dict(incoming_workers.get("environment") or {})
 
             normalized_workers = _settings_payload({"workers": workers_cfg})["workers"]
             cfg["workers"] = normalized_workers

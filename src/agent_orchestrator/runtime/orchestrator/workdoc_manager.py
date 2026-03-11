@@ -20,6 +20,7 @@ class WorkdocManager:
     _WORKDOC_SECTION_MAP: dict[str, tuple[str, str | None]] = {
         "plan": ("## Plan", "plan"),
         "initiative_plan": ("## Plan", "plan"),
+        "commit_review": ("## Plan", "plan"),
         "analyze": ("## Analysis", "analyze"),
         "diagnose": ("## Analysis", "analyze"),
         "scan_deps": ("## Dependency Scan Findings", "scan_deps"),
@@ -31,12 +32,12 @@ class WorkdocManager:
         "implement_fix": ("## Fix Log", None),  # placeholder uses different wording
         "verify": ("## Verification Results", "verify"),
         "benchmark": ("## Verification Results", "verify"),
-        "reproduce": ("## Verification Results", "verify"),
         "report": ("## Final Report", "report"),
     }
     _WORKDOC_SENTINEL_ID_MAP: dict[str, str] = {
         "plan": "plan",
         "initiative_plan": "plan",
+        "commit_review": "plan",
         "analyze": "analysis",
         "diagnose": "analysis",
         "scan_deps": "dependency_scan_findings",
@@ -48,7 +49,6 @@ class WorkdocManager:
         "implement_fix": "fix_log",
         "verify": "verification_results",
         "benchmark": "verification_results",
-        "reproduce": "verification_results",
         "report": "final_report",
         "review": "review_findings",
     }
@@ -82,7 +82,6 @@ class WorkdocManager:
         "## Prototype Notes": "implementation_log",
         "## Fix Log": "fix_log",
         "## Verification Results": "verification_results",
-        "## Reproduction Evidence": "verification_results",
         "## Benchmark Results": "verification_results",
         "## Final Report": "final_report",
         "## Security Report": "final_report",
@@ -316,7 +315,7 @@ _Pending: will be populated by the review step._
 _Pending: will be populated by the report step._
 """
 
-    _BUG_FIX_WORKDOC_TEMPLATE = """\
+    _COMMIT_REVIEW_WORKDOC_TEMPLATE = """\
 # Working Document: {title}
 
 **Task ID:** {task_id}
@@ -331,9 +330,41 @@ _Pending: will be populated by the report step._
 
 ---
 
-## Reproduction Evidence
+## Plan
 
-_Pending: will be populated by the reproduce step._
+_Pending: will be populated by the commit review step with findings and fix tasks._
+
+## Implementation Log
+
+_Pending: will be populated by the implement step._
+
+## Verification Results
+
+_Pending: will be populated by the verify step._
+
+## Review Findings
+
+_Pending: will be populated by the review step._
+
+## Fix Log
+
+_Pending: will be populated as needed._
+"""
+
+    _BUG_FIX_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
 
 ## Diagnosis
 
@@ -649,6 +680,7 @@ _Pending: will be populated by the report step._
             "repo_review": self._REPO_REVIEW_WORKDOC_TEMPLATE,
             "security_audit": self._SECURITY_AUDIT_WORKDOC_TEMPLATE,
             "review": self._REVIEW_WORKDOC_TEMPLATE,
+            "commit_review": self._COMMIT_REVIEW_WORKDOC_TEMPLATE,
             "performance": self._PERFORMANCE_WORKDOC_TEMPLATE,
             "hotfix": self._HOTFIX_WORKDOC_TEMPLATE,
             "spike": self._SPIKE_WORKDOC_TEMPLATE,
@@ -679,9 +711,9 @@ _Pending: will be populated by the report step._
             },
             "review": {
                 "analyze": ("## Review Analysis", "analyze"),
+                "implement_fix": ("## Review Findings", "review"),
             },
             "bug_fix": {
-                "reproduce": ("## Reproduction Evidence", "reproduce"),
                 "diagnose": ("## Diagnosis", "diagnose"),
                 "implement": ("## Fix Implementation", "implement"),
             },
@@ -880,7 +912,7 @@ _Pending: will be populated by the report step._
         changed = False
         sync_mode: str | None = None
         sync_reason: str | None = None
-        orchestrator_managed_steps = {"verify", "benchmark", "reproduce", "implement_fix", "report", "profile"}
+        orchestrator_managed_steps = {"verify", "benchmark", "implement_fix", "report", "profile"}
         allow_worker_workdoc_write = step not in orchestrator_managed_steps
         if worktree_text != canonical_text and allow_worker_workdoc_write:
             section = self.workdoc_section_for_step(task, step)
@@ -1005,7 +1037,14 @@ _Pending: will be populated by the report step._
                 attempt=attempt,
             )
             if summary_updated is None:
-                return
+                self._set_sync_diagnostics(
+                    task,
+                    error_type="orchestrator_append_failed",
+                    mode="blocked_invalid_structure",
+                    step=step,
+                    attempt=attempt,
+                )
+                raise ValueError(f"Unable to sync workdoc for step '{step}': orchestrator_append_failed")
             canonical.write_text(summary_updated, encoding="utf-8")
             worktree_copy.write_text(summary_updated, encoding="utf-8")
             changed = True
@@ -1123,7 +1162,12 @@ _Pending: will be populated by the report step._
         if guidance:
             lines.append(f"- Guidance: {guidance}")
         if previous_error:
-            lines.append(f"- Previous error: {previous_error}")
+            first_line = next((line.strip() for line in previous_error.splitlines() if line.strip()), "")
+            compact = first_line[:240]
+            if len(first_line) > 240:
+                compact += "..."
+            if compact:
+                lines.append(f"- Previous error: {compact}")
 
         block = "\n".join(lines)
         updated = text.rstrip() + "\n\n" + block + "\n"
@@ -1204,8 +1248,9 @@ _Pending: will be populated by the report step._
             return "valid", (start_content, end_content), True
         return "missing", None, True
 
-    @staticmethod
+    @classmethod
     def _append_summary_under_heading(
+        cls,
         canonical_text: str,
         *,
         heading: str,
@@ -1225,6 +1270,23 @@ _Pending: will be populated by the report step._
             trimmed = f"### Fix Cycle {attempt_num}\n{trimmed}"
         else:
             trimmed = f"### Attempt {attempt_num}\n{trimmed}"
+        section_id = cls._WORKDOC_SENTINEL_ID_MAP.get(step)
+        if section_id is not None:
+            state, bounds, _ = cls._sentinel_section_bounds(canonical_text, section_id)
+            if state == "valid" and bounds is not None:
+                start, end = bounds
+                body = canonical_text[start:end]
+                if placeholder in body:
+                    updated_body = body.replace(placeholder, trimmed, 1)
+                else:
+                    body_stripped = body.rstrip()
+                    if body_stripped:
+                        updated_body = f"{body_stripped}\n\n{trimmed}\n"
+                    else:
+                        updated_body = f"{trimmed}\n"
+                return canonical_text[:start] + updated_body + canonical_text[end:]
+            if state == "malformed":
+                return None
         if placeholder in canonical_text:
             return canonical_text.replace(placeholder, trimmed, 1)
         idx = canonical_text.find(heading)

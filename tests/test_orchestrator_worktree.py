@@ -6,11 +6,13 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+from unittest.mock import patch
 
-from agent_orchestrator.runtime.domain.models import Task
+from agent_orchestrator.runtime.domain.models import RunRecord, Task, now_iso
 from agent_orchestrator.runtime.events import EventBus
 from agent_orchestrator.runtime.orchestrator import OrchestratorService
 from agent_orchestrator.runtime.orchestrator.live_worker_adapter import build_step_prompt
+from agent_orchestrator.runtime.orchestrator.worktree_manager import WorktreeManager
 from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 from agent_orchestrator.runtime.storage.container import Container
 
@@ -99,6 +101,153 @@ def test_worktree_created_for_task(tmp_path: Path) -> None:
     assert "worktree_dir" not in updated.metadata
 
 
+def test_create_worktree_reuses_existing_task_branch_without_b_flag_failure(tmp_path: Path) -> None:
+    """Creating a task worktree should succeed even when task branch already exists."""
+    container, service, _ = _service(tmp_path, git=True)
+    task = Task(title="Branch reuse", task_type="chore", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+
+    branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "branch", branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    worktree_dir = service._create_worktree(task)
+    assert worktree_dir is not None
+    assert worktree_dir.exists()
+    current_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=worktree_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert current_branch == branch
+
+    subprocess.run(
+        ["git", "worktree", "remove", str(worktree_dir), "--force"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_create_worktree_recovers_from_branch_exists_race(tmp_path: Path) -> None:
+    """If `worktree add -b` races with branch creation, fallback should still succeed."""
+    container, service, _ = _service(tmp_path, git=True)
+    task = Task(title="Branch race", task_type="chore", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+
+    branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "branch", branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    # Simulate TOCTOU: branch exists in git but the pre-check returns false.
+    with patch.object(WorktreeManager, "_local_branch_exists", return_value=False):
+        worktree_dir = service._create_worktree(task)
+    assert worktree_dir is not None
+    assert worktree_dir.exists()
+
+    current_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=worktree_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert current_branch == branch
+
+    subprocess.run(
+        ["git", "worktree", "remove", str(worktree_dir), "--force"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_create_worktree_retries_transient_git_lock_error(tmp_path: Path) -> None:
+    """Worktree creation should recover from transient git lock contention."""
+    container, service, _ = _service(tmp_path, git=True)
+    task = Task(title="Transient lock", task_type="chore", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+
+    index_lock = tmp_path / ".git" / "index.lock"
+    index_lock.write_text("locked\n", encoding="utf-8")
+
+    def _release_lock() -> None:
+        time.sleep(0.12)
+        if index_lock.exists():
+            index_lock.unlink()
+
+    releaser = threading.Thread(target=_release_lock, daemon=True)
+    releaser.start()
+    worktree_dir = service._create_worktree(task)
+    releaser.join(timeout=1.0)
+
+    assert worktree_dir is not None
+    assert worktree_dir.exists()
+    assert not index_lock.exists()
+
+    subprocess.run(
+        ["git", "worktree", "remove", str(worktree_dir), "--force"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_create_worktree_from_branch_retries_transient_git_lock_error(tmp_path: Path) -> None:
+    """Retaching from preserved branch should recover from transient git lock contention."""
+    container, service, _ = _service(tmp_path, git=True)
+    task = Task(title="Transient lock preserved", task_type="chore", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+    branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "branch", branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    index_lock = tmp_path / ".git" / "index.lock"
+    index_lock.write_text("locked\n", encoding="utf-8")
+
+    def _release_lock() -> None:
+        time.sleep(0.12)
+        if index_lock.exists():
+            index_lock.unlink()
+
+    releaser = threading.Thread(target=_release_lock, daemon=True)
+    releaser.start()
+    worktree_dir = service._create_worktree_from_branch(task, branch)
+    releaser.join(timeout=1.0)
+
+    assert worktree_dir is not None
+    assert worktree_dir.exists()
+    assert not index_lock.exists()
+
+    subprocess.run(
+        ["git", "worktree", "remove", str(worktree_dir), "--force"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 2. Concurrent same-repo tasks run in parallel via worktrees
 # ---------------------------------------------------------------------------
@@ -140,13 +289,63 @@ def test_concurrent_same_repo_tasks(tmp_path: Path) -> None:
         assert task.status == "done"
 
 
+def test_ensure_worker_skips_recovery_for_inflight_manual_run(tmp_path: Path) -> None:
+    """Starting scheduler must not recover/requeue a task currently running via run_task()."""
+    entered_implement = threading.Event()
+    release_implement = threading.Event()
+
+    class BlockingAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                entered_implement.set()
+                if not release_implement.wait(timeout=10):
+                    raise RuntimeError("timeout waiting for implement release")
+                (Path(wt) / f"{task.id}.txt").write_text("impl\n")
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=BlockingAdapter(), concurrency=2)
+    task = Task(title="Manual run", task_type="chore", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+
+    holder: dict[str, Task] = {}
+    errors: list[Exception] = []
+
+    def _run_manual() -> None:
+        try:
+            holder["task"] = service.run_task(task.id)
+        except Exception as exc:  # pragma: no cover - assertion checks this list
+            errors.append(exc)
+
+    runner = threading.Thread(target=_run_manual, daemon=True)
+    runner.start()
+    try:
+        assert entered_implement.wait(timeout=5), "manual run never reached implement"
+        service.ensure_worker()
+
+        mid = container.tasks.get(task.id)
+        assert mid is not None
+        assert mid.status == "in_progress"
+        assert "Recovered from interrupted run" not in str(mid.error or "")
+    finally:
+        release_implement.set()
+        runner.join(timeout=15)
+        service.shutdown(timeout=2)
+
+    assert not errors
+    assert "task" in holder
+    final = container.tasks.get(task.id)
+    assert final is not None
+    assert final.status == "done"
+
+
 # ---------------------------------------------------------------------------
-# 3. Task branch is merged to run branch
+# 3. Task branch is merged to the user's current branch
 # ---------------------------------------------------------------------------
 
 
-def test_task_branch_merged_to_run_branch(tmp_path: Path) -> None:
-    """After task completes, its commits appear on the run branch."""
+def test_task_branch_merged_to_current_branch(tmp_path: Path) -> None:
+    """After task completes, its commits appear on the user's original branch."""
 
     class FileWriter:
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
@@ -167,7 +366,7 @@ def test_task_branch_merged_to_run_branch(tmp_path: Path) -> None:
     result = service.run_task(task.id)
     assert result.status == "done"
 
-    # The file should exist on the run branch (project_dir)
+    # The file should exist on the base branch (project_dir)
     expected_file = tmp_path / f"{task.id}.txt"
     assert expected_file.exists()
     assert expected_file.read_text().strip() == f"work by {task.id}"
@@ -276,6 +475,196 @@ def test_merge_conflict_fallback_on_worker_failure(tmp_path: Path) -> None:
     assert len(ok_tasks) == 1
     assert ok_tasks[0].status == "done"
 
+    for t in tasks:
+        assert t is not None
+        assert "merge_conflict_attempt" not in t.metadata
+        assert "merge_conflict_max_attempts" not in t.metadata
+        assert "merge_conflict_previous_error" not in t.metadata
+
+
+def test_merge_conflict_retries_then_succeeds(tmp_path: Path) -> None:
+    """resolve_merge retries on worker error and succeeds on a later attempt."""
+    write_barrier = threading.Barrier(2, timeout=5)
+    resolve_attempts: list[int] = []
+    resolve_meta: list[dict[str, object]] = []
+
+    class RetryResolveAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / "shared.txt").write_text(f"content by {task.title}\n")
+                write_barrier.wait()
+            if step == "resolve_merge":
+                resolve_attempts.append(attempt)
+                resolve_meta.append(
+                    {
+                        "attempt": task.metadata.get("merge_conflict_attempt"),
+                        "max_attempts": task.metadata.get("merge_conflict_max_attempts"),
+                        "previous_error": task.metadata.get("merge_conflict_previous_error"),
+                    }
+                )
+                if attempt == 1:
+                    return StepResult(status="error", summary="first attempt failed")
+                conflict_files = task.metadata.get("merge_conflict_files", {})
+                for fpath in conflict_files:
+                    (tmp_path / fpath).write_text("resolved on retry\n")
+                return StepResult(status="ok")
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=RetryResolveAdapter(), concurrency=2)
+    t1 = Task(title="Alpha", task_type="feature", status="queued", hitl_mode="autopilot")
+    t2 = Task(title="Beta", task_type="feature", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(t1)
+    container.tasks.upsert(t2)
+
+    assert service.tick_once() is True
+    assert service.tick_once() is True
+    _wait_futures(service, timeout=15)
+
+    assert resolve_attempts == [1, 2]
+    assert resolve_meta[0]["attempt"] == 1
+    assert resolve_meta[0]["max_attempts"] == 3
+    assert not resolve_meta[0]["previous_error"]
+    assert resolve_meta[1]["attempt"] == 2
+    assert "first attempt failed" in str(resolve_meta[1]["previous_error"] or "")
+    assert (tmp_path / "shared.txt").read_text().strip() == "resolved on retry"
+
+    for tid in [t1.id, t2.id]:
+        task = container.tasks.get(tid)
+        assert task is not None
+        assert task.status == "done"
+        assert "merge_conflict_attempt" not in task.metadata
+        assert "merge_conflict_max_attempts" not in task.metadata
+        assert "merge_conflict_previous_error" not in task.metadata
+
+
+def test_merge_conflict_worker_ok_but_unmerged_retries(tmp_path: Path) -> None:
+    """A false-positive worker success should retry until unmerged index entries are gone."""
+    resolve_attempts: list[int] = []
+    resolve_previous_errors: list[str] = []
+
+    class FalsePositiveResolveAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            if step == "resolve_merge":
+                resolve_attempts.append(attempt)
+                resolve_previous_errors.append(str(task.metadata.get("merge_conflict_previous_error") or ""))
+                if attempt == 1:
+                    # Claim success but leave unresolved merge entries untouched.
+                    return StepResult(status="ok")
+                (tmp_path / "shared.txt").write_text("resolved after index check\n")
+                return StepResult(status="ok")
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=FalsePositiveResolveAdapter(), concurrency=1)
+    task = Task(title="Resolve once then retry", task_type="feature", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+    branch = f"task-{task.id}"
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    (tmp_path / "shared.txt").write_text("base\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "add shared"], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    subprocess.run(["git", "checkout", "-b", branch], cwd=tmp_path, check=True, capture_output=True, text=True)
+    (tmp_path / "shared.txt").write_text("branch\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "branch change"], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    subprocess.run(["git", "checkout", base_branch], cwd=tmp_path, check=True, capture_output=True, text=True)
+    (tmp_path / "shared.txt").write_text("main\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "main change"], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    merge_attempt = subprocess.run(
+        ["git", "merge", branch, "--ff", "--no-edit"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert merge_attempt.returncode != 0
+
+    resolved = service._worktree_manager.resolve_merge_conflict(task, branch)
+    assert resolved is True
+
+    assert resolve_attempts == [1, 2]
+    assert resolve_previous_errors[0] == ""
+    assert "conflict markers are still present" in resolve_previous_errors[1]
+    assert (tmp_path / "shared.txt").read_text().strip() == "resolved after index check"
+
+
+def test_merge_dirty_overlapping_blocks_without_resolve_worker(tmp_path: Path) -> None:
+    """A dirty overlapping integration worktree should block with reason code, not merge_conflict."""
+    resolve_calls = 0
+    _git_init(tmp_path)
+    (tmp_path / "shared.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "add shared"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    # Local dirty change on integration branch that overlaps task merge.
+    (tmp_path / "shared.txt").write_text("local dirty edit\n", encoding="utf-8")
+
+    class DirtyOverlapAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            nonlocal resolve_calls
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / "shared.txt").write_text("task branch edit\n", encoding="utf-8")
+            if step == "resolve_merge":
+                resolve_calls += 1
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=DirtyOverlapAdapter(), concurrency=1, git=False)
+    task = Task(title="Dirty overlap", task_type="feature", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert resolve_calls == 0
+    assert result.metadata.get("merge_conflict") is None
+    assert result.metadata.get("merge_failure_reason_code") == "dirty_overlapping"
+    details = result.metadata.get("merge_failure_details")
+    assert isinstance(details, dict)
+    assert "shared.txt" in list(details.get("blocking_paths") or [])
+    assert "local changes" in str(result.error or "").lower()
+
+
+def test_merge_dirty_non_overlapping_succeeds(tmp_path: Path) -> None:
+    """Dirty local changes on unrelated paths should not block task merge."""
+    _git_init(tmp_path)
+    (tmp_path / "task.txt").write_text("base task\n", encoding="utf-8")
+    (tmp_path / "local.txt").write_text("base local\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "add baseline files"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    # Dirty edit on unrelated file.
+    (tmp_path / "local.txt").write_text("dirty local edit\n", encoding="utf-8")
+
+    class NonOverlapAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / "task.txt").write_text("task branch edit\n", encoding="utf-8")
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=NonOverlapAdapter(), concurrency=1, git=False)
+    task = Task(title="Dirty non-overlap", task_type="feature", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "done"
+    assert (tmp_path / "task.txt").read_text(encoding="utf-8").strip() == "task branch edit"
+    assert (tmp_path / "local.txt").read_text(encoding="utf-8").strip() == "dirty local edit"
+
+
+def test_reset_conflicted_files_is_best_effort(tmp_path: Path) -> None:
+    """Reset helper should not raise when checkout --merge fails per file."""
+    _git_init(tmp_path)
+    WorktreeManager._reset_conflicted_files(tmp_path, ["missing-file.txt"])
+
 
 # ---------------------------------------------------------------------------
 # 6. Worktree is cleaned up on failure
@@ -283,7 +672,7 @@ def test_merge_conflict_fallback_on_worker_failure(tmp_path: Path) -> None:
 
 
 def test_worktree_cleanup_on_failure(tmp_path: Path) -> None:
-    """If task fails mid-execution, worktree is still removed."""
+    """If task fails mid-execution, blocked state keeps live context for retry."""
     worktree_paths: list[Path] = []
 
     class CrashAdapter:
@@ -300,13 +689,16 @@ def test_worktree_cleanup_on_failure(tmp_path: Path) -> None:
     service.tick_once()
     _wait_futures(service)
 
-    # Worktree should be cleaned up despite failure
+    # Worktree should remain because blocked tasks retain retry context.
     for wt in worktree_paths:
-        assert not wt.exists(), f"Worktree {wt} should have been cleaned up"
+        assert wt.exists(), f"Worktree {wt} should be retained for retry"
 
     updated = container.tasks.get(task.id)
     assert updated is not None
     assert updated.status == "blocked"
+    context = updated.metadata.get("task_context")
+    assert isinstance(context, dict)
+    assert context.get("retained") is True
 
 
 # ---------------------------------------------------------------------------
@@ -422,13 +814,12 @@ def test_non_commit_pipeline_cleans_worktree(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 10. Blocked task has worktree_dir cleaned from persisted metadata
+# 10. Blocked task keeps retained context in metadata
 # ---------------------------------------------------------------------------
 
 
 def test_blocked_task_metadata_cleaned(tmp_path: Path) -> None:
-    """When a task blocks during a pipeline step, worktree_dir should be
-    removed from the persisted metadata."""
+    """When a task blocks during a pipeline step, live worktree context is retained."""
 
     class FailOnImplement:
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
@@ -449,19 +840,22 @@ def test_blocked_task_metadata_cleaned(tmp_path: Path) -> None:
     assert result.status == "blocked"
     assert result.error == "implement failed"
 
-    # worktree_dir must not be in persisted metadata
-    assert "worktree_dir" not in result.metadata
-
-    # Worktree directory should not exist
+    # worktree_dir stays in metadata so retries can reattach deterministically.
+    assert result.metadata.get("worktree_dir")
     worktree_dir = container.state_root / "worktrees" / task.id
-    assert not worktree_dir.exists()
+    assert worktree_dir.exists()
 
-    # Task branch should be cleaned up
+    context = result.metadata.get("task_context")
+    assert isinstance(context, dict)
+    assert context.get("retained") is True
+    assert context.get("expected_on_retry") is True
+
+    # Task branch is retained.
     branches = subprocess.run(
         ["git", "branch", "--list", f"task-{task.id}"],
         cwd=tmp_path, capture_output=True, text=True,
     ).stdout.strip()
-    assert branches == ""
+    assert f"task-{task.id}" in branches
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +1020,9 @@ def test_resolve_merge_worker_exception_handled(tmp_path: Path) -> None:
         assert "merge_other_tasks" not in t.metadata
         assert "merge_current_objective" not in t.metadata
         assert "merge_other_objectives" not in t.metadata
+        assert "merge_conflict_attempt" not in t.metadata
+        assert "merge_conflict_max_attempts" not in t.metadata
+        assert "merge_conflict_previous_error" not in t.metadata
 
     # The git repo should not be in a dirty merge state
     status = subprocess.run(
@@ -768,13 +1165,12 @@ def test_missing_workdoc_blocks_before_commit_phase(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 16. Review cap preserves branch instead of deleting work
+# 16. Review cap retains live blocked context
 # ---------------------------------------------------------------------------
 
 
 def test_review_cap_preserves_branch(tmp_path: Path) -> None:
-    """When a task exceeds the review attempt cap, its branch is preserved
-    (not deleted) so the agent's file edits are recoverable."""
+    """When review cap is hit, blocked tasks retain live worktree + branch context."""
 
     class FailingReviewAdapter:
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
@@ -808,8 +1204,18 @@ def test_review_cap_preserves_branch(tmp_path: Path) -> None:
     assert result.status == "blocked"
     assert "Review attempt cap exceeded" in (result.error or "")
 
-    # Branch should be preserved
-    assert result.metadata.get("preserved_branch") == f"task-{task.id}"
+    # Live context should be retained on blocked tasks.
+    assert not result.metadata.get("preserved_branch")
+    context = result.metadata.get("task_context")
+    assert isinstance(context, dict)
+    assert context.get("retained") is True
+    assert context.get("expected_on_retry") is True
+
+    retained_worktree = str(result.metadata.get("worktree_dir") or "")
+    assert retained_worktree
+    assert Path(retained_worktree).exists()
+
+    # Branch should be retained.
     branch_name = f"task-{task.id}"
     branches = subprocess.run(
         ["git", "branch", "--list", branch_name],
@@ -817,17 +1223,9 @@ def test_review_cap_preserves_branch(tmp_path: Path) -> None:
     ).stdout.strip()
     assert branch_name in branches, "Task branch should be preserved"
 
-    # Worktree dir should be removed
-    worktree_dir = container.state_root / "worktrees" / task.id
-    assert not worktree_dir.exists(), "Worktree directory should be removed"
-
-    # The file changes should exist on the preserved branch
-    file_content = subprocess.run(
-        ["git", "show", f"{branch_name}:docstrings.py"],
-        cwd=tmp_path, capture_output=True, text=True,
-    )
-    assert file_content.returncode == 0
-    assert "216 docstrings" in file_content.stdout
+    # The file changes should exist in retained worktree.
+    assert (Path(retained_worktree) / "docstrings.py").exists()
+    assert "216 docstrings" in (Path(retained_worktree) / "docstrings.py").read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -848,7 +1246,13 @@ def test_precommit_review_blocks_when_context_preserve_fails(tmp_path: Path) -> 
             return StepResult(status="ok")
 
     container, service, _ = _service(tmp_path, adapter=ReviewOnlyAdapter())
-    service._preserve_worktree_work = lambda task, worktree_dir: False  # type: ignore[method-assign]
+    service._preserve_worktree_work = lambda task, worktree_dir: {  # type: ignore[method-assign]
+        "status": "failed",
+        "reason_code": "forced",
+        "commit_sha": None,
+        "base_sha": None,
+        "head_sha": None,
+    }
 
     task = Task(
         title="Fail preserve before pre-commit review",
@@ -913,54 +1317,54 @@ def test_precommit_review_requires_preserved_branch_context(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
-# 17. approve_and_merge merges preserved branch to run branch
+# 17. approve_and_merge merges preserved branch to the current branch
 # ---------------------------------------------------------------------------
 
 
 def test_approve_merges_preserved_branch(tmp_path: Path) -> None:
-    """After review cap preserves a branch, approve_and_merge merges it
-    to the run branch and cleans up."""
+    """approve_and_merge merges a manually preserved branch and cleans metadata."""
+    container, service, _ = _service(tmp_path)
+    service._ensure_branch()
 
-    class FailingReviewAdapter:
-        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
-            wt = task.metadata.get("worktree_dir")
-            if wt and step == "implement":
-                (Path(wt) / "feature.py").write_text("# new feature\n")
-            if step == "review":
-                return StepResult(
-                    status="ok",
-                    findings=[{"severity": "high", "summary": "Issue", "status": "open"}],
-                )
-            return StepResult(status="ok")
-
-    container, service, _ = _service(tmp_path, adapter=FailingReviewAdapter())
-    cfg = container.config.load()
-    cfg["orchestrator"]["max_review_attempts"] = 1
-    container.config.save(cfg)
-
-    task = Task(
-        title="Feature work",
-        task_type="feature",
-        status="queued",
-        hitl_mode="autopilot",
-    )
+    task = Task(title="Feature work", task_type="feature", status="blocked", hitl_mode="autopilot")
     container.tasks.upsert(task)
 
-    result = service.run_task(task.id)
-    assert result.status == "blocked"
-    assert result.metadata.get("preserved_branch")
+    branch_name = f"task-{task.id}"
+    subprocess.run(
+        ["git", "checkout", "-b", branch_name],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (tmp_path / "feature.py").write_text("# new feature\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "feature work"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "checkout", service._run_branch or "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    task.metadata["preserved_branch"] = branch_name
+    container.tasks.upsert(task)
 
-    # Now approve and merge
-    merge_result = service.approve_and_merge(result)
+    merge_result = service.approve_and_merge(task)
     assert merge_result["status"] == "ok"
     assert "commit_sha" in merge_result
 
-    # Changes should now be on the run branch
+    # Changes should now be on the base branch
     assert (tmp_path / "feature.py").exists()
     assert "new feature" in (tmp_path / "feature.py").read_text()
 
     # Branch should be deleted
-    branch_name = f"task-{task.id}"
     branches = subprocess.run(
         ["git", "branch", "--list", branch_name],
         cwd=tmp_path, capture_output=True, text=True,
@@ -1000,7 +1404,7 @@ def test_approve_without_preserved_branch(tmp_path: Path) -> None:
 
 def test_finally_preserves_on_unexpected_failure(tmp_path: Path) -> None:
     """If the adapter raises an exception after writing files, the finally
-    block safety net preserves the branch."""
+    block keeps live task context for retry."""
 
     class CrashAfterWriteAdapter:
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
@@ -1028,36 +1432,32 @@ def test_finally_preserves_on_unexpected_failure(tmp_path: Path) -> None:
     assert updated is not None
     assert updated.status == "blocked"
 
-    # Branch should be preserved by the finally safety net
-    assert updated.metadata.get("preserved_branch") == f"task-{task.id}"
+    context = updated.metadata.get("task_context")
+    assert isinstance(context, dict)
+    assert context.get("retained") is True
+    assert not updated.metadata.get("preserved_branch")
     branch_name = f"task-{task.id}"
     branches = subprocess.run(
         ["git", "branch", "--list", branch_name],
         cwd=tmp_path, capture_output=True, text=True,
     ).stdout.strip()
-    assert branch_name in branches, "Branch should be preserved by finally safety net"
+    assert branch_name in branches, "Branch should stay available for retry"
 
-    # Worktree dir should be removed
+    # Worktree dir should remain for retry.
     worktree_dir = container.state_root / "worktrees" / task.id
-    assert not worktree_dir.exists()
+    assert worktree_dir.exists()
 
-    # The work should exist on the preserved branch
-    file_content = subprocess.run(
-        ["git", "show", f"{branch_name}:work.txt"],
-        cwd=tmp_path, capture_output=True, text=True,
-    )
-    assert file_content.returncode == 0
-    assert "important work" in file_content.stdout
+    assert (worktree_dir / "work.txt").exists()
+    assert "important work" in (worktree_dir / "work.txt").read_text()
 
 
 # ---------------------------------------------------------------------------
-# 20. Review cap with no file changes still cleans up worktree
+# 20. Review cap with no file changes still retains context
 # ---------------------------------------------------------------------------
 
 
 def test_review_cap_no_changes_cleans_worktree(tmp_path: Path) -> None:
-    """When review cap is hit but the agent wrote no files (nothing to preserve),
-    the worktree directory should still be cleaned up — not leaked."""
+    """When review cap is hit, blocked tasks still keep retry context."""
 
     class NoWriteReviewAdapter:
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
@@ -1089,11 +1489,11 @@ def test_review_cap_no_changes_cleans_worktree(tmp_path: Path) -> None:
     result = service.run_task(task.id)
 
     # Task blocks due to no changes guard (before review even runs)
-    # or due to review cap — either way, worktree must be cleaned up
+    # or due to review cap — either way, retry context should remain.
     assert result.status == "blocked"
     worktree_dir = container.state_root / "worktrees" / task.id
-    assert not worktree_dir.exists(), "Worktree directory should be cleaned up"
-    assert "worktree_dir" not in result.metadata, "worktree_dir should not be in metadata"
+    assert worktree_dir.exists(), "Worktree directory should be retained for retry"
+    assert result.metadata.get("worktree_dir"), "worktree_dir should remain in metadata"
 
 
 # ---------------------------------------------------------------------------
@@ -1144,7 +1544,62 @@ def test_orphan_cleanup_skips_preserved_branches(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 22. Retry after preserved branch cleans up old branch and runs successfully
+# 22. Orphan cleanup skips task-context referenced worktrees
+# ---------------------------------------------------------------------------
+
+
+def test_orphan_cleanup_skips_referenced_task_context_worktree(tmp_path: Path) -> None:
+    """cleanup_orphaned_worktrees must not remove worktrees referenced by blocked task context."""
+    _git_init(tmp_path)
+    container = Container(tmp_path)
+
+    worktree_dir = container.state_root / "worktrees" / "task-context-id"
+    subprocess.run(
+        ["git", "worktree", "add", str(worktree_dir), "-b", "task-task-context-id"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert worktree_dir.exists()
+
+    task = Task(
+        id="task-context-id",
+        title="Retained context task",
+        task_type="feature",
+        status="blocked",
+        metadata={
+            "worktree_dir": str(worktree_dir),
+            "task_context": {
+                "context_id": "ctx-1",
+                "worktree_dir": str(worktree_dir),
+                "task_branch": "task-task-context-id",
+                "retained": True,
+                "expected_on_retry": True,
+            },
+        },
+    )
+    container.tasks.upsert(task)
+
+    cfg = container.config.load()
+    cfg["orchestrator"] = {"concurrency": 2, "auto_deps": False}
+    container.config.save(cfg)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus)
+    service._cleanup_orphaned_worktrees()
+
+    assert worktree_dir.exists(), "Referenced retained worktree must not be removed"
+    branches = subprocess.run(
+        ["git", "branch", "--list", "task-task-context-id"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert "task-task-context-id" in branches
+
+
+# ---------------------------------------------------------------------------
+# 23. Retry after retained blocked context runs successfully
 # ---------------------------------------------------------------------------
 
 
@@ -1183,10 +1638,13 @@ def test_retry_after_preserved_branch(tmp_path: Path) -> None:
     )
     container.tasks.upsert(task)
 
-    # First run — hits review cap, branch preserved
+    # First run — hits review cap and retains live task context
     result = service.run_task(task.id)
     assert result.status == "blocked"
-    assert result.metadata.get("preserved_branch") == f"task-{task.id}"
+    assert not result.metadata.get("preserved_branch")
+    assert result.metadata.get("worktree_dir")
+    first_worktree = Path(str(result.metadata.get("worktree_dir")))
+    assert first_worktree.exists()
 
     # Retry — should reuse preserved branch and carry forward prior work
     task = container.tasks.get(task.id)
@@ -1198,6 +1656,85 @@ def test_retry_after_preserved_branch(tmp_path: Path) -> None:
     result = service.run_task(task.id)
     assert result.status == "done", f"Expected done but got {result.status}: {result.error}"
     assert "preserved_branch" not in result.metadata
+    assert "worktree_dir" not in result.metadata
+    assert "task_context" not in result.metadata
+    assert not first_worktree.exists()
+
+
+def test_retry_with_expected_missing_context_fails_closed(tmp_path: Path) -> None:
+    """Retry should fail closed when expected retained context is missing."""
+    container, service, _ = _service(tmp_path)
+    missing_dir = container.state_root / "worktrees" / "missing-task"
+    task = Task(
+        title="Missing retained context",
+        task_type="feature",
+        status="queued",
+        hitl_mode="autopilot",
+        metadata={
+            "worktree_dir": str(missing_dir),
+            "task_context": {
+                "context_id": "ctx-missing",
+                "worktree_dir": str(missing_dir),
+                "task_branch": "task-missing-task",
+                "retained": True,
+                "expected_on_retry": True,
+            },
+        },
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert "Retained task context is missing" in (result.error or "")
+    assert result.metadata.get("task_context", {}).get("retained") is True
+
+
+def test_retry_with_missing_preserved_branch_fails_closed(tmp_path: Path) -> None:
+    """Retry should fail closed when preserved branch context cannot be attached."""
+    container, service, _ = _service(tmp_path)
+    task = Task(
+        title="Missing preserved branch",
+        task_type="feature",
+        status="queued",
+        hitl_mode="autopilot",
+        metadata={
+            "preserved_branch": "task-missing-preserved",
+        },
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert "Retained task context is missing" in (result.error or "")
+
+
+def test_retry_with_non_git_retained_worktree_fails_closed(tmp_path: Path) -> None:
+    """Retry should fail closed when retained worktree path exists but is not a git worktree."""
+    container, service, _ = _service(tmp_path)
+    bad_dir = container.state_root / "worktrees" / "bad-worktree"
+    bad_dir.mkdir(parents=True, exist_ok=True)
+    task = Task(
+        id="bad-worktree",
+        title="Invalid retained worktree",
+        task_type="feature",
+        status="queued",
+        hitl_mode="autopilot",
+        metadata={
+            "worktree_dir": str(bad_dir),
+            "task_context": {
+                "context_id": "ctx-bad",
+                "worktree_dir": str(bad_dir),
+                "task_branch": "task-bad-worktree",
+                "retained": True,
+                "expected_on_retry": True,
+            },
+        },
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert "Retained task context is missing" in (result.error or "")
 
 
 def test_retry_from_step_preserves_prior_workdoc_context(tmp_path: Path) -> None:
@@ -1282,7 +1819,8 @@ def test_retry_after_preserved_branch_keeps_prior_workdoc_context(tmp_path: Path
 
     first = service.run_task(task.id)
     assert first.status == "blocked"
-    assert first.metadata.get("preserved_branch") == f"task-{task.id}"
+    assert not first.metadata.get("preserved_branch")
+    assert first.metadata.get("worktree_dir")
     canonical = container.state_root / "workdocs" / f"{task.id}.md"
     before_retry = canonical.read_text(encoding="utf-8")
     assert "Plan context run 1" in before_retry
@@ -1357,3 +1895,404 @@ def test_retry_from_preserved_branch_no_new_uncommitted_changes(tmp_path: Path) 
     # even though there are no new uncommitted changes.
     result = service.run_task(task.id)
     assert result.status == "done", f"Expected done but got {result.status}: {result.error}"
+
+
+def test_skip_task_to_precommit_transitions_blocked_verify_task(tmp_path: Path) -> None:
+    """Eligible blocked verify tasks can move directly into pre-commit review."""
+    container, service, _ = _service(tmp_path, git=True)
+    service._ensure_branch()
+    run_branch = service._run_branch or subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    task = Task(
+        title="Skip to precommit",
+        task_type="feature",
+        status="blocked",
+        hitl_mode="autopilot",
+    )
+    task.current_step = "verify"
+    container.tasks.upsert(task)
+
+    task_branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "checkout", "-b", task_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (tmp_path / "skip_precommit.txt").write_text("ready for commit\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "task work"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "checkout", run_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    stored = container.tasks.get(task.id)
+    assert stored is not None
+    stored.error = "verify failed due missing local dependency"
+    stored.metadata["preserved_branch"] = task_branch
+    container.tasks.upsert(stored)
+
+    allowed, reason = service.can_skip_to_precommit(stored)
+    assert allowed is True
+    assert reason is None
+
+    updated = service.skip_task_to_precommit(task.id, guidance="Accept risk and proceed to commit.")
+    assert updated.status == "in_review"
+    assert updated.current_step == "review"
+    assert updated.error is None
+    assert updated.pending_gate is None
+    assert updated.metadata.get("pending_precommit_approval") is True
+    assert updated.metadata.get("review_stage") == "pre_commit"
+    assert updated.metadata.get("retry_from_step") == "commit"
+    assert "worktree_dir" not in updated.metadata
+    assert "task_context" not in updated.metadata
+    review_context = updated.metadata.get("review_context")
+    assert isinstance(review_context, dict)
+    assert review_context.get("preserved_branch") == task_branch
+    actions = updated.metadata.get("human_review_actions")
+    assert isinstance(actions, list) and actions
+    assert actions[-1].get("action") == "skip_to_precommit"
+
+
+def test_can_skip_to_precommit_rejects_unsupported_blocked_step(tmp_path: Path) -> None:
+    """Skip-to-precommit is only available for blocked verify/benchmark steps."""
+    container, service, _ = _service(tmp_path, git=True)
+    task = Task(
+        title="Blocked at plan",
+        task_type="feature",
+        status="blocked",
+        hitl_mode="autopilot",
+    )
+    task.current_step = "plan"
+    container.tasks.upsert(task)
+
+    allowed, reason = service.can_skip_to_precommit(task)
+    assert allowed is False
+    assert reason == "blocked_step_not_supported"
+
+
+def test_can_skip_to_precommit_does_not_depend_on_error_phrase(tmp_path: Path) -> None:
+    """Eligibility should depend on state/context, not free-form error strings."""
+    container, service, _ = _service(tmp_path, git=True)
+    service._ensure_branch()
+    run_branch = service._run_branch or subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    task = Task(
+        title="Error phrase resilience",
+        task_type="feature",
+        status="blocked",
+        hitl_mode="autopilot",
+    )
+    task.current_step = "verify"
+    container.tasks.upsert(task)
+
+    task_branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "checkout", "-b", task_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (tmp_path / "error_phrase.txt").write_text("material change\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "material work"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "checkout", run_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    stored = container.tasks.get(task.id)
+    assert stored is not None
+    stored.error = "Internal error during execution"
+    stored.metadata["preserved_branch"] = task_branch
+    container.tasks.upsert(stored)
+
+    allowed, reason = service.can_skip_to_precommit(stored)
+    assert allowed is True
+    assert reason is None
+
+
+def test_can_finalize_merge_conflict_eligibility_and_reasons(tmp_path: Path) -> None:
+    container, service, _ = _service(tmp_path, git=True)
+    service._ensure_branch()
+    run_branch = service._run_branch or subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    task = Task(
+        title="Manual merge finalize eligibility",
+        task_type="feature",
+        status="blocked",
+        hitl_mode="autopilot",
+    )
+    task.current_step = "commit"
+    task.metadata["merge_conflict"] = True
+    container.tasks.upsert(task)
+
+    task_branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "checkout", "-b", task_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (tmp_path / "manual_merge.txt").write_text("integrated content\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "task work"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "checkout", run_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "merge", "--ff", task_branch], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    stored = container.tasks.get(task.id)
+    assert stored is not None
+    stored.metadata["preserved_branch"] = task_branch
+    container.tasks.upsert(stored)
+
+    allowed, reason = service.can_finalize_merge_conflict(stored)
+    assert allowed is True
+    assert reason is None
+
+    stored.current_step = "verify"
+    container.tasks.upsert(stored)
+    allowed, reason = service.can_finalize_merge_conflict(stored)
+    assert allowed is False
+    assert reason == "blocked_step_not_commit"
+
+    stored.current_step = "commit"
+    stored.metadata.pop("merge_conflict", None)
+    container.tasks.upsert(stored)
+    allowed, reason = service.can_finalize_merge_conflict(stored)
+    assert allowed is False
+    assert reason == "not_merge_conflict_block"
+
+
+def test_finalize_merge_conflict_marks_done_and_cleans_metadata(tmp_path: Path) -> None:
+    container, service, _ = _service(tmp_path, git=True)
+    service._ensure_branch()
+    run_branch = service._run_branch or subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    task = Task(
+        title="Finalize merge conflict",
+        task_type="feature",
+        status="blocked",
+        hitl_mode="autopilot",
+    )
+    task.current_step = "commit"
+    task.error = "Merge conflict could not be resolved automatically"
+    task.metadata["merge_conflict"] = True
+    container.tasks.upsert(task)
+
+    task_branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "checkout", "-b", task_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (tmp_path / "finalize_merge.txt").write_text("merge finalized\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "task branch commit"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "checkout", run_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "merge", "--ff", task_branch], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    stored = container.tasks.get(task.id)
+    assert stored is not None
+    run = RunRecord(task_id=stored.id, status="blocked", started_at=now_iso())
+    container.runs.upsert(run)
+    stored.run_ids.append(run.id)
+    stored.metadata["preserved_branch"] = task_branch
+    stored.metadata["merge_conflict_files"] = {"finalize_merge.txt": "<<<<<<< ours"}
+    stored.metadata["merge_conflict_attempt"] = 2
+    stored.metadata["merge_conflict_max_attempts"] = 3
+    stored.metadata["merge_conflict_previous_error"] = "worker failed"
+    container.tasks.upsert(stored)
+
+    updated = service.finalize_merge_conflict(task.id, guidance="Resolved manually and verified.")
+    assert updated.status == "done"
+    assert updated.current_step is None
+    assert updated.error is None
+    for key in (
+        "merge_conflict",
+        "merge_conflict_files",
+        "merge_conflict_attempt",
+        "merge_conflict_max_attempts",
+        "merge_conflict_previous_error",
+        "pending_precommit_approval",
+        "review_stage",
+        "pipeline_phase",
+    ):
+        assert key not in updated.metadata
+    actions = updated.metadata.get("human_review_actions")
+    assert isinstance(actions, list) and actions
+    assert actions[-1].get("action") == "finalize_merge_conflict"
+    assert updated.metadata.get("last_manual_merge_finalize", {}).get("verified_ref") == task_branch
+
+    run_after = container.runs.get(run.id)
+    assert run_after is not None
+    assert run_after.status == "done"
+    assert run_after.finished_at is not None
+
+
+def test_cancel_cleanup_defers_while_execution_lease_active_then_reconciles(tmp_path: Path) -> None:
+    """Cancelled cleanup must defer during active lease and finalize on reconcile."""
+    container, service, _ = _service(tmp_path, git=True)
+    task = Task(
+        title="Deferred cancel cleanup",
+        task_type="feature",
+        status="blocked",
+        hitl_mode="autopilot",
+    )
+    container.tasks.upsert(task)
+
+    retained_branch = f"task-{task.id}"
+    retained_worktree = container.state_root / "worktrees" / task.id
+    subprocess.run(
+        ["git", "worktree", "add", str(retained_worktree), "-b", retained_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    stored = container.tasks.get(task.id)
+    assert stored is not None
+    stored.metadata = {
+        "worktree_dir": str(retained_worktree),
+        "task_context": {
+            "context_id": "ctx-deferred-cancel",
+            "worktree_dir": str(retained_worktree),
+            "task_branch": retained_branch,
+            "retained": True,
+            "expected_on_retry": True,
+        },
+    }
+    container.tasks.upsert(stored)
+    service._acquire_execution_lease(stored)
+
+    cancelled = service.cancel_task(task.id, source="test_deferred")
+    assert cancelled.status == "cancelled"
+    assert cancelled.metadata.get("cancel_cleanup_pending") is True
+    assert retained_worktree.exists()
+    branch_listing = subprocess.run(
+        ["git", "branch", "--list", retained_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert retained_branch in branch_listing
+
+    latest = container.tasks.get(task.id)
+    assert latest is not None
+    service._release_execution_lease(latest)
+
+    service.reconcile(source="manual")
+    updated = container.tasks.get(task.id)
+    assert updated is not None
+    assert updated.status == "cancelled"
+    assert not retained_worktree.exists()
+    branch_listing_after = subprocess.run(
+        ["git", "branch", "--list", retained_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch_listing_after == ""
+    metadata = updated.metadata if isinstance(updated.metadata, dict) else {}
+    assert "worktree_dir" not in metadata
+    assert "task_context" not in metadata
+    assert "cancel_cleanup_pending" not in metadata
+
+
+def test_cancel_cleanup_never_removes_out_of_scope_worktree_paths(tmp_path: Path) -> None:
+    """Cancelled cleanup should clear metadata but never delete out-of-scope paths."""
+    container, service, _ = _service(tmp_path, git=True)
+    outside = tmp_path / "outside-worktree"
+    outside.mkdir(parents=True, exist_ok=True)
+    marker = outside / "keep.txt"
+    marker.write_text("must survive cancel cleanup\n", encoding="utf-8")
+
+    task = Task(
+        title="Out of scope cleanup guard",
+        task_type="feature",
+        status="blocked",
+        hitl_mode="autopilot",
+        metadata={
+            "worktree_dir": str(outside),
+            "task_context": {
+                "context_id": "ctx-outside",
+                "worktree_dir": str(outside),
+                "task_branch": "external-branch",
+                "retained": True,
+                "expected_on_retry": True,
+            },
+        },
+    )
+    container.tasks.upsert(task)
+
+    cancelled = service.cancel_task(task.id, source="test_outside_guard")
+    assert cancelled.status == "cancelled"
+    assert outside.exists()
+    assert marker.exists()
+    updated = container.tasks.get(task.id)
+    assert updated is not None
+    metadata = updated.metadata if isinstance(updated.metadata, dict) else {}
+    assert "worktree_dir" not in metadata
+    assert "task_context" not in metadata

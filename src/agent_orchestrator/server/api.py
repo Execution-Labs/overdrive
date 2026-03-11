@@ -49,9 +49,16 @@ def create_app(
                     orchestrator.shutdown(timeout=10.0)
                 except Exception:
                     pass
+            terminal_services = getattr(app.state, "terminal_services", {})
+            for ts in terminal_services.values():
+                try:
+                    ts.shutdown()
+                except Exception:
+                    pass
             app.state.orchestrators = {}
             app.state.containers = {}
             app.state.import_jobs = {}
+            app.state.terminal_services = {}
 
     app = FastAPI(
         title="Agent Orchestrator",
@@ -73,6 +80,7 @@ def create_app(
     app.state.containers = {}
     app.state.orchestrators = {}
     app.state.import_jobs = {}
+    app.state.terminal_services = {}
 
     def _resolve_project_dir(project_dir_param: Optional[str] = None) -> Path:
         if project_dir_param:
@@ -101,7 +109,7 @@ def create_app(
 
     app.state.bus_factory = lambda container: EventBus(container.events, container.project_id)
 
-    app.include_router(create_router(_resolve_container, _resolve_orchestrator, app.state.import_jobs))
+    app.include_router(create_router(_resolve_container, _resolve_orchestrator, app.state.import_jobs, app.state.terminal_services))
 
     @app.get("/")
     async def root(project_dir: Optional[str] = Query(None)) -> dict[str, object]:

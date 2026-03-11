@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -94,6 +95,7 @@ class TaskExecutor:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=10,
             )
         except Exception:
             return False
@@ -117,8 +119,16 @@ class TaskExecutor:
         if not has_task_changes:
             return False, "no task-scoped changes available"
 
-        if not svc._preserve_worktree_work(task, worktree_dir):
-            return False, "failed to preserve task-scoped changes"
+        preserve_outcome = svc._preserve_worktree_work(task, worktree_dir)
+        if isinstance(preserve_outcome, bool):
+            preserve_status = "preserved" if preserve_outcome else "failed"
+            preserve_reason = "legacy_bool_result"
+        else:
+            preserve_status = str(getattr(preserve_outcome, "get", lambda _k, _d=None: _d)("status") or "").strip()
+            preserve_reason = str(getattr(preserve_outcome, "get", lambda _k, _d=None: _d)("reason_code") or "failed_to_preserve").strip()
+        if preserve_status != "preserved":
+            reason = preserve_reason
+            return False, f"failed to preserve task-scoped changes ({reason})"
 
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
         preserved_branch = str(metadata.get("preserved_branch") or "").strip()
@@ -215,12 +225,23 @@ class TaskExecutor:
                     entity_id=fresh.id,
                     payload={"status": "cancelled"},
                 )
-        except Exception:
+        except Exception as exc:
             logger.exception("Unexpected error executing task %s", task.id)
             fresh = svc.container.tasks.get(task.id) or task
             fresh.status = "blocked"
             fresh.current_agent_id = None
-            fresh.error = "Internal error during execution"
+            exc_type = type(exc).__name__
+            exc_msg = str(exc).strip()
+            detail = f"{exc_type}: {exc_msg}" if exc_msg else exc_type
+            fresh.error = f"Internal error during execution: {detail}"
+            if isinstance(fresh.metadata, dict):
+                raw_worktree_dir = str(fresh.metadata.get("worktree_dir") or "").strip()
+                if raw_worktree_dir:
+                    svc._mark_task_context_retained(
+                        fresh,
+                        reason=fresh.error,
+                        expected_on_retry=True,
+                    )
             svc.container.tasks.upsert(fresh)
 
     def execute_task_inner(self, task: Task) -> None:
@@ -235,49 +256,76 @@ class TaskExecutor:
             task = fresh_task
         worktree_dir: Optional[Path] = None
         try:
-            old_preserved = task.metadata.get("preserved_branch")
-            if old_preserved:
-                # Try to create worktree from the preserved branch
-                try:
-                    worktree_dir = svc._create_worktree_from_branch(task, old_preserved)
-                except subprocess.CalledProcessError:
-                    # Clean up stale worktree dir that may have caused the failure.
-                    stale_dir = svc.container.state_root / "worktrees" / str(task.id)
-                    if stale_dir.exists():
-                        subprocess.run(
-                            ["git", "worktree", "remove", str(stale_dir), "--force"],
-                            cwd=svc.container.project_dir,
-                            capture_output=True,
-                            text=True,
-                        )
-                    # Retry from-branch after cleaning stale dir
+            if not isinstance(task.metadata, dict):
+                task.metadata = {}
+            task.metadata.pop("environment_auto_requeue_pending", None)
+            task_context_raw = task.metadata.get("task_context")
+            task_context = task_context_raw if isinstance(task_context_raw, dict) else {}
+            expected_on_retry = bool(task_context.get("expected_on_retry"))
+            old_preserved = str(task.metadata.get("preserved_branch") or "").strip()
+
+            retained_path_raw = str(task_context.get("worktree_dir") or task.metadata.get("worktree_dir") or "").strip()
+            retained_path = svc._resolve_retained_task_worktree(task, retained_path_raw)
+            # Only fail closed when retry context was explicitly retained or preserved.
+            # Stale worktree metadata from prior gate cleanup should not block re-runs.
+            context_expected = bool(expected_on_retry or old_preserved)
+
+            if retained_path is not None:
+                worktree_dir = retained_path
+            else:
+                if old_preserved:
                     try:
                         worktree_dir = svc._create_worktree_from_branch(task, old_preserved)
                     except subprocess.CalledProcessError:
-                        # Branch truly missing or corrupted — fall back to fresh worktree
-                        subprocess.run(
-                            ["git", "branch", "-D", str(old_preserved)],
-                            cwd=svc.container.project_dir,
-                            capture_output=True,
-                            text=True,
-                        )
-                        worktree_dir = svc._create_worktree(task)
-                # Clear preserved metadata only after successful worktree creation
-                for key in (
-                    "preserved_branch",
-                    "preserved_base_branch",
-                    "preserved_base_sha",
-                    "preserved_head_sha",
-                    "preserved_merge_base_sha",
-                    "preserved_at",
-                ):
-                    task.metadata.pop(key, None)
-                task.metadata.pop("merge_conflict", None)
+                        stale_dir = svc.container.state_root / "worktrees" / str(task.id)
+                        if stale_dir.exists():
+                            subprocess.run(
+                                ["git", "worktree", "remove", str(stale_dir), "--force"],
+                                cwd=svc.container.project_dir,
+                                capture_output=True,
+                                text=True,
+                                timeout=60,
+                            )
+                        try:
+                            worktree_dir = svc._create_worktree_from_branch(task, old_preserved)
+                        except subprocess.CalledProcessError:
+                            worktree_dir = None
+                    if worktree_dir:
+                        for key in (
+                            "preserved_branch",
+                            "preserved_base_branch",
+                            "preserved_base_sha",
+                            "preserved_head_sha",
+                            "preserved_merge_base_sha",
+                            "preserved_at",
+                        ):
+                            task.metadata.pop(key, None)
+                        task.metadata.pop("merge_conflict", None)
+                elif not context_expected:
+                    worktree_dir = svc._create_worktree(task)
+
+            if worktree_dir is None and context_expected:
+                task.status = "blocked"
+                task.current_agent_id = None
+                task.pending_gate = None
+                task.wait_state = None
+                task.error = "Retained task context is missing; request changes to regenerate implementation context."
+                task.current_step = task.current_step or None
+                svc._mark_task_context_retained(task, reason="context_attach_failed", expected_on_retry=True)
                 svc.container.tasks.upsert(task)
-            else:
-                worktree_dir = svc._create_worktree(task)
+                svc.bus.emit(
+                    channel="tasks",
+                    event_type="task.blocked",
+                    entity_id=task.id,
+                    payload={"error": task.error},
+                )
+                return
+
             if worktree_dir:
                 task.metadata["worktree_dir"] = str(worktree_dir)
+                context_branch = str(task_context.get("task_branch") or f"task-{task.id}").strip() or f"task-{task.id}"
+                svc._record_task_context(task, worktree_dir=worktree_dir, task_branch=context_branch)
+                svc._clear_task_context_retained(task)
                 svc.container.tasks.upsert(task)
 
             registry = PipelineRegistry()
@@ -289,6 +337,8 @@ class TaskExecutor:
             first_step = steps[0] if steps else "plan"
 
             workdoc_dir = worktree_dir if worktree_dir else svc.container.project_dir
+            svc._ensure_scope_contract_baseline_ref(task, workdoc_dir)
+            svc.container.tasks.upsert(task)
             had_prior_runs = bool(task.run_ids)
             checkpoint = svc._execution_checkpoint(task)
             checkpoint_run_id = str(checkpoint.get("run_id") or "").strip()
@@ -349,6 +399,18 @@ class TaskExecutor:
             if isinstance(task.metadata, dict):
                 retry_from = str(task.metadata.pop("retry_from_step", "") or "").strip()
 
+            # Resolve retry_from="implement_fix" to the parent verify step
+            # that originally triggered the fix loop.  The loop below will
+            # re-enter the verify-fix cycle and dispatch implement_fix.
+            resume_implement_fix = False
+            if retry_from == "implement_fix":
+                parent_step = str((task.metadata or {}).get("pipeline_phase") or "").strip()
+                if parent_step in steps:
+                    retry_from = parent_step
+                    resume_implement_fix = True
+                else:
+                    retry_from = ""
+
             start_step: str | None
             if retry_from in steps:
                 start_step = retry_from
@@ -361,6 +423,7 @@ class TaskExecutor:
             task.current_step = start_step
             task.metadata["pipeline_phase"] = start_step
             task.status = "in_progress"
+            task.wait_state = None
             task.current_agent_id = svc._choose_agent_for_task(task)
             svc.container.tasks.upsert(task)
             svc.bus.emit(
@@ -423,54 +486,78 @@ class TaskExecutor:
                 task.current_step = step
                 task.metadata["pipeline_phase"] = step
                 svc.container.tasks.upsert(task)
-                if not svc._run_non_review_step(task, run, step, attempt=1, workdoc_attempt=run_attempt):
-                    if step in _VERIFY_STEPS:
-                        if svc._consume_verify_non_actionable_flag(task):
-                            last_phase1_step = step
-                            continue
-                        fixed = False
-                        for fix_attempt in range(1, max_verify_fix_attempts + 1):
-                            task.status = "in_progress"
-                            task.metadata["verify_failure"] = task.error
-                            svc._capture_verify_output(task)
-                            task.error = None
-                            task.retry_count += 1
-                            svc.container.tasks.upsert(task)
-                            run.status = "in_progress"
-                            run.finished_at = None
-                            run.summary = None
-                            svc.container.runs.upsert(run)
-
-                            task.current_step = "implement_fix"
-                            task.metadata["pipeline_phase"] = step
-                            svc.container.tasks.upsert(task)
-                            if not svc._run_non_review_step(task, run, "implement_fix", attempt=fix_attempt + 1):
-                                return
-                            _consume_human_guidance("implement_fix")
-                            task.metadata.pop("verify_failure", None)
-                            task.metadata.pop("verify_output", None)
-                            task.current_step = step
-                            task.metadata["pipeline_phase"] = step
-                            svc.container.tasks.upsert(task)
-                            if svc._run_non_review_step(task, run, step, attempt=fix_attempt + 1):
-                                _consume_human_guidance(step)
-                                fixed = True
-                                break
-                        if fixed:
-                            last_phase1_step = step
-                            continue
-                        # All verify-fix attempts exhausted — ensure task is blocked.
-                        task.status = "blocked"
-                        task.error = task.error or f"Could not fix {step} after {max_verify_fix_attempts} attempts"
-                        task.current_step = step
+                # When resuming from implement_fix, skip the initial verify
+                # run and enter the fix loop directly — the failure context
+                # is already in task metadata from the previous run.
+                verify_failed = False
+                if resume_implement_fix and step in _VERIFY_STEPS:
+                    verify_failed = True
+                    resume_implement_fix = False  # consume the flag
+                else:
+                    step_outcome = svc._run_non_review_step(task, run, step, attempt=1)
+                    if step_outcome == "ok":
+                        verify_failed = False
+                    elif step_outcome == "verify_failed":
+                        verify_failed = True
+                    elif step_outcome == "verify_degraded":
+                        last_phase1_step = step
+                        continue
+                    else:
+                        return
+                if verify_failed:
+                    fixed = False
+                    for fix_attempt in range(1, max_verify_fix_attempts + 1):
+                        task.status = "in_progress"
+                        task.metadata["verify_failure"] = task.error
+                        svc._capture_verify_output(task)
+                        task.error = None
+                        task.retry_count += 1
                         svc.container.tasks.upsert(task)
-                        svc._finalize_run(task, run, status="blocked", summary=f"Blocked: {step} failed after {max_verify_fix_attempts} fix attempts")
-                        svc.bus.emit(
-                            channel="tasks",
-                            event_type="task.blocked",
-                            entity_id=task.id,
-                            payload={"error": task.error},
-                        )
+                        run.status = "in_progress"
+                        run.finished_at = None
+                        run.summary = None
+                        svc.container.runs.upsert(run)
+
+                        task.current_step = "implement_fix"
+                        task.metadata["pipeline_phase"] = step
+                        svc.container.tasks.upsert(task)
+                        fix_outcome = svc._run_non_review_step(task, run, "implement_fix", attempt=fix_attempt + 1)
+                        if fix_outcome != "ok":
+                            return
+                        _consume_human_guidance("implement_fix")
+                        task.metadata.pop("verify_failure", None)
+                        task.metadata.pop("verify_output", None)
+                        task.current_step = step
+                        task.metadata["pipeline_phase"] = step
+                        svc.container.tasks.upsert(task)
+                        verify_outcome = svc._run_non_review_step(task, run, step, attempt=fix_attempt + 1)
+                        if verify_outcome == "ok":
+                            _consume_human_guidance(step)
+                            fixed = True
+                            break
+                        if verify_outcome == "verify_degraded":
+                            fixed = True
+                            break
+                        if verify_outcome == "auto_requeued":
+                            return
+                        if verify_outcome != "verify_failed":
+                            return
+                    if fixed:
+                        last_phase1_step = step
+                        continue
+                    # All verify-fix attempts exhausted — ensure task is blocked.
+                    task.status = "blocked"
+                    task.wait_state = None
+                    task.error = task.error or f"Could not fix {step} after {max_verify_fix_attempts} attempts"
+                    task.current_step = step
+                    svc.container.tasks.upsert(task)
+                    svc._finalize_run(task, run, status="blocked", summary=f"Blocked: {step} failed after {max_verify_fix_attempts} fix attempts")
+                    svc.bus.emit(
+                        channel="tasks",
+                        event_type="task.blocked",
+                        entity_id=task.id,
+                        payload={"error": task.error},
+                    )
                     return
                 _consume_human_guidance(step)
                 last_phase1_step = step
@@ -485,6 +572,7 @@ class TaskExecutor:
                 svc._cleanup_workdoc_for_commit(impl_dir)
                 if not svc._has_uncommitted_changes(impl_dir) and not svc._has_commits_ahead(impl_dir):
                     task.status = "blocked"
+                    task.wait_state = None
                     task.error = "No file changes detected after implementation"
                     task.current_step = last_phase1_step or "implement"
                     task.metadata["pipeline_phase"] = last_phase1_step or "implement"
@@ -529,6 +617,8 @@ class TaskExecutor:
                     findings, review_result = svc._findings_from_result(task, review_attempt)
                     svc._heartbeat_execution_lease(task)
                     svc.container.tasks.upsert(task)
+                    svc._defer_out_of_scope_review_findings(task, findings)
+                    svc.container.tasks.upsert(task)
                     review_step_log: dict[str, object] = {
                         "step": "review",
                         "status": "ok",
@@ -557,9 +647,17 @@ class TaskExecutor:
                         review_step_log["status"] = review_result.status or "error"
                         run.steps.append(review_step_log)
                         svc.container.runs.upsert(run)
+                        if svc._handle_recoverable_environment_failure(
+                            task,
+                            run,
+                            step="review",
+                            summary=review_result.summary,
+                        ):
+                            return
                         task.status = "blocked"
                         task.error = review_result.summary or "Review step failed"
                         task.pending_gate = None
+                        task.wait_state = None
                         task.current_step = "review"
                         task.metadata["pipeline_phase"] = "review"
                         svc.container.tasks.upsert(task)
@@ -596,6 +694,7 @@ class TaskExecutor:
                         entity_id=task.id,
                         payload={"attempt": review_attempt, "decision": cycle.decision, "open_counts": open_counts},
                     )
+                    svc._clear_environment_recovery_tracking(task, step="review")
                     _consume_human_guidance("review")
 
                     if cycle.decision == "approved":
@@ -613,7 +712,8 @@ class TaskExecutor:
                     task.current_step = "implement_fix"
                     task.metadata["pipeline_phase"] = "review"
                     svc.container.tasks.upsert(task)
-                    if not svc._run_non_review_step(task, run, "implement_fix", attempt=review_attempt):
+                    review_fix_outcome = svc._run_non_review_step(task, run, "implement_fix", attempt=review_attempt)
+                    if review_fix_outcome != "ok":
                         return
                     _consume_human_guidance("implement_fix")
 
@@ -621,12 +721,17 @@ class TaskExecutor:
                         task.current_step = post_fix_validation_step
                         task.metadata["pipeline_phase"] = "review"
                         svc.container.tasks.upsert(task)
-                        if not svc._run_non_review_step(task, run, post_fix_validation_step, attempt=review_attempt):
-                            if svc._consume_verify_non_actionable_flag(task):
+                        validation_outcome = svc._run_non_review_step(task, run, post_fix_validation_step, attempt=review_attempt)
+                        if validation_outcome != "ok":
+                            if validation_outcome == "auto_requeued":
+                                return
+                            if validation_outcome == "verify_degraded":
                                 task.current_step = "review"
                                 task.metadata["pipeline_phase"] = "review"
                                 svc.container.tasks.upsert(task)
                                 continue
+                            if validation_outcome != "verify_failed":
+                                return
                             validation_fixed = False
                             for vfix in range(1, max_verify_fix_attempts + 1):
                                 task.status = "in_progress"
@@ -643,7 +748,8 @@ class TaskExecutor:
                                 task.current_step = "implement_fix"
                                 task.metadata["pipeline_phase"] = "review"
                                 svc.container.tasks.upsert(task)
-                                if not svc._run_non_review_step(task, run, "implement_fix", attempt=vfix + 1):
+                                validation_fix_outcome = svc._run_non_review_step(task, run, "implement_fix", attempt=vfix + 1)
+                                if validation_fix_outcome != "ok":
                                     return
                                 _consume_human_guidance("implement_fix")
                                 task.metadata.pop("verify_failure", None)
@@ -651,12 +757,21 @@ class TaskExecutor:
                                 task.current_step = post_fix_validation_step
                                 task.metadata["pipeline_phase"] = "review"
                                 svc.container.tasks.upsert(task)
-                                if svc._run_non_review_step(task, run, post_fix_validation_step, attempt=vfix + 1):
+                                retry_validation_outcome = svc._run_non_review_step(task, run, post_fix_validation_step, attempt=vfix + 1)
+                                if retry_validation_outcome == "ok":
                                     _consume_human_guidance(post_fix_validation_step)
                                     validation_fixed = True
                                     break
+                                if retry_validation_outcome == "verify_degraded":
+                                    validation_fixed = True
+                                    break
+                                if retry_validation_outcome == "auto_requeued":
+                                    return
+                                if retry_validation_outcome != "verify_failed":
+                                    return
                             if not validation_fixed:
                                 task.status = "blocked"
+                                task.wait_state = None
                                 task.error = task.error or f"Could not fix {post_fix_validation_step} after {max_verify_fix_attempts} attempts"
                                 task.current_step = post_fix_validation_step
                                 svc.container.tasks.upsert(task)
@@ -674,14 +789,14 @@ class TaskExecutor:
                     task.metadata.pop("review_findings", None)
                     task.metadata.pop("review_history", None)
                     task.metadata.pop("verify_environment_note", None)
+                    task.metadata.pop("verify_environment_kind", None)
 
                 if not review_passed:
                     task.metadata.pop("review_history", None)
                     task.metadata.pop("verify_environment_note", None)
-                    if worktree_dir and worktree_dir.exists():
-                        if svc._preserve_worktree_work(task, worktree_dir):
-                            worktree_dir = None
+                    task.metadata.pop("verify_environment_kind", None)
                     task.status = "blocked"
+                    task.wait_state = None
                     task.error = "Review attempt cap exceeded"
                     task.current_step = "review"
                     task.metadata["pipeline_phase"] = "review"
@@ -706,6 +821,7 @@ class TaskExecutor:
                     if not context_ok:
                         task.status = "blocked"
                         task.pending_gate = None
+                        task.wait_state = None
                         task.current_step = "review"
                         task.current_agent_id = None
                         task.metadata["pipeline_phase"] = "review"
@@ -728,6 +844,8 @@ class TaskExecutor:
                     # Context is now preserved on task branch; current worktree has
                     # already been removed by preserve_worktree_work.
                     worktree_dir = None
+                    task.metadata.pop("worktree_dir", None)
+                    task.metadata.pop("task_context", None)
                     task.status = "in_review"
                     task.current_step = "review"
                     task.metadata["pipeline_phase"] = "review"
@@ -760,7 +878,7 @@ class TaskExecutor:
                     # No new commit was created — check if the branch already
                     # carries prior committed work (e.g. from a preserved branch
                     # retry).  If so, use the branch HEAD as the commit ref so
-                    # merge_and_cleanup can still merge it into the run branch.
+                    # merge_and_cleanup can still merge it into the base branch.
                     commit_cwd = worktree_dir or svc.container.project_dir
                     if svc._has_commits_ahead(commit_cwd):
                         head_result = subprocess.run(
@@ -768,12 +886,14 @@ class TaskExecutor:
                             cwd=commit_cwd,
                             capture_output=True,
                             text=True,
+                            timeout=10,
                         )
                         commit_sha = head_result.stdout.strip() if head_result.returncode == 0 else None
                     if not commit_sha:
                         git_present = (commit_cwd / ".git").exists() or (svc.container.project_dir / ".git").exists()
                         if git_present:
                             task.status = "blocked"
+                            task.wait_state = None
                             task.error = "Commit failed (no changes to commit)"
                             svc.container.tasks.upsert(task)
                             svc._finalize_run(task, run, status="blocked", summary="Blocked: commit produced no changes")
@@ -797,13 +917,28 @@ class TaskExecutor:
                 _consume_human_guidance("commit")
 
                 if worktree_dir:
-                    svc._merge_and_cleanup(task, worktree_dir)
-                    worktree_dir = None
+                    merge_result = svc._merge_and_cleanup(task, worktree_dir)
+                    merge_status = str((merge_result or {}).get("status") or "ok")
+                    if merge_status == "ok":
+                        worktree_dir = None
 
+                        # Post-merge integration health check
+                        health_result = svc._integration_health.run_check(
+                            trigger_task_id=task.id,
+                        )
+                        if health_result and not health_result.passed:
+                            task.metadata["integration_health_degraded"] = True
+                            task.metadata["integration_health_check"] = {
+                                "passed": False,
+                                "exit_code": health_result.exit_code,
+                                "ts": now_iso(),
+                            }
+
+                merge_failure_reason = str(task.metadata.get("merge_failure_reason_code") or "").strip()
                 if task.metadata.get("merge_conflict"):
                     task.status = "blocked"
+                    task.wait_state = None
                     task.error = "Merge conflict could not be resolved automatically"
-                    task.metadata["preserved_branch"] = f"task-{task.id}"
                     svc.container.tasks.upsert(task)
                     svc._finalize_run(task, run, status="blocked", summary="Blocked due to unresolved merge conflict")
                     svc.bus.emit(
@@ -813,9 +948,27 @@ class TaskExecutor:
                         payload={"error": task.error},
                     )
                     return
+                if merge_failure_reason in {"dirty_overlapping", "git_error"}:
+                    task.status = "blocked"
+                    task.wait_state = None
+                    if not str(task.error or "").strip():
+                        if merge_failure_reason == "dirty_overlapping":
+                            task.error = "Integration branch has local changes that overlap this merge"
+                        else:
+                            task.error = "Git merge failed before conflict resolution"
+                    svc.container.tasks.upsert(task)
+                    svc._finalize_run(task, run, status="blocked", summary=f"Blocked due to merge failure ({merge_failure_reason})")
+                    svc.bus.emit(
+                        channel="tasks",
+                        event_type="task.blocked",
+                        entity_id=task.id,
+                        payload={"error": task.error, "reason_code": merge_failure_reason},
+                    )
+                    return
 
                 svc._run_summarize_step(task, run)
                 task.status = "done"
+                task.wait_state = None
                 task.current_step = None
                 task.metadata.pop("pipeline_phase", None)
                 task.metadata.pop("pending_precommit_approval", None)
@@ -844,17 +997,22 @@ class TaskExecutor:
                         cwd=svc.container.project_dir,
                         capture_output=True,
                         text=True,
+                        timeout=60,
                     )
                     subprocess.run(
                         ["git", "branch", "-D", f"task-{task.id}"],
                         cwd=svc.container.project_dir,
                         capture_output=True,
                         text=True,
+                        timeout=10,
                     )
                     worktree_dir = None
+                    task.metadata.pop("worktree_dir", None)
+                    task.metadata.pop("task_context", None)
 
                 svc._run_summarize_step(task, run)
                 task.status = "done"
+                task.wait_state = None
                 task.current_step = None
                 task.metadata.pop("pipeline_phase", None)
                 run.status = "done"
@@ -865,41 +1023,75 @@ class TaskExecutor:
             task.metadata.pop("execution_checkpoint", None)
             task.metadata.pop("step_outputs", None)
             task.metadata.pop("worktree_dir", None)
+            task.metadata.pop("task_context", None)
             run.finished_at = now_iso()
             with svc.container.transaction():
                 svc.container.runs.upsert(run)
                 svc.container.tasks.upsert(task)
         finally:
+            latest = svc.container.tasks.get(task.id)
+            if latest is not None:
+                task = latest
+
+            worktree_removed = False
+            metadata_changed = False
+            exception_in_flight = sys.exc_info()[1] is not None
             if worktree_dir and worktree_dir.exists():
-                preserved = task.metadata.get("preserved_branch")
-                if not preserved:
-                    try:
-                        if svc._has_uncommitted_changes(worktree_dir) or svc._has_commits_ahead(worktree_dir):
-                            svc._preserve_worktree_work(task, worktree_dir)
-                            preserved = task.metadata.get("preserved_branch")
-                    except Exception:
-                        pass
-                if preserved:
-                    subprocess.run(
-                        ["git", "worktree", "remove", str(worktree_dir), "--force"],
-                        cwd=svc.container.project_dir,
-                        capture_output=True,
-                        text=True,
+                keep_active_context = task.status in {"in_progress", "in_review"} or (
+                    task.status == "queued" and bool(task.metadata.get("environment_auto_requeue_pending"))
+                )
+                if task.status == "blocked" or exception_in_flight:
+                    task.metadata["worktree_dir"] = str(worktree_dir)
+                    svc._record_task_context(task, worktree_dir=worktree_dir, task_branch=f"task-{task.id}")
+                    svc._mark_task_context_retained(
+                        task,
+                        reason=str(task.error or ("unexpected_exception" if exception_in_flight else "blocked")),
+                        expected_on_retry=True,
                     )
+                    metadata_changed = True
+                elif keep_active_context:
+                    # Keep task context for active non-terminal states (for example
+                    # gate waits). This avoids deleting context/branch state while
+                    # the task is still expected to continue.
+                    task.metadata["worktree_dir"] = str(worktree_dir)
+                    svc._record_task_context(task, worktree_dir=worktree_dir, task_branch=f"task-{task.id}")
+                    svc._clear_task_context_retained(task)
+                    metadata_changed = True
                 else:
                     subprocess.run(
                         ["git", "worktree", "remove", str(worktree_dir), "--force"],
                         cwd=svc.container.project_dir,
                         capture_output=True,
                         text=True,
+                        timeout=60,
                     )
-                    subprocess.run(
-                        ["git", "branch", "-D", f"task-{task.id}"],
-                        cwd=svc.container.project_dir,
-                        capture_output=True,
-                        text=True,
-                    )
-            worktree_removed = bool(task.metadata.pop("worktree_dir", None))
+                    worktree_removed = True
+                    if task.metadata.pop("worktree_dir", None):
+                        metadata_changed = True
+                    if isinstance(task.metadata.get("task_context"), dict):
+                        task.metadata.pop("task_context", None)
+                        metadata_changed = True
+                    if task.status in {"done", "cancelled"}:
+                        subprocess.run(
+                            ["git", "branch", "-D", f"task-{task.id}"],
+                            cwd=svc.container.project_dir,
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+
+            if task.status == "cancelled":
+                cancel_cleanup = svc._cleanup_cancelled_task_context(task, force=True)
+                if any(
+                    bool(cancel_cleanup.get(key))
+                    for key in ("metadata_changed", "worktree_removed", "branch_deleted", "lease_released")
+                ):
+                    metadata_changed = True
+                worktree_removed = worktree_removed or bool(cancel_cleanup.get("worktree_removed"))
+            elif task.status == "done" and task.metadata.get("worktree_dir"):
+                task.metadata.pop("worktree_dir", None)
+                metadata_changed = True
+
             lease_removed = svc._release_execution_lease(task)
-            if worktree_removed or lease_removed:
+            if worktree_removed or lease_removed or metadata_changed:
                 svc.container.tasks.upsert(task)

@@ -30,7 +30,7 @@ class StepDef:
     display_name: str = ""                         # human-readable label
     required: bool = True                          # can be skipped?
     condition: Optional[str] = None                # skip-rule expression (evaluated at runtime)
-    timeout_seconds: int = 600                     # max time for this step
+    timeout_seconds: int = 0                        # max time for this step; 0 = no timeout
     retry_limit: int = 3                           # retries before escalating
     agent_role: Optional[str] = None               # preferred agent role (None = auto)
     config: dict[str, Any] = field(default_factory=dict)  # step-specific config
@@ -77,21 +77,22 @@ FEATURE_PIPELINE = PipelineTemplate(
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 BUG_FIX_PIPELINE = PipelineTemplate(
     id="bug_fix",
     display_name="Bug Fix",
-    description="Reproduce, diagnose, fix, verify, review, commit.",
+    description="Diagnose, fix, verify, review, commit.",
     task_types=("bug",),
     steps=(
-        StepDef(name="reproduce", display_name="Reproduce", timeout_seconds=300),
         StepDef(name="diagnose", display_name="Diagnose"),
         StepDef(name="implement", display_name="Fix"),
         StepDef(name="verify", display_name="Verify"),
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 REFACTOR_PIPELINE = PipelineTemplate(
@@ -107,6 +108,7 @@ REFACTOR_PIPELINE = PipelineTemplate(
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 RESEARCH_PIPELINE = PipelineTemplate(
@@ -132,6 +134,7 @@ DOCS_PIPELINE = PipelineTemplate(
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 TEST_PIPELINE = PipelineTemplate(
@@ -146,6 +149,7 @@ TEST_PIPELINE = PipelineTemplate(
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 REPO_REVIEW_PIPELINE = PipelineTemplate(
@@ -185,6 +189,21 @@ REVIEW_PIPELINE = PipelineTemplate(
     ),
 )
 
+COMMIT_REVIEW_PIPELINE = PipelineTemplate(
+    id="commit_review",
+    display_name="Commit Review",
+    description="Review a completed task's commit, fix issues found, and verify corrections.",
+    task_types=("commit_review",),
+    steps=(
+        StepDef(name="commit_review", display_name="Review Commit"),
+        StepDef(name="implement", display_name="Implement Fixes"),
+        StepDef(name="verify", display_name="Verify"),
+        StepDef(name="review", display_name="Review"),
+        StepDef(name="commit", display_name="Commit"),
+    ),
+    metadata={"supports_skip_to_precommit": True},
+)
+
 PERFORMANCE_PIPELINE = PipelineTemplate(
     id="performance",
     display_name="Performance Optimization",
@@ -198,6 +217,7 @@ PERFORMANCE_PIPELINE = PipelineTemplate(
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 
@@ -212,6 +232,7 @@ HOTFIX_PIPELINE = PipelineTemplate(
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 SPIKE_PIPELINE = PipelineTemplate(
@@ -236,6 +257,7 @@ CHORE_PIPELINE = PipelineTemplate(
         StepDef(name="verify", display_name="Verify"),
         StepDef(name="commit", display_name="Commit"),
     ),
+    metadata={"supports_skip_to_precommit": True},
 )
 
 PLAN_ONLY_PIPELINE = PipelineTemplate(
@@ -274,6 +296,7 @@ BUILTIN_TEMPLATES: dict[str, PipelineTemplate] = {
         REPO_REVIEW_PIPELINE,
         SECURITY_AUDIT_PIPELINE,
         REVIEW_PIPELINE,
+        COMMIT_REVIEW_PIPELINE,
         PERFORMANCE_PIPELINE,
         HOTFIX_PIPELINE,
         SPIKE_PIPELINE,

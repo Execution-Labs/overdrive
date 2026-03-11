@@ -6,7 +6,7 @@ import json
 import re
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, cast
 
@@ -25,7 +25,12 @@ from ..domain.models import (
     TaskStatus,
     now_iso,
 )
-from ..storage.bootstrap import archive_state_root, ensure_state_root
+from ..domain.scope_contract import normalize_scope_contract
+from ..storage.bootstrap import (
+    archive_state_root,
+    archive_task_context_manifest,
+    ensure_state_root,
+)
 from .deps import RouteDeps
 from . import router_impl as impl
 
@@ -36,10 +41,12 @@ CommitPlanRequest = impl.CommitPlanRequest
 CreatePlanRevisionRequest = impl.CreatePlanRevisionRequest
 CreateTaskRequest = impl.CreateTaskRequest
 GenerateTasksRequest = impl.GenerateTasksRequest
+FinalizeMergeConflictRequest = impl.FinalizeMergeConflictRequest
 PipelineClassificationRequest = impl.PipelineClassificationRequest
 PipelineClassificationResponse = impl.PipelineClassificationResponse
 PlanRefineRequest = impl.PlanRefineRequest
 RetryTaskRequest = impl.RetryTaskRequest
+SkipToPrecommitRequest = impl.SkipToPrecommitRequest
 TransitionRequest = impl.TransitionRequest
 UpdateTaskRequest = impl.UpdateTaskRequest
 VALID_TRANSITIONS = impl.VALID_TRANSITIONS
@@ -60,6 +67,47 @@ _CHANGES_TELEMETRY_TTL_SECONDS = 900.0
 _CHANGES_TELEMETRY_MAX_KEYS = 2048
 _LOW_CONFIDENCE_FILE_THRESHOLD = 120
 _LOW_CONFIDENCE_LINE_THRESHOLD = 4000
+_INTERNAL_TASK_METADATA_KEYS = {
+    "worktree_dir",
+    "task_context",
+    "preserved_branch",
+    "preserved_base_branch",
+    "preserved_base_sha",
+    "preserved_head_sha",
+    "preserved_merge_base_sha",
+    "preserved_at",
+    "review_context",
+    "execution_checkpoint",
+    "pending_precommit_approval",
+    "review_stage",
+    "active_human_guidance",
+    "retry_guidance",
+    "requested_changes",
+    "pipeline_phase",
+    "step_outputs",
+    "task_generation_defaults",
+    "task_generation_override",
+    "source_task_id",
+    "source_commit_sha",
+    "source_description",
+    "source_plan",
+    "source_diff",
+}
+
+
+def _error_detail_envelope(
+    *,
+    detail: str,
+    code: str | None = None,
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a backward-compatible error envelope for API responses."""
+    payload: dict[str, Any] = {"detail": detail}
+    if code:
+        payload["code"] = code
+    if data:
+        payload["data"] = data
+    return payload
 
 
 def _gate_approved_message(gate: str | None, *, will_resume: bool) -> str:
@@ -124,6 +172,73 @@ def _pipeline_steps(task: Task) -> list[str]:
         return []
 
 
+def _task_context_manifest_entry(task: Task) -> dict[str, Any] | None:
+    metadata = task.metadata if isinstance(task.metadata, dict) else {}
+    context_raw = metadata.get("task_context")
+    context = context_raw if isinstance(context_raw, dict) else {}
+    retained_worktree = str(context.get("worktree_dir") or metadata.get("worktree_dir") or "").strip()
+    task_branch = str(context.get("task_branch") or "").strip()
+    preserved_branch = str(metadata.get("preserved_branch") or "").strip()
+    has_context = bool(retained_worktree or task_branch or preserved_branch)
+    if not has_context:
+        return None
+    return {
+        "task_id": task.id,
+        "status": task.status,
+        "run_ids": list(task.run_ids or []),
+        "retained_worktree_dir": retained_worktree or None,
+        "task_branch": task_branch or None,
+        "preserved_branch": preserved_branch or None,
+        "preserved_base_branch": str(metadata.get("preserved_base_branch") or "").strip() or None,
+        "preserved_base_sha": str(metadata.get("preserved_base_sha") or "").strip() or None,
+        "preserved_head_sha": str(metadata.get("preserved_head_sha") or "").strip() or None,
+        "preserved_merge_base_sha": str(metadata.get("preserved_merge_base_sha") or "").strip() or None,
+        "retained_reason": str(context.get("retained_reason") or "").strip() or None,
+        "retained_at": str(context.get("retained_at") or "").strip() or None,
+        "expected_on_retry": bool(context.get("expected_on_retry")),
+        "archived_at": now_iso(),
+    }
+
+
+def _collect_task_context_manifest_entries(tasks: list[Task]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for task in tasks:
+        entry = _task_context_manifest_entry(task)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _sanitize_client_task_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
+    metadata = dict(raw or {})
+    sanitized: dict[str, Any] = {}
+    scope_contract_raw = metadata.get("scope_contract")
+    normalized_scope_contract = normalize_scope_contract(scope_contract_raw)
+    for key, value in metadata.items():
+        normalized = str(key)
+        if normalized in _INTERNAL_TASK_METADATA_KEYS or normalized.startswith("preserved_"):
+            continue
+        if normalized == "scope_contract":
+            continue
+        sanitized[normalized] = value
+    if normalized_scope_contract is not None:
+        sanitized["scope_contract"] = normalized_scope_contract
+    return sanitized
+
+
+def _generation_policy_overrides(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """Extract optional generated-task policy overrides from request payloads."""
+    source = dict(raw) if isinstance(raw, dict) else {}
+    overrides: dict[str, Any] = {}
+    if "child_status" in source and source.get("child_status") is not None:
+        overrides["child_status"] = source.get("child_status")
+    if "child_hitl_mode" in source and source.get("child_hitl_mode") is not None:
+        overrides["child_hitl_mode"] = source.get("child_hitl_mode")
+    if "infer_deps" in source and source.get("infer_deps") is not None:
+        overrides["infer_deps"] = source.get("infer_deps")
+    return overrides
+
+
 def _previous_step(steps: list[str], target_step: str) -> str | None:
     if target_step not in steps:
         return None
@@ -155,7 +270,7 @@ def _guidance_fallback_step(task: Task, *, target_step: str | None) -> str | Non
     if str(target_step or "").strip() == "implement_fix":
         return None
     pipeline_steps = set(_pipeline_steps(task))
-    if any(step in pipeline_steps for step in {"implement", "prototype", "verify", "benchmark", "reproduce", "review", "commit"}):
+    if any(step in pipeline_steps for step in {"implement", "prototype", "verify", "benchmark", "review", "commit"}):
         return "implement_fix"
     return None
 
@@ -200,6 +315,93 @@ def _is_within_project(candidate: Path, project_root: Path) -> bool:
     except Exception:
         return False
     return resolved_candidate == resolved_root or resolved_root in resolved_candidate.parents
+
+
+def _is_valid_task_worktree_path(
+    *,
+    task_id: str,
+    candidate: Path,
+    project_root: Path,
+    state_root: Path,
+    strict_retained: bool,
+) -> bool:
+    try:
+        resolved_candidate = candidate.resolve()
+        resolved_root = project_root.resolve()
+        resolved_state = state_root.resolve()
+    except Exception:
+        return False
+    if strict_retained:
+        expected = (resolved_state / "worktrees" / str(task_id)).resolve()
+        if resolved_candidate != expected:
+            return False
+    else:
+        if not (resolved_candidate == resolved_root or resolved_root in resolved_candidate.parents):
+            return False
+    if not resolved_candidate.exists() or not resolved_candidate.is_dir():
+        return False
+    try:
+        inside = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=resolved_candidate,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except Exception:
+        return False
+    return inside.returncode == 0 and str(inside.stdout or "").strip().lower() == "true"
+
+
+def _resolve_worktree_diff_base_ref(
+    *,
+    task: Task,
+    metadata: dict[str, Any],
+    git_dir: Path,
+    head_ref: str | None,
+) -> tuple[str | None, str]:
+    task_context_raw = metadata.get("task_context")
+    task_context = task_context_raw if isinstance(task_context_raw, dict) else {}
+    preferred_base = str(task_context.get("base_branch") or metadata.get("preserved_base_branch") or "").strip()
+    if preferred_base and _resolve_commit_sha(git_dir, preferred_base):
+        return preferred_base, "task_context"
+    review_context_raw = metadata.get("review_context")
+    review_context = review_context_raw if isinstance(review_context_raw, dict) else {}
+    review_base = str(review_context.get("base_branch") or "").strip()
+    if review_base and _resolve_commit_sha(git_dir, review_base):
+        return review_base, "review_context"
+
+    # Prefer the snapshot of HEAD at worktree dispatch time — this excludes
+    # dependency-task commits that were merged before this task started.
+    initial_head = str(task_context.get("initial_head_sha") or "").strip()
+    if initial_head and _resolve_commit_sha(git_dir, initial_head):
+        return initial_head, "initial_head"
+
+    heuristic = _resolve_base_branch(git_dir, avoid_branch=str(head_ref or "").strip() or None)
+    if heuristic and _resolve_commit_sha(git_dir, heuristic):
+        # Guard against including dependency-task commits in the diff.
+        # If every commit between the heuristic base and HEAD belongs to
+        # other tasks (not this one), the base is too broad — fall back to
+        # HEAD so only this task's uncommitted work is shown.
+        task_id = str(task.id)
+        try:
+            log_result = subprocess.run(
+                ["git", "log", "--oneline", f"{heuristic}..HEAD"],
+                cwd=git_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            if log_result.returncode == 0:
+                commits = log_result.stdout.strip().splitlines()
+                if commits and not any(task_id in line for line in commits):
+                    return "HEAD", "head_inferred"
+        except Exception:
+            pass
+        return heuristic, "heuristic"
+    return None, "none"
 
 
 def _is_runtime_state_path(path_text: str) -> bool:
@@ -324,6 +526,68 @@ def _emit_changes_telemetry_once(
     except Exception:
         # Telemetry must never fail the changes endpoint.
         return
+
+
+_UNTRACKED_DIFF_FILE_CAP = 60
+
+
+def _diff_untracked_files(
+    git_dir: Path,
+    status_entries: list[dict[str, str]],
+) -> tuple[str, list[dict[str, str]]]:
+    """Generate unified diff text and file entries for untracked (``??``) files.
+
+    Returns ``(diff_text, file_entries)`` where *diff_text* is concatenated
+    unified diff output for all untracked files and *file_entries* are
+    ``{"path": ..., "changes": ...}`` dicts suitable for the files list.
+    """
+    has_untracked = any(entry.get("code") == "??" for entry in status_entries)
+    if not has_untracked:
+        return "", []
+
+    try:
+        ls_result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=git_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return "", []
+
+    untracked_paths = [
+        p.strip()
+        for p in ls_result.stdout.splitlines()
+        if p.strip() and not _is_runtime_state_path(p.strip())
+    ]
+
+    if not untracked_paths:
+        return "", []
+
+    capped = untracked_paths[:_UNTRACKED_DIFF_FILE_CAP]
+    diff_parts: list[str] = []
+    file_entries: list[dict[str, str]] = []
+
+    for fpath in capped:
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--no-index", "/dev/null", fpath],
+                cwd=git_dir,
+                capture_output=True,
+                text=True,
+                check=False,  # exit-code 1 is normal for diffs with changes
+                timeout=10,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        raw = result.stdout or ""
+        if raw:
+            diff_parts.append(raw)
+            file_entries.append({"path": fpath, "changes": "new file"})
+
+    return "\n".join(diff_parts), file_entries
 
 
 def _resolve_base_branch(git_dir: Path, *, avoid_branch: str | None = None) -> str | None:
@@ -492,7 +756,14 @@ def _preserved_branch_changes(
     if not base_sha:
         return None
 
-    diff_range = f"{base_sha}..{head_sha}"
+    # Use the merge-base (not the raw base tip) so the diff only contains
+    # the task's own changes and excludes work merged into the base branch
+    # after the task branched off.
+    explicit_merge_base_sha = _resolve_commit_sha(git_dir, str(metadata_obj.get("preserved_merge_base_sha") or "").strip())
+    computed_merge_base_sha = explicit_merge_base_sha or _merge_base_sha(git_dir, base_sha, head_sha)
+    effective_base = computed_merge_base_sha or base_sha
+
+    diff_range = f"{effective_base}..{head_sha}"
     try:
         branch_stat = subprocess.run(
             ["git", "diff", "--stat", diff_range],
@@ -527,8 +798,6 @@ def _preserved_branch_changes(
         return None
 
     warnings: list[str] = []
-    explicit_merge_base_sha = _resolve_commit_sha(git_dir, str(metadata_obj.get("preserved_merge_base_sha") or "").strip())
-    computed_merge_base_sha = explicit_merge_base_sha or _merge_base_sha(git_dir, base_sha, head_sha)
 
     if base_source == "heuristic":
         warnings.append("heuristic_base_inferred")
@@ -580,6 +849,7 @@ def _preserved_branch_changes(
     display_base_branch = str(base_ref or "").strip() or None
     return {
         "mode": "preserved_branch",
+        "context_source": "preserved_branch",
         "commit": None,
         "branch": preserved_branch,
         "base_branch": display_base_branch,
@@ -688,7 +958,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If task type auto-resolution inputs are invalid.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         registry = PipelineRegistry()
         allowed_pipelines = sorted(template.id for template in registry.list_templates())
         classifier_pipeline_id = str(body.classifier_pipeline_id or "").strip()
@@ -737,7 +1007,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             dependency_policy=cast(DependencyPolicy, dep_policy),
             source=body.source,
             worker_model=(str(body.worker_model).strip() if body.worker_model else None),
-            metadata=dict(body.metadata or {}),
+            metadata=_sanitize_client_task_metadata(body.metadata),
             project_commands=(body.project_commands if body.project_commands else None),
         )
         if not isinstance(task.metadata, dict):
@@ -765,7 +1035,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 container.tasks.upsert(parent)
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.created", entity_id=task.id, payload={"status": task.status})
-        return {"task": _task_payload(task)}
+        return {"task": _task_payload(task, orchestrator=orchestrator)}
 
     @router.post("/tasks/classify-pipeline", response_model=PipelineClassificationResponse)
     async def classify_pipeline(
@@ -789,7 +1059,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             description=str(body.description or "").strip(),
             task_type="feature",
             status="queued",
-            metadata=dict(body.metadata or {}),
+            metadata=_sanitize_client_task_metadata(body.metadata),
         )
         if not isinstance(synthetic.metadata, dict):
             synthetic.metadata = {}
@@ -830,7 +1100,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Returns:
             A payload with sorted task summaries and total count.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         tasks = container.tasks.list()
         filtered = []
         for task in tasks:
@@ -842,7 +1112,10 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 continue
             filtered.append(task)
         filtered.sort(key=lambda t: (_priority_rank(t.priority), t.created_at))
-        return {"tasks": [_task_payload(task) for task in filtered], "total": len(filtered)}
+        return {
+            "tasks": [_task_payload(task, orchestrator=orchestrator) for task in filtered],
+            "total": len(filtered),
+        }
 
     @router.get("/tasks/board")
     async def board(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -854,47 +1127,125 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Returns:
             A payload keyed by task status with sorted task cards.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         columns: dict[str, list[dict[str, Any]]] = {
             name: [] for name in ["backlog", "queued", "in_progress", "in_review", "blocked", "done", "cancelled"]
         }
         for task in container.tasks.list():
-            columns.setdefault(task.status, []).append(_task_payload(task))
+            columns.setdefault(task.status, []).append(_task_payload(task, orchestrator=orchestrator))
         for status, items in columns.items():
             items.sort(key=lambda item: _board_item_sort_key(status, item))
         return {"columns": columns}
 
     @router.post("/tasks/clear")
-    async def clear_tasks(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+    async def clear_tasks(
+        project_dir: Optional[str] = Query(None),
+        force: bool = Query(False),
+        timeout_seconds: float = Query(10.0, ge=0.0, le=120.0),
+    ) -> dict[str, Any]:
         """Clear all tasks by archiving runtime state and reinitializing storage.
 
         Args:
             project_dir: Optional project directory used to resolve runtime state.
+            force: Whether to force-cancel active tasks before clear.
+            timeout_seconds: Maximum wait time for shutdown/quiescence.
 
         Returns:
             A payload indicating clear status and archive destination path.
         """
         container, bus, orchestrator = deps.ctx(project_dir)
-        # Pause intake and stop scheduler/workers before mutating state files.
-        orchestrator.control("pause")
-        orchestrator.shutdown(timeout=10.0)
+        pre_clear_status = str(orchestrator.status().get("status") or "running")
+        clear_succeeded = False
+        clear_timeout = max(float(timeout_seconds), 0.0)
+        force_cancel_result: dict[str, Any] = {
+            "cancelled_task_ids": [],
+            "already_cancelled_task_ids": [],
+            "terminal_skipped_task_ids": [],
+            "missing_task_ids": [],
+            "failed": {},
+        }
 
-        archived_to = archive_state_root(container.project_dir)
-        ensure_state_root(container.project_dir)
-        deps.job_store.clear()
-        # Clearing state recreates config defaults; ensure queue intake returns
-        # to running mode so queued tasks cannot get stranded in paused mode.
-        orchestrator.control("resume")
-        archive_path = str(archived_to) if archived_to else ""
-        message = (
-            f"Cleared all tasks. Archived previous runtime state to {archive_path}."
-            if archive_path
-            else "Cleared all tasks. No existing runtime state archive was needed."
-        )
-        payload = {"archived_to": archive_path, "message": message, "cleared_at": now_iso()}
-        bus.emit(channel="tasks", event_type="tasks.cleared", entity_id=container.project_id, payload=payload)
-        bus.emit(channel="notifications", event_type="tasks.cleared", entity_id=container.project_id, payload=payload)
-        return {"cleared": True, **payload}
+        orchestrator.control("pause")
+        try:
+            # Pause intake and stop scheduler/workers before mutating state files.
+            orchestrator.shutdown(timeout=clear_timeout)
+            blockers_before = orchestrator.active_execution_blockers()
+
+            if int(blockers_before.get("count") or 0) > 0 and not force:
+                message = "Cannot clear tasks while execution is still active. Retry with force=true."
+                raise HTTPException(
+                    status_code=409,
+                    detail=_error_detail_envelope(
+                        detail=message,
+                        code="active_execution",
+                        data={"active_execution": blockers_before},
+                    ),
+                )
+
+            blockers_after = blockers_before
+            quiescence_result: dict[str, Any] | None = None
+            if int(blockers_before.get("count") or 0) > 0 and force:
+                force_cancel_result = orchestrator.force_cancel_tasks(
+                    list(blockers_before.get("task_ids") or []),
+                    source="api_clear_force",
+                )
+                quiescence_result = orchestrator.wait_for_execution_quiescence(timeout=clear_timeout)
+                blockers_after = dict(quiescence_result.get("blockers") or {})
+                if not bool(quiescence_result.get("quiescent")):
+                    message = "Forced clear timed out waiting for active execution to stop."
+                    raise HTTPException(
+                        status_code=409,
+                        detail=_error_detail_envelope(
+                            detail=message,
+                            code="active_execution_timeout",
+                            data={
+                                "active_execution": blockers_after,
+                                "force_cancel_result": force_cancel_result,
+                                "waited_seconds": quiescence_result.get("waited_seconds"),
+                            },
+                        ),
+                    )
+
+            context_entries = _collect_task_context_manifest_entries(container.tasks.list())
+            context_manifest = archive_task_context_manifest(container.project_dir, context_entries)
+            archived_to = archive_state_root(container.project_dir)
+            ensure_state_root(container.project_dir)
+            deps.job_store.clear()
+
+            archive_path = str(archived_to) if archived_to else ""
+            message = (
+                f"Cleared all tasks. Archived previous runtime state to {archive_path}."
+                if archive_path
+                else "Cleared all tasks. No existing runtime state archive was needed."
+            )
+            payload = {
+                "archived_to": archive_path,
+                "message": message,
+                "cleared_at": now_iso(),
+                "archived_context_count": len(context_entries),
+                "archived_context_manifest_path": str(context_manifest) if context_manifest else "",
+                "force": force,
+                "timeout_seconds": clear_timeout,
+                "active_execution_before": blockers_before,
+                "active_execution_after": blockers_after,
+                "force_cancel_result": force_cancel_result,
+                "quiescence_result": quiescence_result or {"quiescent": True, "waited_seconds": 0.0},
+            }
+            bus.emit(channel="tasks", event_type="tasks.cleared", entity_id=container.project_id, payload=payload)
+            bus.emit(channel="notifications", event_type="tasks.cleared", entity_id=container.project_id, payload=payload)
+            clear_succeeded = True
+            return {"cleared": True, **payload}
+        finally:
+            # On success, return intake to running mode after storage reinit.
+            # On failure, restore previous status to avoid side-effecting control state.
+            if clear_succeeded:
+                orchestrator.control("resume")
+            elif pre_clear_status == "paused":
+                orchestrator.control("pause")
+            elif pre_clear_status == "stopped":
+                orchestrator.control("stop")
+            else:
+                orchestrator.control("resume")
 
     @router.get("/tasks/execution-order")
     async def execution_order(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -906,7 +1257,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Returns:
             A payload containing ready-to-run batches and recently completed tasks.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         tasks = container.tasks.list()
         terminal = {"done", "cancelled"}
         pending = [t for t in tasks if t.status not in terminal]
@@ -931,11 +1282,11 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task does not exist.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.delete("/tasks/{task_id}")
     async def delete_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -951,18 +1302,29 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task is missing or non-terminal.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
         if task.status not in {"done", "cancelled"}:
             raise HTTPException(status_code=400, detail="Only terminal tasks (done/cancelled) can be deleted.")
 
+        context_entry = _task_context_manifest_entry(task)
+        context_manifest = (
+            archive_task_context_manifest(container.project_dir, [context_entry])
+            if context_entry is not None
+            else None
+        )
         _remove_task_relationship_refs(task_id=task_id, container=container)
         if not container.tasks.delete(task_id):
             raise HTTPException(status_code=404, detail="Task not found")
         bus.emit(channel="tasks", event_type="task.deleted", entity_id=task_id, payload={"status": task.status})
-        return {"deleted": True, "task_id": task_id}
+        return {
+            "deleted": True,
+            "task_id": task_id,
+            "archived_context_count": 1 if context_entry is not None else 0,
+            "archived_context_manifest_path": str(context_manifest) if context_manifest else "",
+        }
 
     @router.get("/tasks/{task_id}/diff")
     async def get_task_diff(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1033,32 +1395,10 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Prefers committed diff when present; otherwise returns current working tree
         changes for task worktree/repo context.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-
-        commit_payload: dict[str, Any] | None = None
-        try:
-            commit_payload = await get_task_diff(task_id, project_dir)
-        except HTTPException as exc:
-            if exc.status_code != 500:
-                raise
-        if commit_payload and commit_payload.get("commit"):
-            return {
-                "mode": "committed",
-                "commit": commit_payload.get("commit"),
-                "base_ref": None,
-                "base_sha": None,
-                "head_ref": None,
-                "head_sha": None,
-                "base_source": "none",
-                "confidence": "high",
-                "warnings": [],
-                "files": commit_payload.get("files") or [],
-                "diff": commit_payload.get("diff") or "",
-                "stat": commit_payload.get("stat") or "",
-            }
 
         task_metadata = task.metadata if isinstance(task.metadata, dict) else {}
         worktree_dir = None
@@ -1071,6 +1411,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         git_dir: Path | None = None
         project_root = container.project_dir
         has_task_worktree = False
+        strict_retained_context = task.status == "blocked"
         if worktree_dir:
             try:
                 worktree_path = Path(worktree_dir).expanduser().resolve()
@@ -1078,12 +1419,41 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 worktree_path = None
             if (
                 worktree_path
-                and worktree_path.exists()
-                and worktree_path.is_dir()
-                and _is_within_project(worktree_path, project_root)
+                and _is_valid_task_worktree_path(
+                    task_id=task.id,
+                    candidate=worktree_path,
+                    project_root=project_root,
+                    state_root=container.state_root,
+                    strict_retained=strict_retained_context,
+                )
             ):
                 git_dir = worktree_path
                 has_task_worktree = True
+        prefer_retained_worktree = bool(task.status == "blocked" and has_task_worktree)
+
+        if not prefer_retained_worktree:
+            commit_payload: dict[str, Any] | None = None
+            try:
+                commit_payload = await get_task_diff(task_id, project_dir)
+            except HTTPException as exc:
+                if exc.status_code != 500:
+                    raise
+            if commit_payload and commit_payload.get("commit"):
+                return {
+                    "mode": "committed",
+                    "context_source": "committed",
+                    "commit": commit_payload.get("commit"),
+                    "base_ref": None,
+                    "base_sha": None,
+                    "head_ref": None,
+                    "head_sha": None,
+                    "base_source": "none",
+                    "confidence": "high",
+                    "warnings": [],
+                    "files": commit_payload.get("files") or [],
+                    "diff": commit_payload.get("diff") or "",
+                    "stat": commit_payload.get("stat") or "",
+                }
 
         if has_task_worktree and git_dir is not None:
             try:
@@ -1091,6 +1461,17 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                     ["git", "status", "--short"],
                     cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
                 )
+                head_ref_result = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=git_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                head_ref: str | None = str(head_ref_result.stdout or "").strip()
+                if head_ref_result.returncode != 0 or not head_ref or head_ref == "HEAD":
+                    head_ref = None
                 has_head = (
                     subprocess.run(
                         ["git", "rev-parse", "--verify", "HEAD"],
@@ -1102,8 +1483,28 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                     ).returncode
                     == 0
                 )
-                stat_cmd = ["git", "diff", "--stat", "HEAD"] if has_head else ["git", "diff", "--stat"]
-                diff_cmd = ["git", "diff", "HEAD"] if has_head else ["git", "diff"]
+                base_ref = None
+                base_source = "none"
+                effective_base_sha: str | None = None
+                if prefer_retained_worktree and has_head:
+                    base_ref, base_source = _resolve_worktree_diff_base_ref(
+                        task=task,
+                        metadata=task_metadata,
+                        git_dir=git_dir,
+                        head_ref=head_ref,
+                    )
+                if base_ref and has_head:
+                    # Use the merge-base so the diff only shows the task's
+                    # own changes, excluding work merged into the base branch
+                    # after this task branched off.
+                    worktree_merge_base = _merge_base_sha(git_dir, base_ref, "HEAD")
+                    effective_base_sha = worktree_merge_base or _resolve_commit_sha(git_dir, base_ref)
+                    effective_worktree_base = effective_base_sha or base_ref
+                    stat_cmd = ["git", "diff", "--stat", effective_worktree_base]
+                    diff_cmd = ["git", "diff", effective_worktree_base]
+                else:
+                    stat_cmd = ["git", "diff", "--stat", "HEAD"] if has_head else ["git", "diff", "--stat"]
+                    diff_cmd = ["git", "diff", "HEAD"] if has_head else ["git", "diff"]
                 stat_result = subprocess.run(
                     stat_cmd,
                     cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
@@ -1136,11 +1537,47 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 files = parsed
 
             diff_text = diff_result.stdout or ""
+
+            # git diff does not include untracked files — generate diffs for
+            # them separately so reviewers can see new-file content.
+            untracked_diff, untracked_file_entries = _diff_untracked_files(git_dir, status_entries)
+            if untracked_diff:
+                diff_text = (diff_text + "\n" + untracked_diff) if diff_text else untracked_diff
+            if untracked_file_entries:
+                tracked_paths = {entry.get("path") for entry in files}
+                for uf_entry in untracked_file_entries:
+                    if uf_entry["path"] not in tracked_paths:
+                        files.append(uf_entry)
             if files or status_lines:
                 stat_text = stat_result.stdout or ("\n".join(status_lines) if status_lines else "")
                 return {
                     "mode": "working_tree",
+                    "context_source": "retained_worktree",
                     "commit": None,
+                    "base_ref": base_ref,
+                    "base_sha": effective_base_sha or (_resolve_commit_sha(git_dir, base_ref) if base_ref else None),
+                    "head_ref": head_ref,
+                    "head_sha": _resolve_commit_sha(git_dir, head_ref) if head_ref else None,
+                    "base_source": base_source,
+                    "confidence": "high",
+                    "warnings": [],
+                    "files": files,
+                    "diff": diff_text,
+                    "stat": stat_text,
+                }
+
+        if prefer_retained_worktree:
+            commit_payload = None
+            try:
+                commit_payload = await get_task_diff(task_id, project_dir)
+            except HTTPException as exc:
+                if exc.status_code != 500:
+                    raise
+            if commit_payload and commit_payload.get("commit"):
+                return {
+                    "mode": "committed",
+                    "context_source": "committed",
+                    "commit": commit_payload.get("commit"),
                     "base_ref": None,
                     "base_sha": None,
                     "head_ref": None,
@@ -1148,9 +1585,9 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                     "base_source": "none",
                     "confidence": "high",
                     "warnings": [],
-                    "files": files,
-                    "diff": diff_text,
-                    "stat": stat_text,
+                    "files": commit_payload.get("files") or [],
+                    "diff": commit_payload.get("diff") or "",
+                    "stat": commit_payload.get("stat") or "",
                 }
 
         preserved_payload = _preserved_branch_changes(
@@ -1165,6 +1602,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if has_task_worktree:
             return {
                 "mode": "none",
+                "context_source": "none",
                 "commit": None,
                 "base_ref": None,
                 "base_sha": None,
@@ -1186,6 +1624,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         return {
             "mode": "none",
             "reason": reason,
+            "context_source": "none",
             "commit": None,
             "base_ref": None,
             "base_sha": None,
@@ -1267,6 +1706,31 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 for run in all_runs
                 if str(run.id).strip() and str(run.task_id or "").strip() == task.id
             ]
+        # Normalize run ordering using run timestamps so latest-log selection does
+        # not depend on historical run_ids list direction.
+        indexed_run_ids = {run_id_value: idx for idx, run_id_value in enumerate(task_run_ids)}
+
+        def _run_sort_key(run_id_value: str) -> tuple[float, int, str]:
+            run = runs_by_id.get(run_id_value)
+            fallback_idx = indexed_run_ids.get(run_id_value, 10_000_000)
+            if not run:
+                return float("-inf"), fallback_idx, run_id_value
+            started_at_raw = str(getattr(run, "started_at", "") or "").strip()
+            finished_at_raw = str(getattr(run, "finished_at", "") or "").strip()
+            candidate = started_at_raw or finished_at_raw
+            if not candidate:
+                return float("-inf"), fallback_idx, run_id_value
+            normalized = candidate[:-1] + "+00:00" if candidate.endswith("Z") else candidate
+            try:
+                parsed = datetime.fromisoformat(normalized)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                parsed_epoch = parsed.astimezone(timezone.utc).timestamp()
+            except ValueError:
+                parsed_epoch = float("-inf")
+            return parsed_epoch, fallback_idx, run_id_value
+
+        task_run_ids = sorted(task_run_ids, key=_run_sort_key)
         step_execution_counts: dict[str, int] = {}
         step_latest_run: dict[str, str] = {}
         available_steps: list[str] = []
@@ -1295,12 +1759,26 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                     {
                         "step": step_name,
                         "run_id": task_run_id,
+                        # Temporary recent-first ordinal; normalized below so
+                        # attempt numbers are chronological (oldest=1, newest=N).
                         "attempt": step_attempt_counts[step_name],
                         "started_at": entry.get("started_at"),
                         "finished_at": entry.get("ts"),
                         "entry": entry,
                     }
                 )
+
+        # Normalize per-step attempt numbering so higher attempt means more recent.
+        # `step_history_entries` is recent-first, while `step_execution_counts`
+        # carries total executions for each step.
+        for item in step_history_entries:
+            step_name = str(item.get("step") or "").strip()
+            if not step_name:
+                continue
+            recent_first_attempt = int(item.get("attempt") or 0)
+            total_for_step = int(step_execution_counts.get(step_name) or 0)
+            if recent_first_attempt > 0 and total_for_step > 0:
+                item["attempt"] = total_for_step - recent_first_attempt + 1
 
         # When a specific step is requested, resolve logs strictly for that step.
         step_logs_meta: Optional[dict[str, Any]] = None
@@ -1349,9 +1827,27 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             else:
                 logs_meta = {"step": requested_step}
         else:
-            logs_meta = active_meta or last_meta or {}
-            selected_run_id = str(logs_meta.get("run_id") or "").strip() or None
-            mode = "active" if active_meta else ("last" if last_meta else "none")
+            # Keep active stream selection first for in-progress tasks, but for
+            # non-scoped requests fall back to the latest historical execution
+            # before considering stale `last_logs` metadata.
+            latest_history = step_history_entries[0] if step_history_entries else None
+            latest_history_entry = latest_history.get("entry") if isinstance(latest_history, dict) else None
+            if active_meta:
+                logs_meta = active_meta
+                selected_run_id = str(logs_meta.get("run_id") or "").strip() or None
+                mode = "active"
+            elif isinstance(latest_history_entry, dict):
+                logs_meta = latest_history_entry
+                latest_history_map = latest_history if isinstance(latest_history, dict) else {}
+                selected_run_id = str(latest_history_map.get("run_id") or "").strip() or None
+                mode = "history"
+            elif last_meta:
+                logs_meta = last_meta
+                selected_run_id = str(logs_meta.get("run_id") or "").strip() or None
+                mode = "last"
+            else:
+                logs_meta = {}
+                mode = "none"
 
         stdout_path = _safe_state_path(logs_meta.get("stdout_path"), container.state_root)
         stderr_path = _safe_state_path(logs_meta.get("stderr_path"), container.state_root)
@@ -1449,7 +1945,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task is missing or if status mutation is requested.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1495,7 +1991,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.updated", entity_id=task.id, payload={"status": task.status})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.post("/tasks/{task_id}/transition")
     async def transition_task(task_id: str, body: TransitionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1512,23 +2008,49 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task is missing, the transition is invalid, or blockers remain.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
         target = body.status
+        if task.status == "blocked" and target == "in_review":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Blocked tasks cannot transition to in_review directly. "
+                    "Use /tasks/{task_id}/skip-to-precommit when eligible."
+                ),
+            )
+        if task.status == "in_review" and target == "done":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "In-review tasks cannot transition to done directly. "
+                    "Use /review/{task_id}/approve."
+                ),
+            )
         valid = VALID_TRANSITIONS.get(task.status, set())
         if target not in valid:
             raise HTTPException(status_code=400, detail=f"Invalid transition {task.status} -> {target}")
-        if target == "queued":
-            unresolved = _has_unresolved_blockers(container, task)
-            if unresolved is not None:
-                raise HTTPException(status_code=400, detail=f"Unresolved blocker: {unresolved}")
+        if target == "cancelled":
+            try:
+                cancelled = orchestrator.cancel_task(task.id, source="api_transition")
+            except ValueError as exc:
+                if "Task not found" in str(exc):
+                    raise HTTPException(status_code=404, detail=str(exc))
+                raise HTTPException(status_code=400, detail=str(exc))
+            bus.emit(
+                channel="tasks",
+                event_type="task.transitioned",
+                entity_id=cancelled.id,
+                payload={"status": cancelled.status},
+            )
+            return {"task": _task_payload(cancelled, container, orchestrator)}
         task.status = cast(TaskStatus, target)
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.transitioned", entity_id=task.id, payload={"status": task.status})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.post("/tasks/{task_id}/run")
     async def run_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1551,7 +2073,73 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             if "Task not found" in str(exc):
                 raise HTTPException(status_code=404, detail=str(exc))
             raise HTTPException(status_code=400, detail=str(exc))
-        return {"task": _task_payload(task)}
+        return {"task": _task_payload(task, orchestrator=orchestrator)}
+
+    @router.post("/tasks/{task_id}/skip-to-precommit")
+    async def skip_to_precommit(
+        task_id: str,
+        body: Optional[SkipToPrecommitRequest] = None,
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        """Move an eligible blocked task directly to pre-commit review.
+
+        Args:
+            task_id: Identifier of the blocked task.
+            body: Optional payload with reviewer guidance/audit note.
+            project_dir: Optional project directory used to resolve runtime state.
+
+        Returns:
+            Updated task payload in pre-commit review state.
+
+        Raises:
+            HTTPException: If task lookup fails or task is not eligible.
+        """
+        container, _, orchestrator = deps.ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        allowed, reason_code = orchestrator.can_skip_to_precommit(task)
+        if not allowed:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Task {task_id} is not eligible to skip to pre-commit ({reason_code or 'not_allowed'})",
+            )
+        guidance = str(body.guidance if body else "").strip()
+        try:
+            updated = orchestrator.skip_task_to_precommit(task_id, guidance=guidance)
+        except ValueError as exc:
+            message = str(exc)
+            if "Task not found" in message:
+                raise HTTPException(status_code=404, detail=message) from exc
+            raise HTTPException(status_code=409, detail=message) from exc
+        return {
+            "task": _task_payload(updated, container, orchestrator),
+            "message": "Task moved to pre-commit review. Approve to run commit.",
+        }
+
+    @router.post("/tasks/{task_id}/finalize-merge-conflict")
+    async def finalize_merge_conflict(
+        task_id: str,
+        body: Optional[FinalizeMergeConflictRequest] = None,
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        """Finalize a blocked merge-conflict task after manual Git resolution."""
+        container, _, orchestrator = deps.ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        guidance = str(body.guidance if body else "").strip()
+        try:
+            updated = orchestrator.finalize_merge_conflict(task_id, guidance=guidance)
+        except ValueError as exc:
+            message = str(exc)
+            if "Task not found" in message:
+                raise HTTPException(status_code=404, detail=message) from exc
+            raise HTTPException(status_code=409, detail=message) from exc
+        return {
+            "task": _task_payload(updated, container, orchestrator),
+            "message": "Task finalized after manual merge verification.",
+        }
 
     @router.post("/tasks/{task_id}/retry")
     async def retry_task(task_id: str, body: Optional[RetryTaskRequest] = None, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1568,7 +2156,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task is missing or unresolved blockers remain.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1581,6 +2169,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.status = "queued"
         task.error = None
         task.pending_gate = None
+        task.wait_state = None
         task.metadata = task.metadata if isinstance(task.metadata, dict) else {}
         task.metadata.pop("execution_checkpoint", None)
         task.metadata.pop("human_blocking_issues", None)
@@ -1605,11 +2194,11 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if start_from.strip():
             task.metadata["retry_from_step"] = start_from.strip()
         elif task.current_step:
-            # Only auto-default to steps that exist in the pipeline or
-            # the special review/commit phases.  Synthetic steps like
-            # "implement_fix" are not in the template and would cause
-            # the retry-from logic to silently skip all phase-1 steps.
-            valid_restart = set(task.pipeline_template or []) | {"review", "commit"}
+            # Auto-default to the current step.  Pipeline template steps and
+            # the special review/commit phases restart directly.  The synthetic
+            # "implement_fix" step is also allowed — the executor will resume
+            # at the parent verify step and re-enter the fix loop.
+            valid_restart = set(task.pipeline_template or []) | {"review", "commit", "implement_fix"}
             if task.current_step in valid_restart:
                 task.metadata["retry_from_step"] = task.current_step
             else:
@@ -1642,7 +2231,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 "previous_error_present": bool(previous_error.strip()),
             },
         )
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.post("/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1658,18 +2247,14 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task does not exist.
         """
-        container, bus, _ = deps.ctx(project_dir)
-        task = container.tasks.get(task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-        task.status = "cancelled"
-        task.pending_gate = None
-        task.current_agent_id = None
-        task.metadata = task.metadata if isinstance(task.metadata, dict) else {}
-        task.metadata.pop("execution_checkpoint", None)
-        container.tasks.upsert(task)
-        bus.emit(channel="tasks", event_type="task.cancelled", entity_id=task.id, payload={})
-        return {"task": _task_payload(task, container)}
+        container, _, orchestrator = deps.ctx(project_dir)
+        try:
+            task = orchestrator.cancel_task(task_id, source="api_cancel")
+        except ValueError as exc:
+            if "Task not found" in str(exc):
+                raise HTTPException(status_code=404, detail=str(exc))
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.post("/tasks/{task_id}/approve-gate")
     async def approve_gate(task_id: str, body: ApproveGateRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1697,6 +2282,11 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         action = str(getattr(body, "action", "approve") or "approve").strip().lower()
         if action not in {"approve", "request_changes"}:
             raise HTTPException(status_code=400, detail=f"Unsupported gate action: {action}")
+        generation_policy = getattr(body, "generation_policy", None)
+        requested_generation_policy = _generation_policy_overrides(
+            generation_policy.model_dump(exclude_none=True) if generation_policy is not None else None
+        )
+        save_generation_defaults = bool(getattr(body, "save_generation_policy_as_default", False))
 
         cleared_gate = task.pending_gate
         acted_at = now_iso()
@@ -1705,12 +2295,18 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             task.metadata = {}
 
         if action == "request_changes":
+            if requested_generation_policy or save_generation_defaults:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Generation policy controls are only supported for gate approval.",
+                )
             start_from_step = _request_changes_step_for_gate(task, cleared_gate)
             guidance = str(getattr(body, "guidance", "") or "").strip()
             task.retry_count += 1
             task.status = "queued"
             task.error = None
             task.pending_gate = None
+            task.wait_state = None
             task.current_agent_id = None
             task.metadata.pop("execution_checkpoint", None)
             if start_from_step:
@@ -1759,11 +2355,39 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             )
             orchestrator.ensure_worker()
             return {
-                "task": _task_payload(task, container),
+                "task": _task_payload(task, container, orchestrator),
                 "cleared_gate": cleared_gate,
                 "message": _gate_changes_requested_message(cleared_gate, start_from_step=start_from_step),
                 "approved_at": acted_at,
             }
+
+        if (requested_generation_policy or save_generation_defaults) and cleared_gate != "before_generate_tasks":
+            raise HTTPException(
+                status_code=400,
+                detail="Generation policy controls are only valid for the before_generate_tasks gate.",
+            )
+
+        effective_generation_policy: dict[str, Any] | None = None
+        saved_generation_defaults: dict[str, Any] | None = None
+        if cleared_gate == "before_generate_tasks":
+            if not orchestrator.supports_task_generation(task):
+                raise HTTPException(status_code=400, detail="Task pipeline does not include generate_tasks")
+            effective_generation_policy = orchestrator.resolve_task_generation_policy(
+                task,
+                request_overrides=(requested_generation_policy or None),
+            )
+            if requested_generation_policy:
+                orchestrator.set_pending_task_generation_override(
+                    task,
+                    effective_policy=effective_generation_policy,
+                )
+            else:
+                orchestrator.set_pending_task_generation_override(task, effective_policy=None)
+            if save_generation_defaults:
+                saved_generation_defaults = orchestrator.persist_task_generation_defaults(
+                    task,
+                    effective_policy=effective_generation_policy,
+                )
 
         if should_resume:
             checkpoint = task.metadata.get("execution_checkpoint")
@@ -1776,17 +2400,30 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             checkpoint_payload["resume_requested_at"] = acted_at
             task.metadata["execution_checkpoint"] = checkpoint_payload
         task.pending_gate = None
+        task.wait_state = None
         task.updated_at = acted_at
         container.tasks.upsert(task)
-        bus.emit(channel="tasks", event_type="task.gate_approved", entity_id=task.id, payload={"gate": cleared_gate})
+        bus.emit(
+            channel="tasks",
+            event_type="task.gate_approved",
+            entity_id=task.id,
+            payload={"gate": cleared_gate, "effective_generation_policy": effective_generation_policy},
+        )
         if should_resume:
-            bus.emit(channel="tasks", event_type="task.resume_requested", entity_id=task.id, payload={"gate": cleared_gate})
+            bus.emit(
+                channel="tasks",
+                event_type="task.resume_requested",
+                entity_id=task.id,
+                payload={"gate": cleared_gate, "effective_generation_policy": effective_generation_policy},
+            )
             orchestrator.ensure_worker()
         return {
-            "task": _task_payload(task, container),
+            "task": _task_payload(task, container, orchestrator),
             "cleared_gate": cleared_gate,
             "message": _gate_approved_message(cleared_gate, will_resume=should_resume),
             "approved_at": acted_at,
+            "effective_generation_policy": effective_generation_policy,
+            "saved_generation_defaults": saved_generation_defaults,
         }
 
     @router.post("/tasks/{task_id}/dependencies")
@@ -1804,7 +2441,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If either task cannot be found.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         blocker = container.tasks.get(body.depends_on)
         if not task or not blocker:
@@ -1816,7 +2453,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         container.tasks.upsert(task)
         container.tasks.upsert(blocker)
         bus.emit(channel="tasks", event_type="task.dependency_added", entity_id=task.id, payload={"depends_on": body.depends_on})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.delete("/tasks/{task_id}/dependencies/{dep_id}")
     async def remove_dependency(task_id: str, dep_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1833,7 +2470,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task cannot be found.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1844,7 +2481,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             blocker.blocks = [item for item in blocker.blocks if item != task.id]
             container.tasks.upsert(blocker)
         bus.emit(channel="tasks", event_type="task.dependency_removed", entity_id=task.id, payload={"dep_id": dep_id})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.post("/tasks/analyze-dependencies")
     async def analyze_dependencies(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1882,7 +2519,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task cannot be found.
         """
-        container, bus, _ = deps.ctx(project_dir)
+        container, bus, orchestrator = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1908,7 +2545,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.dep_analysis_reset", entity_id=task.id, payload={})
-        return {"task": _task_payload(task, container)}
+        return {"task": _task_payload(task, container, orchestrator)}
 
     @router.get("/tasks/{task_id}/workdoc")
     async def get_task_workdoc(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -2070,6 +2707,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         try:
             committed_revision_id = orchestrator.commit_plan_revision(task_id, body.revision_id)
             plan_doc = orchestrator.get_plan_document(task_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return {
@@ -2111,6 +2750,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 feedback_note=body.feedback_note,
                 step=None,
             )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return {"revision": revision.to_dict()}
@@ -2136,6 +2777,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
+        if not orchestrator.supports_task_generation(task):
+            raise HTTPException(status_code=400, detail="Task pipeline does not include generate_tasks")
         source = body.source
         if source is None:
             # Backward compatibility: previous API accepted only optional plan_override.
@@ -2160,7 +2803,18 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             raise HTTPException(status_code=400, detail=str(exc))
 
         try:
-            created_ids = orchestrator.generate_tasks_from_plan(task_id, plan_text, infer_deps=body.infer_deps)
+            policy_overrides = _generation_policy_overrides(
+                body.policy.model_dump(exclude_none=True) if body.policy is not None else None
+            )
+            if "infer_deps" in body.model_fields_set and "infer_deps" not in policy_overrides:
+                policy_overrides["infer_deps"] = bool(body.infer_deps)
+            created_ids, effective_policy = orchestrator.generate_tasks_from_plan(
+                task_id,
+                plan_text,
+                infer_deps=(bool(body.infer_deps) if "infer_deps" in body.model_fields_set else None),
+                generation_policy_overrides=(policy_overrides or None),
+                save_as_default=bool(body.save_as_default),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
@@ -2170,11 +2824,113 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         for child_id in created_ids:
             child_task = container.tasks.get(child_id)
             if child_task is not None:
-                children.append(_task_payload(child_task))
+                children.append(_task_payload(child_task, orchestrator=orchestrator))
         return {
-            "task": _task_payload(updated_task) if updated_task else None,
+            "task": _task_payload(updated_task, orchestrator=orchestrator) if updated_task else None,
             "created_task_ids": created_ids,
             "children": children,
             "source": source,
             "source_revision_id": resolved_revision_id,
+            "effective_policy": effective_policy,
         }
+
+    @router.post("/tasks/{task_id}/review-commit")
+    async def review_commit(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Create a commit-review task from a completed task's commit.
+
+        Extracts the commit SHA, diff, description, and plan from the source
+        task and creates a new ``commit_review`` task pre-loaded with that
+        context so the pipeline can analyze and fix any issues found.
+
+        Args:
+            task_id: Identifier of the completed source task to review.
+            project_dir: Optional project directory for runtime state resolution.
+
+        Returns:
+            A payload containing the newly created review task.
+
+        Raises:
+            HTTPException: If the source task is missing (404), not done (400),
+                or has no commit (400).
+        """
+        container, bus, orchestrator = deps.ctx(project_dir)
+        source_task = container.tasks.get(task_id)
+        if not source_task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        if source_task.status != "done":
+            raise HTTPException(status_code=400, detail="Only completed tasks can be reviewed")
+
+        # Idempotency: reject if a commit_review task already exists for this source.
+        for existing in container.tasks.list():
+            if (
+                existing.task_type == "commit_review"
+                and isinstance(existing.metadata, dict)
+                and existing.metadata.get("source_task_id") == task_id
+                and existing.status not in ("failed", "cancelled")
+            ):
+                raise HTTPException(status_code=409, detail=f"A commit review task already exists: {existing.id}")
+
+        # Extract commit SHA from the latest run's steps.
+        commit_sha: str | None = None
+        for run_id in reversed(source_task.run_ids):
+            run_record = container.runs.get(run_id)
+            if not run_record:
+                continue
+            for step_entry in reversed(run_record.steps or []):
+                if isinstance(step_entry, dict) and step_entry.get("step") == "commit" and step_entry.get("commit"):
+                    commit_sha = str(step_entry["commit"]).strip()
+                    break
+            if commit_sha:
+                break
+
+        if not commit_sha:
+            raise HTTPException(status_code=400, detail="No commit found on source task")
+
+        # Fetch diff (truncate to ~100K characters to stay within prompt limits).
+        _MAX_DIFF_CHARS = 100_000
+        git_dir = container.project_dir
+        try:
+            diff_result = subprocess.run(
+                ["git", "diff", f"{commit_sha}~1..{commit_sha}"],
+                cwd=git_dir, capture_output=True, text=True, check=True, timeout=15,
+            )
+            diff_text = diff_result.stdout
+            if len(diff_text) > _MAX_DIFF_CHARS:
+                diff_text = diff_text[:_MAX_DIFF_CHARS].rsplit("\n", 1)[0]
+                diff_text += "\n\n[DIFF TRUNCATED — exceeded 100K character limit]"
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            diff_text = ""
+
+        # Extract plan text from source task (committed revision → step outputs → empty).
+        plan_text = ""
+        source_meta = source_task.metadata if isinstance(source_task.metadata, dict) else {}
+        for rev_key in ("committed_plan_revision_id", "latest_plan_revision_id"):
+            rev_id = str(source_meta.get(rev_key) or "").strip()
+            if not rev_id:
+                continue
+            revision = container.plan_revisions.get(rev_id)
+            if revision and revision.task_id == task_id and str(revision.content or "").strip():
+                plan_text = str(revision.content).strip()
+                break
+        if not plan_text:
+            so = source_meta.get("step_outputs")
+            if isinstance(so, dict):
+                plan_text = str(so.get("plan") or "").strip()
+
+        review_task = Task(
+            title=f"Review: {source_task.title}",
+            description=f"Review commit {commit_sha[:12]} from task {task_id}.",
+            task_type="commit_review",
+            status="queued",
+            source="commit_review",
+            metadata={
+                "source_task_id": task_id,
+                "source_commit_sha": commit_sha,
+                "source_description": source_task.description or "",
+                "source_plan": plan_text,
+                "source_diff": diff_text,
+            },
+        )
+        container.tasks.upsert(review_task)
+        bus.emit(channel="tasks", event_type="task.created", entity_id=review_task.id, payload={"status": review_task.status})
+        return {"task": _task_payload(review_task, orchestrator=orchestrator)}

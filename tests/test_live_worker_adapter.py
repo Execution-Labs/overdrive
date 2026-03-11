@@ -11,11 +11,17 @@ import pytest
 from agent_orchestrator.runtime.domain.models import RunRecord, Task
 from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
     LiveWorkerAdapter,
+    _detect_required_verify_commands,
+    _inject_required_verify_commands,
     _extract_json,
     _extract_json_value,
     _normalize_planning_text,
     build_step_prompt,
     detect_project_languages,
+)
+from agent_orchestrator.runtime.orchestrator.environment_preflight import (
+    EnvironmentIssue,
+    EnvironmentPreflightResult,
 )
 from agent_orchestrator.runtime.storage.container import Container
 from agent_orchestrator.workers.config import WorkerProviderSpec
@@ -121,6 +127,10 @@ def test_codex_success_maps_to_ok(adapter: LiveWorkerAdapter) -> None:
         patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=()),
         ),
         patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
@@ -234,6 +244,97 @@ def test_claude_uses_shared_prompt_construction(adapter: LiveWorkerAdapter) -> N
     assert "project_languages" in build_prompt_mock.call_args.kwargs
 
 
+def test_environment_preflight_failure_short_circuits_before_worker_run(adapter: LiveWorkerAdapter) -> None:
+    task = _make_task()
+    failed_preflight = EnvironmentPreflightResult(
+        ok=False,
+        required_capabilities=("docker",),
+        issues=(
+            EnvironmentIssue(
+                code="docker_unavailable",
+                summary="Docker daemon/socket is unavailable in the worker execution environment.",
+                capability="docker",
+                recoverable=False,
+            ),
+        ),
+    )
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=failed_preflight,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+        ) as run_worker_mock,
+    ):
+        result = adapter.run_step(task=task, step="implement", attempt=1)
+
+    assert result.status == "error"
+    assert "environment preflight failed" in str(result.summary or "").lower()
+    run_worker_mock.assert_not_called()
+
+
+def test_capability_fallback_selects_provider_with_required_capabilities(
+    adapter: LiveWorkerAdapter,
+) -> None:
+    run_result = _make_run_result(exit_code=0)
+    runtime = SimpleNamespace(
+        default_model="",
+        providers={
+            "codex": _CODEX_SPEC,
+            "claude-capable": WorkerProviderSpec(
+                name="claude-capable",
+                type="claude",
+                command="claude -p",
+                capabilities=("docker",),
+            ),
+        },
+    )
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
+            return_value=runtime,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.required_capabilities_for_step",
+            return_value=("docker",),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=(), required_capabilities=("docker",)),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ) as run_worker_mock,
+    ):
+        result = adapter.run_step(task=_make_task(), step="implement", attempt=1)
+
+    assert result.status == "ok"
+    assert run_worker_mock.call_args.kwargs["spec"].name == "claude-capable"
+
+
 # ---------------------------------------------------------------------------
 # 6. Step timeout can be overridden per task metadata
 # ---------------------------------------------------------------------------
@@ -271,7 +372,8 @@ def test_timeout_override_from_task_metadata(adapter: LiveWorkerAdapter) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_timeout_defaults_from_pipeline_template(adapter: LiveWorkerAdapter) -> None:
+def test_timeout_defaults_to_no_timeout(adapter: LiveWorkerAdapter) -> None:
+    """When no global config override is set, steps default to 0 (no timeout)."""
     run_result = _make_run_result(exit_code=0)
     task = _make_task(task_type="bug")
 
@@ -292,10 +394,10 @@ def test_timeout_defaults_from_pipeline_template(adapter: LiveWorkerAdapter) -> 
             return_value=run_result,
         ) as run_worker_mock,
     ):
-        result = adapter.run_step(task=task, step="reproduce", attempt=1)
+        result = adapter.run_step(task=task, step="diagnose", attempt=1)
 
     assert result.status == "ok"
-    assert run_worker_mock.call_args.kwargs["timeout_seconds"] == 300
+    assert run_worker_mock.call_args.kwargs["timeout_seconds"] == 0
 
 
 def test_timeout_defaults_from_orchestrator_settings_when_step_has_no_template(
@@ -329,6 +431,44 @@ def test_timeout_defaults_from_orchestrator_settings_when_step_has_no_template(
 
     assert result.status == "ok"
     assert run_worker_mock.call_args.kwargs["timeout_seconds"] == 321
+
+
+def test_global_timeout_applies_to_template_steps_and_aliases(
+    container: Container, adapter: LiveWorkerAdapter
+) -> None:
+    """Global step_timeout_seconds should override template defaults for both
+    regular pipeline steps and aliased synthetic steps like implement_fix."""
+    run_result = _make_run_result(exit_code=0)
+    cfg = container.config.load()
+    orchestrator_cfg = dict(cfg.get("orchestrator") or {})
+    orchestrator_cfg["step_timeout_seconds"] = 6000
+    cfg["orchestrator"] = orchestrator_cfg
+    container.config.save(cfg)
+
+    task = _make_task(task_type="bug")
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ) as run_worker_mock,
+    ):
+        # implement_fix aliases to implement — should still get global 6000s
+        result = adapter.run_step(task=task, step="implement_fix", attempt=1)
+
+    assert result.status == "ok"
+    assert run_worker_mock.call_args.kwargs["timeout_seconds"] == 6000
 
 
 def test_heartbeat_defaults_are_forwarded(adapter: LiveWorkerAdapter) -> None:
@@ -409,6 +549,10 @@ def test_codex_failure_maps_to_error(adapter: LiveWorkerAdapter) -> None:
             return_value=(True, "ok"),
         ),
         patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=()),
+        ),
+        patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
@@ -438,6 +582,10 @@ def test_codex_timeout_maps_to_error(adapter: LiveWorkerAdapter) -> None:
         patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=()),
         ),
         patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
@@ -776,6 +924,27 @@ def test_build_step_prompt_appends_step_injection() -> None:
     assert "Implement the task completely and safely" in prompt
 
 
+def test_build_step_prompt_merge_retry_context() -> None:
+    task = _make_task(
+        task_type="feature",
+        metadata={
+            "merge_conflict_files": {
+                "auth.py": "<<<<<<< HEAD\nold\n=======\nnew\n>>>>>>> task-xyz",
+            },
+            "merge_conflict_attempt": 2,
+            "merge_conflict_max_attempts": 3,
+            "merge_conflict_previous_error": "Worker reported success but unresolved merge entries remain.",
+        },
+    )
+    prompt = build_step_prompt(task=task, step="resolve_merge", attempt=2)
+
+    assert "## Retry context" in prompt
+    assert "Attempt: 2 of 3" in prompt
+    assert "Previous attempt error:" in prompt
+    assert "unresolved merge entries remain" in prompt
+    assert "remove all conflict markers" in prompt.lower()
+
+
 def test_implement_prompt_omits_review_history() -> None:
     task = _make_task(metadata={
         "review_history": [
@@ -1083,6 +1252,199 @@ def test_verify_formatter_environment_sets_note_with_reason(adapter: LiveWorkerA
     assert task.metadata.get("verify_reason_code") == "permission_denied"
 
 
+def test_verify_environment_note_normalizes_missing_frontend_toolchain(
+    adapter: LiveWorkerAdapter,
+    container: Container,
+) -> None:
+    frontend = container.project_dir / "frontend"
+    frontend.mkdir(parents=True, exist_ok=True)
+    (frontend / "package.json").write_text('{"name":"frontend","scripts":{"build":"vite build"}}', encoding="utf-8")
+    task = _make_task(description="Build gate: tsc --noEmit && vite build passes.")
+    raw_result = _make_run_result(exit_code=0, response_text="verify output")
+    fmt_result = _make_run_result(
+        exit_code=0,
+        response_text='{"status":"environment","reason_code":"tool_missing","summary":"npx tsc --noEmit && npx vite build failed"}',
+    )
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            side_effect=[raw_result, fmt_result],
+        ),
+    ):
+        result = adapter.run_step(task=task, step="verify", attempt=1)
+
+    assert result.status == "ok"
+    assert result.summary is not None
+    assert "frontend toolchain" in result.summary.lower()
+    assert "frontend/node_modules" in result.summary
+    assert "env_kind=frontend_toolchain_missing" in result.summary
+    assert task.metadata.get("verify_environment_kind") == "frontend_toolchain_missing"
+
+
+def test_verify_json_environment_path_does_not_raise_and_sets_env_kind(
+    adapter: LiveWorkerAdapter,
+    container: Container,
+) -> None:
+    frontend = container.project_dir / "frontend"
+    frontend.mkdir(parents=True, exist_ok=True)
+    (frontend / "package.json").write_text('{"name":"frontend","scripts":{"build":"vite build"}}', encoding="utf-8")
+    task = _make_task(description="Build gate: tsc --noEmit && vite build passes.")
+    run_result = _make_run_result(
+        exit_code=0,
+        response_text='{"status":"environment","reason_code":"tool_missing","summary":"npx tsc --noEmit && npx vite build failed"}',
+    )
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ),
+    ):
+        result = adapter.run_step(task=task, step="verify", attempt=1)
+
+    assert result.status == "ok"
+    assert result.summary is not None
+    assert "frontend/node_modules" in result.summary
+    assert "env_kind=frontend_toolchain_missing" in result.summary
+    assert task.metadata.get("verify_reason_code") == "tool_missing"
+    assert task.metadata.get("verify_environment_kind") == "frontend_toolchain_missing"
+
+
+def test_verify_environment_note_normalizes_prisma_missing_database_url(
+    adapter: LiveWorkerAdapter,
+    container: Container,
+) -> None:
+    prisma_dir = container.project_dir / "prisma"
+    prisma_dir.mkdir(parents=True, exist_ok=True)
+    (prisma_dir / "schema.prisma").write_text(
+        'datasource db { provider = "postgresql" url = env("DATABASE_URL") }',
+        encoding="utf-8",
+    )
+    (container.project_dir / "package.json").write_text(
+        '{"name":"app","devDependencies":{"prisma":"^6.5.0"}}',
+        encoding="utf-8",
+    )
+    task = _make_task(description="Run prisma migrate dev --name init and prisma validate.")
+    run_result = _make_run_result(
+        exit_code=0,
+        response_text=(
+            '{"status":"environment","reason_code":"infrastructure",'
+            '"summary":"prisma validate failed: Environment variable not found: DATABASE_URL"}'
+        ),
+    )
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ),
+    ):
+        result = adapter.run_step(task=task, step="verify", attempt=1)
+
+    assert result.status == "ok"
+    assert result.summary is not None
+    assert "database_url" in result.summary.lower()
+    assert "env_kind=prisma_env_missing" in result.summary
+    assert task.metadata.get("verify_environment_kind") == "prisma_env_missing"
+    assert task.metadata.get("verify_reason_code") == "config_missing"
+
+
+def test_verify_environment_note_normalizes_prisma_missing_local_cli(
+    adapter: LiveWorkerAdapter,
+    container: Container,
+) -> None:
+    cfg = container.config.load()
+    workers_cfg = dict(cfg.get("workers") or {})
+    workers_cfg["environment"] = {
+        "auto_prepare": False,
+        "max_auto_retries": 3,
+        "capability_fallback": True,
+        "required_capabilities_by_step": {},
+    }
+    cfg["workers"] = workers_cfg
+    container.config.save(cfg)
+
+    prisma_dir = container.project_dir / "prisma"
+    prisma_dir.mkdir(parents=True, exist_ok=True)
+    (prisma_dir / "schema.prisma").write_text('generator client { provider = "prisma-client-js" }', encoding="utf-8")
+    (container.project_dir / "package.json").write_text(
+        '{"name":"app","devDependencies":{"prisma":"^6.5.0"}}',
+        encoding="utf-8",
+    )
+    task = _make_task(description="Validate Prisma migration workflow in verify.")
+    run_result = _make_run_result(
+        exit_code=0,
+        response_text=(
+            '{"status":"environment","reason_code":"infrastructure",'
+            '"summary":"npx prisma migrate dev failed; getaddrinfo ENOTFOUND registry.npmjs.org"}'
+        ),
+    )
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=()),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ),
+    ):
+        result = adapter.run_step(task=task, step="verify", attempt=1)
+
+    assert result.status == "ok"
+    assert result.summary is not None
+    assert "local prisma cli is missing" in result.summary.lower()
+    assert "env_kind=prisma_cli_missing" in result.summary
+    assert task.metadata.get("verify_environment_kind") == "prisma_cli_missing"
+    assert task.metadata.get("verify_reason_code") == "tool_missing"
+
+
 def test_task_generation_parses_top_level_array(adapter: LiveWorkerAdapter) -> None:
     response = "```json\n[{\"title\":\"Task A\",\"task_type\":\"feature\",\"priority\":\"P1\"}]\n```"
     run_result = _make_run_result(exit_code=0, response_text=response)
@@ -1342,6 +1704,76 @@ def test_verification_prompt_includes_project_commands() -> None:
     assert ".venv/bin/ruff check ." in prompt
 
 
+def test_verification_prompt_includes_required_prisma_gates_when_requested() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task,
+        step="verify",
+        attempt=1,
+        project_languages=["typescript"],
+        project_commands={"typescript": {"test": "npm test"}},
+        require_prisma_verify=True,
+    )
+    assert "## Required Prisma verification gates" in prompt
+    assert "./node_modules/.bin/prisma validate" in prompt
+    assert "./node_modules/.bin/prisma migrate deploy" in prompt
+
+
+def test_verification_prompt_includes_required_verify_gates_when_requested() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task,
+        step="verify",
+        attempt=1,
+        project_languages=["typescript"],
+        project_commands={"typescript": {"test": "npm test"}},
+        required_verify_commands=["npm --prefix frontend run build", "npm --prefix frontend run typecheck"],
+    )
+    assert "## Required verification gates" in prompt
+    assert "npm --prefix frontend run build" in prompt
+    assert "npm --prefix frontend run typecheck" in prompt
+
+
+def test_detect_required_verify_commands_uses_workspace_scripts(tmp_path: Path) -> None:
+    frontend = tmp_path / "frontend"
+    (frontend / "src").mkdir(parents=True)
+    (frontend / "package.json").write_text(
+        '{"name":"frontend","scripts":{"build":"vite build","typecheck":"tsc --noEmit"}}',
+        encoding="utf-8",
+    )
+    commands = _detect_required_verify_commands(
+        tmp_path,
+        changed_paths=["frontend/src/use-bar-queries.ts"],
+    )
+    assert commands == [
+        "npm --prefix frontend run build",
+        "npm --prefix frontend run typecheck",
+    ]
+
+
+def test_detect_required_verify_commands_empty_without_scripts(tmp_path: Path) -> None:
+    frontend = tmp_path / "frontend"
+    (frontend / "src").mkdir(parents=True)
+    (frontend / "package.json").write_text('{"name":"frontend"}', encoding="utf-8")
+    commands = _detect_required_verify_commands(
+        tmp_path,
+        changed_paths=["frontend/src/use-bar-queries.ts"],
+    )
+    assert commands == []
+
+
+def test_inject_required_verify_commands_appends_to_typecheck() -> None:
+    merged = _inject_required_verify_commands(
+        {"typescript": {"typecheck": "npx tsc --noEmit"}},
+        ["typescript"],
+        ["npm --prefix frontend run build"],
+    )
+    assert (
+        merged["typescript"]["typecheck"]
+        == "npx tsc --noEmit && npm --prefix frontend run build"
+    )
+
+
 def test_implementation_prompt_includes_project_commands() -> None:
     task = _make_task()
     prompt = build_step_prompt(
@@ -1527,6 +1959,10 @@ def test_run_step_reads_project_commands_from_config(container: Container, adapt
             return_value=(True, "ok"),
         ),
         patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=()),
+        ),
+        patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             side_effect=_capture_run_worker,
         ),
@@ -1537,6 +1973,93 @@ def test_run_step_reads_project_commands_from_config(container: Container, adapt
     prompt = captured_prompt["text"]
     assert "## Project commands" in prompt
     assert ".venv/bin/pytest -x" in prompt
+
+
+def test_run_step_verify_with_prisma_schema_injects_prisma_command_hints(
+    container: Container,
+    adapter: LiveWorkerAdapter,
+) -> None:
+    (container.project_dir / "tsconfig.json").write_text("{}", encoding="utf-8")
+    prisma_dir = container.project_dir / "prisma"
+    prisma_dir.mkdir(parents=True, exist_ok=True)
+    (prisma_dir / "schema.prisma").write_text(
+        "generator client { provider = \"prisma-client-js\" }",
+        encoding="utf-8",
+    )
+
+    captured_prompt: dict[str, str] = {}
+    run_result = _make_run_result(exit_code=0)
+
+    def _capture_run_worker(**kwargs):
+        captured_prompt["text"] = kwargs["prompt"]
+        return run_result
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=()),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            side_effect=_capture_run_worker,
+        ),
+    ):
+        result = adapter.run_step(task=_make_task(), step="verify", attempt=1)
+
+    assert result.status == "ok"
+    assert "## Required Prisma verification gates" in captured_prompt["text"]
+    assert "./node_modules/.bin/prisma migrate deploy" in captured_prompt["text"]
+
+
+def test_run_step_verify_includes_required_workspace_gates(
+    container: Container,
+    adapter: LiveWorkerAdapter,
+) -> None:
+    (container.project_dir / "tsconfig.json").write_text("{}", encoding="utf-8")
+    captured_prompt: dict[str, str] = {}
+    run_result = _make_run_result(exit_code=0)
+
+    def _capture_run_worker(**kwargs):
+        captured_prompt["text"] = kwargs["prompt"]
+        return run_result
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter._detect_required_verify_commands",
+            return_value=["npm --prefix frontend run build"],
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            side_effect=_capture_run_worker,
+        ),
+    ):
+        result = adapter.run_step(task=_make_task(), step="verify", attempt=1)
+
+    assert result.status == "ok"
+    assert "## Required verification gates" in captured_prompt["text"]
+    assert "npm --prefix frontend run build" in captured_prompt["text"]
 
 
 def test_run_step_reads_prompt_overrides_from_config(container: Container, adapter: LiveWorkerAdapter) -> None:
@@ -1710,16 +2233,14 @@ class TestStepOutputInjection:
         assert "## Output from prior 'plan' step" not in prompt
         assert "## Remediation task generation focus" in prompt
 
-    def test_only_reproduce_injected_for_diagnose(self) -> None:
-        """Test that only reproduce injected for diagnose."""
+    def test_no_prior_output_injected_for_diagnose(self) -> None:
+        """Diagnose is the first step in bug_fix; no prior outputs are injected."""
         task = _make_task(
             task_type="bug",
-            metadata={"step_outputs": {"reproduce": "Fails on null payload", "plan": "Old plan text"}},
+            metadata={"step_outputs": {"plan": "Old plan text"}},
         )
         prompt = build_step_prompt(task=task, step="diagnose", attempt=1)
-        assert "## Output from prior 'reproduce' step" in prompt
-        assert "Fails on null payload" in prompt
-        assert "## Output from prior 'plan' step" not in prompt
+        assert "## Output from prior" not in prompt
 
     def test_no_injection_for_verification(self) -> None:
         """Test that no injection for verification."""
@@ -1810,6 +2331,24 @@ class TestStepOutputInjection:
         assert "## Human guidance" in prompt
         assert "Source: review request changes." in prompt
         assert "edge-case test" in prompt
+
+    def test_fix_prompt_includes_restricted_scope_contract(self) -> None:
+        """Restricted scope contract should be injected into implement_fix prompts."""
+        task = _make_task(
+            metadata={
+                "scope_contract": {
+                    "mode": "restricted",
+                    "allowed_globs": ["strategy_miner/ibkr/**", "tests/test_ibkr_smoke.py"],
+                    "forbidden_globs": ["strategy_miner/pipeline/**"],
+                    "baseline_ref": "abc123",
+                }
+            }
+        )
+        prompt = build_step_prompt(task=task, step="implement_fix", attempt=1)
+        assert "## Scope contract" in prompt
+        assert "strategy_miner/ibkr/**" in prompt
+        assert "strategy_miner/pipeline/**" in prompt
+        assert "Baseline ref: `abc123`" in prompt
 
     def test_human_guidance_injects_for_target_plan_step(self) -> None:
         """Guidance targeted at plan should appear in plan prompt."""

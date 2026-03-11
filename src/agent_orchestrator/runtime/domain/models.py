@@ -178,6 +178,7 @@ class Task:
     hitl_mode: str = "autopilot"
     dependency_policy: DependencyPolicy = "prudent"
     pending_gate: Optional[str] = None
+    wait_state: Optional[dict[str, Any]] = None
 
     source: str = "manual"
     worker_model: Optional[str] = None
@@ -248,6 +249,7 @@ class Task:
             hitl_mode=hitl_mode,
             dependency_policy=cast(DependencyPolicy, dependency_policy),
             pending_gate=(str(data.get("pending_gate")) if data.get("pending_gate") else None),
+            wait_state=dict(raw_ws) if isinstance((raw_ws := data.get("wait_state")), dict) else None,
             source=str(data.get("source") or "manual"),
             worker_model=(str(data.get("worker_model")) if data.get("worker_model") else None),
             created_at=str(data.get("created_at") or now_iso()),

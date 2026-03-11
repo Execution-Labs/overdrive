@@ -5,18 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-orchestrator"
 version = "0.1.0"
-description = "Standalone helper module for long-running feature development driven by a PRD."
+description = "Deterministic orchestration for AI-assisted software delivery."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "loguru",
   "PyYAML>=6.0",
-  "rich",
 ]
 
 [project.optional-dependencies]
 test = [
   "pytest>=7",
+  "pytest-asyncio>=0.24.0",
   "pytest-xdist>=3",
   "tomli>=2; python_version < '3.11'",
   "httpx>=0.24.0",  # Required for FastAPI TestClient
@@ -32,9 +32,6 @@ server = [
   "pydantic>=2.5.0",
   "pyjwt>=2.8.0",
   "python-multipart>=0.0.6",
-]
-notifications = [
-  "plyer>=2.1.0",
 ]
 
 [tool.mypy]
@@ -55,3 +52,4 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+asyncio_default_fixture_loop_scope = "function"

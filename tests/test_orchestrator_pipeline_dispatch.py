@@ -1,6 +1,7 @@
 """Tests verifying template-driven pipeline dispatch per task type."""
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from agent_orchestrator.runtime.domain.models import Task
@@ -23,6 +24,16 @@ def _step_names(container: Container, task_id: str) -> list[str]:
         if run.task_id == task_id:
             return [step["step"] for step in (run.steps or [])]
     return []
+
+
+def _git_init(path: Path) -> None:
+    """Initialize a git repository with a single base commit."""
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True, capture_output=True, text=True)
+    (path / "README.md").write_text("# init\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=path, check=True, capture_output=True, text=True)
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +139,7 @@ def test_bug_fix_runs_correct_steps(tmp_path: Path) -> None:
 
     assert result.status == "done"
     steps = _step_names(container, task.id)
-    assert steps == ["reproduce", "diagnose", "implement", "verify", "review", "commit"]
+    assert steps == ["diagnose", "implement", "verify", "review", "commit"]
 
 
 # ---------------------------------------------------------------------------
@@ -137,20 +148,17 @@ def test_bug_fix_runs_correct_steps(tmp_path: Path) -> None:
 
 
 def test_bug_fix_writes_sections_to_workdoc(tmp_path: Path) -> None:
-    """bug_fix run should populate reproduce/diagnose/fix/verify/review/fix-log."""
+    """bug_fix run should populate diagnose/fix/verify/review/fix-log."""
     from unittest.mock import MagicMock
 
     from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 
-    reproduce_text = "reproduce: crash occurs on missing user profile"
     diagnose_text = "diagnose: None dereference in auth adapter"
     implement_text = "implement: added guard and fallback profile path"
     verify_text = "verify: regression and unit checks passed"
     report_text = "report: post-fix review summary"
 
     def mock_run_step(*, task, step, attempt):
-        if step == "reproduce":
-            return StepResult(status="ok", summary=reproduce_text)
         if step == "diagnose":
             return StepResult(status="ok", summary=diagnose_text)
         if step == "implement":
@@ -186,7 +194,6 @@ def test_bug_fix_writes_sections_to_workdoc(tmp_path: Path) -> None:
 
     workdoc = container.state_root / "workdocs" / f"{task.id}.md"
     content = workdoc.read_text(encoding="utf-8")
-    assert reproduce_text in content
     assert diagnose_text in content
     assert implement_text in content
     assert verify_text in content
@@ -194,7 +201,6 @@ def test_bug_fix_writes_sections_to_workdoc(tmp_path: Path) -> None:
     assert "Add missing edge-case test" in content
     assert "### Fix Cycle 1" in content
     assert "added edge-case test coverage" in content
-    assert "_Pending: will be populated by the reproduce step._" not in content
     assert "_Pending: will be populated by the diagnose step._" not in content
     assert "_Pending: will be populated by the implement step._" not in content
     assert "_Pending: will be populated by the verify step._" not in content
@@ -866,7 +872,7 @@ def test_pipeline_template_stored_on_task(tmp_path: Path) -> None:
 
     assert result.status == "done"
     # After execution, the stored template should match the bug_fix pipeline
-    assert result.pipeline_template == ["reproduce", "diagnose", "implement", "verify", "review", "commit"]
+    assert result.pipeline_template == ["diagnose", "implement", "verify", "review", "commit"]
 
 
 # ---------------------------------------------------------------------------
@@ -1320,7 +1326,8 @@ def test_decompose_task_type_uses_plan_only_pipeline(tmp_path: Path) -> None:
     children = [t for t in container.tasks.list() if t.parent_id == task.id]
     assert len(children) == 3
     types = sorted(c.task_type for c in children)
-    assert types == ["feature", "feature", "test"]
+    # "test" is not a supported generated task type and gets normalized to "feature"
+    assert types == ["feature", "feature", "feature"]
 
 
 # ---------------------------------------------------------------------------
@@ -1469,9 +1476,10 @@ def test_generate_tasks_from_plan(tmp_path: Path) -> None:
     task = Task(title="Auth epic", task_type="decompose", status="queued")
     container.tasks.upsert(task)
 
-    created_ids = service.generate_tasks_from_plan(task.id, "Build auth system", infer_deps=False)
+    created_ids, effective_policy = service.generate_tasks_from_plan(task.id, "Build auth system", infer_deps=False)
 
     assert len(created_ids) == 2
+    assert effective_policy["infer_deps"] is False
     parent = container.tasks.get(task.id)
     assert set(parent.children_ids) == set(created_ids)
 
@@ -1517,9 +1525,10 @@ def test_generate_tasks_from_plan_with_deps(tmp_path: Path) -> None:
     task = Task(title="Backend epic", task_type="decompose", status="queued")
     container.tasks.upsert(task)
 
-    created_ids = service.generate_tasks_from_plan(task.id, "Backend plan", infer_deps=True)
+    created_ids, effective_policy = service.generate_tasks_from_plan(task.id, "Backend plan", infer_deps=True)
 
     assert len(created_ids) == 3
+    assert effective_policy["infer_deps"] is True
     db_task = container.tasks.get(created_ids[0])
     models_task = container.tasks.get(created_ids[1])
     api_task = container.tasks.get(created_ids[2])
@@ -1535,6 +1544,102 @@ def test_generate_tasks_from_plan_with_deps(tmp_path: Path) -> None:
     # API depends on both DB and Models
     assert created_ids[0] in api_task.blocked_by
     assert created_ids[1] in api_task.blocked_by
+
+
+def test_generate_tasks_from_plan_normalizes_generated_task_types(tmp_path: Path) -> None:
+    """Generated task types are constrained to feature/bug/chore."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "generate_tasks":
+            return StepResult(
+                status="ok",
+                generated_tasks=[
+                    {"title": "Fix login issue", "task_type": "bugfix"},
+                    {"title": "Fix cache race", "task_type": "bug fix"},
+                    {"title": "Investigate architecture", "task_type": "research"},
+                    {"title": "Clean up scripts", "task_type": "chore"},
+                    {"title": "Unknown shape", "task_type": "whatever"},
+                ],
+            )
+        return StepResult(status="ok")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+
+    task = Task(title="Normalize generated types", task_type="decompose", status="queued")
+    container.tasks.upsert(task)
+
+    created_ids, _ = service.generate_tasks_from_plan(task.id, "Decompose work", infer_deps=False)
+    child_types = [container.tasks.get(task_id).task_type for task_id in created_ids]
+    assert child_types == ["bug", "bug", "feature", "chore", "feature"]
+
+
+def test_pipeline_generate_tasks_consumes_pending_policy_override(tmp_path: Path) -> None:
+    """Runtime generate_tasks step should consume one-shot policy override."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.domain.models import RunRecord, now_iso
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "generate_tasks":
+            return StepResult(
+                status="ok",
+                generated_tasks=[
+                    {"id": "one", "title": "One", "task_type": "feature"},
+                    {"id": "two", "title": "Two", "task_type": "feature", "depends_on": ["one"]},
+                ],
+            )
+        return StepResult(status="ok")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+
+    task = Task(
+        title="Pipeline generate policy",
+        task_type="decompose",
+        status="in_progress",
+        hitl_mode="supervised",
+        metadata={
+            "task_generation_override": {
+                "child_status": "queued",
+                "child_hitl_mode": "review_only",
+                "infer_deps": False,
+            },
+        },
+    )
+    container.tasks.upsert(task)
+    service._init_workdoc(task, container.project_dir)
+    container.tasks.upsert(task)
+    run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso())
+    container.runs.upsert(run)
+
+    ok = service._run_non_review_step(task, run, "generate_tasks", attempt=1)
+    assert ok == "ok"
+
+    updated = container.tasks.get(task.id)
+    assert updated is not None
+    assert "task_generation_override" not in dict(updated.metadata or {})
+    assert len(updated.children_ids) == 2
+    first = container.tasks.get(updated.children_ids[0])
+    second = container.tasks.get(updated.children_ids[1])
+    assert first is not None and second is not None
+    assert first.status == "queued"
+    assert second.status == "queued"
+    assert first.hitl_mode == "review_only"
+    assert second.hitl_mode == "review_only"
+    assert second.blocked_by == []
 
 
 # ---------------------------------------------------------------------------
@@ -1837,3 +1942,416 @@ def test_feature_review_loop_post_fix_validation_uses_verify(tmp_path: Path) -> 
     assert result.status == "done"
     # One verify before review + one verify after implement_fix.
     assert called_steps.count("verify") == 2
+
+
+def test_restricted_scope_blocks_out_of_scope_implement_changes(tmp_path: Path) -> None:
+    """Restricted scope must block when implementation edits an out-of-scope file."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    _git_init(tmp_path)
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "plan":
+            return StepResult(status="ok", summary="Plan")
+        if step == "implement":
+            worktree = Path(str(task.metadata.get("worktree_dir")))
+            target = worktree / "outside" / "violation.py"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("print('out of scope')\n", encoding="utf-8")
+            return StepResult(status="ok", summary="Implemented")
+        return StepResult(status="ok", summary=f"{step} complete")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+    task = Task(
+        title="Scope violation task",
+        task_type="feature",
+        status="queued",
+        hitl_mode="autopilot",
+        metadata={"scope_contract": {"mode": "restricted", "allowed_globs": ["allowed/**"]}},
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert "Scope violation" in str(result.error or "")
+    events = container.events.list_recent(limit=200)
+    assert any(event.get("type") == "task.scope_violation" and event.get("entity_id") == task.id for event in events)
+
+
+def test_restricted_scope_baseline_failure_skips_fix_loop(tmp_path: Path) -> None:
+    """Restricted-scope unchanged baseline verify failure should skip implement_fix loop."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    _git_init(tmp_path)
+    calls = {"implement_fix": 0}
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "plan":
+            return StepResult(status="ok", summary="Plan")
+        if step == "implement":
+            worktree = Path(str(task.metadata.get("worktree_dir")))
+            target = worktree / "allowed" / "feature.py"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+            return StepResult(status="ok", summary="Implemented")
+        if step == "verify":
+            # Simulate LLM classifier returning baseline_failure reason code.
+            task.metadata["verify_reason_code"] = "baseline_failure"
+            return StepResult(status="error", summary="tests/test_legacy_pipeline.py AssertionError: legacy failure")
+        if step == "implement_fix":
+            calls["implement_fix"] += 1
+            return StepResult(status="ok", summary="fix")
+        if step == "review":
+            return StepResult(status="ok", findings=[])
+        return StepResult(status="ok", summary=f"{step} ok")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+    task = Task(
+        title="Scoped baseline debt task",
+        task_type="feature",
+        status="queued",
+        hitl_mode="autopilot",
+        metadata={"scope_contract": {"mode": "restricted", "allowed_globs": ["allowed/**"]}},
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "done"
+    assert calls["implement_fix"] == 0
+    md = result.metadata if isinstance(result.metadata, dict) else {}
+    issues = md.get("verify_degraded_issues")
+    assert isinstance(issues, list) and issues
+    assert issues[-1].get("reason_code") == "baseline_failure"
+    debt_tasks = [
+        t
+        for t in container.tasks.list()
+        if t.id != task.id
+        and isinstance(t.metadata, dict)
+        and t.metadata.get("generated_from") == "scope_baseline_debt"
+    ]
+    assert len(debt_tasks) == 1
+
+
+def test_restricted_scope_regression_still_runs_fix_loop(tmp_path: Path) -> None:
+    """Restricted scope should still treat in-scope verify failures as regressions."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    _git_init(tmp_path)
+    calls = {"implement_fix": 0}
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "plan":
+            return StepResult(status="ok", summary="Plan")
+        if step == "implement":
+            worktree = Path(str(task.metadata.get("worktree_dir")))
+            target = worktree / "allowed" / "feature.py"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("VALUE = 2\n", encoding="utf-8")
+            return StepResult(status="ok", summary="Implemented")
+        if step == "verify":
+            return StepResult(status="error", summary="allowed/feature.py:1 AssertionError: introduced regression")
+        if step == "implement_fix":
+            calls["implement_fix"] += 1
+            return StepResult(status="ok", summary="attempted fix")
+        return StepResult(status="ok", summary=f"{step} ok")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+    task = Task(
+        title="Scoped regression task",
+        task_type="feature",
+        status="queued",
+        hitl_mode="autopilot",
+        metadata={"scope_contract": {"mode": "restricted", "allowed_globs": ["allowed/**"]}},
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert calls["implement_fix"] == 3
+    md = result.metadata if isinstance(result.metadata, dict) else {}
+    assert md.get("verify_reason_code") != "baseline_failure"
+
+
+def test_restricted_scope_review_findings_outside_scope_are_deferred(tmp_path: Path) -> None:
+    """Out-of-scope review findings should be deferred and not trigger implement_fix."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    _git_init(tmp_path)
+    calls = {"implement_fix": 0}
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "plan":
+            return StepResult(status="ok", summary="Plan")
+        if step == "implement":
+            worktree = Path(str(task.metadata.get("worktree_dir")))
+            target = worktree / "allowed" / "feature.py"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("VALUE = 3\n", encoding="utf-8")
+            return StepResult(status="ok", summary="Implemented")
+        if step == "verify":
+            return StepResult(status="ok", summary="verify ok")
+        if step == "review":
+            return StepResult(
+                status="ok",
+                findings=[{"severity": "high", "summary": "Needs update", "file": "outside/legacy.py", "line": 10}],
+            )
+        if step == "implement_fix":
+            calls["implement_fix"] += 1
+            return StepResult(status="ok", summary="fix")
+        return StepResult(status="ok", summary=f"{step} ok")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+    task = Task(
+        title="Scoped review defer task",
+        task_type="feature",
+        status="queued",
+        hitl_mode="autopilot",
+        metadata={"scope_contract": {"mode": "restricted", "allowed_globs": ["allowed/**"]}},
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "done"
+    assert calls["implement_fix"] == 0
+    md = result.metadata if isinstance(result.metadata, dict) else {}
+    deferred = md.get("review_deferred_out_of_scope")
+    assert isinstance(deferred, list) and deferred
+
+
+def test_restricted_scope_verify_reason_code_refreshes_between_verify_runs(tmp_path: Path) -> None:
+    """A stale baseline reason must not suppress later actionable verify failures."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    _git_init(tmp_path)
+    state = {"verify_calls": 0, "implement_fix_calls": 0, "review_calls": 0}
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "plan":
+            return StepResult(status="ok", summary="Plan")
+        if step == "implement":
+            worktree = Path(str(task.metadata.get("worktree_dir")))
+            target = worktree / "allowed" / "feature.py"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("VALUE = 4\n", encoding="utf-8")
+            return StepResult(status="ok", summary="Implemented")
+        if step == "verify":
+            state["verify_calls"] += 1
+            if state["verify_calls"] == 1:
+                task.metadata["verify_reason_code"] = "baseline_failure"
+                return StepResult(status="error", summary="pre-existing baseline failure outside scope")
+            return StepResult(status="error", summary="allowed/feature.py introduced regression")
+        if step == "review":
+            state["review_calls"] += 1
+            if state["review_calls"] == 1:
+                return StepResult(
+                    status="ok",
+                    findings=[{"severity": "high", "summary": "Need fix", "file": "allowed/feature.py", "line": 1}],
+                )
+            return StepResult(status="ok", findings=[])
+        if step == "implement_fix":
+            state["implement_fix_calls"] += 1
+            return StepResult(status="ok", summary="Fix attempt")
+        return StepResult(status="ok", summary=f"{step} ok")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+    task = Task(
+        title="Scoped stale reason task",
+        task_type="feature",
+        status="queued",
+        hitl_mode="autopilot",
+        metadata={"scope_contract": {"mode": "restricted", "allowed_globs": ["allowed/**"]}},
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+
+    assert result.status == "blocked"
+    assert state["verify_calls"] >= 2
+    assert state["implement_fix_calls"] >= 2
+    assert result.metadata.get("verify_reason_code") != "baseline_failure"
+
+
+def test_restricted_scope_ambiguous_verify_failure_not_downgraded(tmp_path: Path) -> None:
+    """Ambiguous verify failures should remain actionable, not baseline debt."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    _git_init(tmp_path)
+    calls = {"implement_fix": 0}
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "plan":
+            return StepResult(status="ok", summary="Plan")
+        if step == "implement":
+            worktree = Path(str(task.metadata.get("worktree_dir")))
+            target = worktree / "allowed" / "feature.py"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("VALUE = 5\n", encoding="utf-8")
+            return StepResult(status="ok", summary="Implemented")
+        if step == "verify":
+            return StepResult(status="error", summary="AssertionError: failure in integration flow")
+        if step == "implement_fix":
+            calls["implement_fix"] += 1
+            return StepResult(status="ok", summary="Fix attempt")
+        return StepResult(status="ok", summary=f"{step} ok")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+    task = Task(
+        title="Scoped ambiguous verify task",
+        task_type="feature",
+        status="queued",
+        hitl_mode="autopilot",
+        metadata={"scope_contract": {"mode": "restricted", "allowed_globs": ["allowed/**"]}},
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+
+    assert result.status == "blocked"
+    assert calls["implement_fix"] == 3
+    assert result.metadata.get("verify_reason_code") != "baseline_failure"
+
+
+def test_restricted_scope_test_baseline_filename_not_downgraded(tmp_path: Path) -> None:
+    """Test names containing baseline should remain actionable failures."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    _git_init(tmp_path)
+    calls = {"implement_fix": 0}
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "plan":
+            return StepResult(status="ok", summary="Plan")
+        if step == "implement":
+            worktree = Path(str(task.metadata.get("worktree_dir")))
+            target = worktree / "allowed" / "feature.py"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("VALUE = 7\n", encoding="utf-8")
+            return StepResult(status="ok", summary="Implemented")
+        if step == "verify":
+            return StepResult(status="error", summary="tests/test-baseline.py::test_flow FAILED")
+        if step == "implement_fix":
+            calls["implement_fix"] += 1
+            return StepResult(status="ok", summary="Fix attempt")
+        return StepResult(status="ok", summary=f"{step} ok")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+    task = Task(
+        title="Scoped baseline filename task",
+        task_type="feature",
+        status="queued",
+        hitl_mode="autopilot",
+        metadata={"scope_contract": {"mode": "restricted", "allowed_globs": ["allowed/**"]}},
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+
+    assert result.status == "blocked"
+    assert calls["implement_fix"] == 3
+    assert result.metadata.get("verify_reason_code") != "baseline_failure"
+
+
+def test_scope_ignore_cache_paths_do_not_trigger_violation(tmp_path: Path) -> None:
+    """Nested transient cache paths should be ignored by scope violation detection."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    _git_init(tmp_path)
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "plan":
+            return StepResult(status="ok", summary="Plan")
+        if step == "implement":
+            worktree = Path(str(task.metadata.get("worktree_dir")))
+            allowed = worktree / "allowed" / "feature.py"
+            allowed.parent.mkdir(parents=True, exist_ok=True)
+            allowed.write_text("VALUE = 6\n", encoding="utf-8")
+            cache = worktree / "outside" / "__pycache__" / "feature.cpython-313.pyc"
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_bytes(b"pyc")
+            return StepResult(status="ok", summary="Implemented")
+        if step == "verify":
+            return StepResult(status="ok", summary="verify ok")
+        if step == "review":
+            return StepResult(status="ok", findings=[])
+        return StepResult(status="ok", summary=f"{step} ok")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+    task = Task(
+        title="Scoped cache ignore task",
+        task_type="feature",
+        status="queued",
+        hitl_mode="autopilot",
+        metadata={"scope_contract": {"mode": "restricted", "allowed_globs": ["allowed/**"]}},
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+
+    assert result.status == "done"
+    assert result.metadata.get("scope_violation") is None
+
+
+def test_baseline_debt_signature_uses_stable_digest(tmp_path: Path) -> None:
+    """Baseline debt signature should be deterministic and order-insensitive."""
+    container, service, _ = _service(tmp_path)
+    sig1 = service._baseline_debt_signature("same summary", ["b.py", "a.py", "a.py"])
+    sig2 = service._baseline_debt_signature("same summary", ["a.py", "b.py"])
+    assert sig1 == sig2
+    assert len(sig1) == 64
+    assert all(ch in "0123456789abcdef" for ch in sig1)

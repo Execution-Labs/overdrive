@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import subprocess
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from ...pipelines.registry import PipelineRegistry
 from ...prompts import load as load_prompt
@@ -18,17 +19,24 @@ from ...workers.diagnostics import test_worker
 from ...worker import WorkerCancelledError
 from ...workers.run import WorkerRunResult, run_worker
 from ..domain.models import RunRecord, Task, now_iso
+from ..domain.scope_contract import normalize_scope_contract
 from ..storage.container import Container
+from .environment_preflight import (
+    provider_has_capabilities,
+    required_capabilities_for_step,
+    run_environment_preflight,
+    workers_environment_config,
+)
 from .human_guidance import render_human_guidance_prompt
 from .worker_adapter import StepResult
 
 logger = logging.getLogger(__name__)
 
 # Step category mapping
-_PLANNING_STEPS = {"plan", "analyze", "plan_refine", "initiative_plan", "initiative_plan_refine"}
+_PLANNING_STEPS = {"plan", "analyze", "plan_refine", "initiative_plan", "initiative_plan_refine", "commit_review"}
 _IMPL_STEPS = {"implement", "prototype"}
 _FIX_STEPS = {"implement_fix"}
-_VERIFY_STEPS = {"verify", "benchmark", "reproduce"}
+_VERIFY_STEPS = {"verify", "benchmark"}
 _REVIEW_STEPS = {"review"}
 _REPORT_STEPS = {"report", "summarize"}
 _SCAN_STEPS = {"scan_deps", "scan_code"}
@@ -41,8 +49,8 @@ _PIPELINE_CLASSIFICATION_STEPS = {"pipeline_classify"}
 # Which prior step outputs each category should receive in its prompt.
 # None = inject all available outputs (for reporting/summarize steps).
 _STEP_OUTPUT_INJECTION: dict[str, tuple[str, ...] | None] = {
-    "implementation": ("plan", "analyze", "reproduce", "diagnose", "profile"),
-    "diagnosis": ("reproduce",),
+    "implementation": ("plan", "analyze", "diagnose", "profile"),
+    "diagnosis": (),
     "planning": (),
     "review": ("verify", "benchmark"),
     "reporting": None,
@@ -52,7 +60,7 @@ _STEP_OUTPUT_INJECTION: dict[str, tuple[str, ...] | None] = {
 }
 
 _STEP_TIMEOUT_ALIASES = {"implement_fix": "implement"}
-_DEFAULT_STEP_TIMEOUT_SECONDS = 600
+_DEFAULT_STEP_TIMEOUT_SECONDS = 0  # 0 = no timeout
 _DEFAULT_HEARTBEAT_SECONDS = 60
 _DEFAULT_HEARTBEAT_GRACE_SECONDS = 240
 
@@ -81,6 +89,7 @@ _SETTINGS_PROMPT_STEPS: tuple[str, ...] = (
     "analyze",
     "analyze_deps",
     "benchmark",
+    "commit_review",
     "diagnose",
     "generate_tasks",
     "implement",
@@ -93,7 +102,6 @@ _SETTINGS_PROMPT_STEPS: tuple[str, ...] = (
     "profile",
     "prototype",
     "report",
-    "reproduce",
     "resolve_merge",
     "review",
     "scan_code",
@@ -167,11 +175,29 @@ _DEFAULT_PROJECT_COMMANDS: dict[str, dict[str, str]] = {
     },
 }
 
+_JS_TS_SOURCE_EXTENSIONS = {
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".vue",
+    ".svelte",
+}
+_FRONTEND_HINT_PREFIXES = (
+    "frontend/",
+    "web/",
+    "ui/",
+)
+
 
 def _instruction_prompt_name(step: str, task_type: str) -> str:
     """Resolve the markdown prompt template path for a pipeline step."""
     category = _step_category(step)
     pipeline_id = PipelineRegistry().resolve_for_task_type(task_type).id
+    if step == "commit_review":
+        return "steps/commit_review.md"
     if step == "plan_refine":
         return "steps/plan_refine.md"
     if step == "initiative_plan_refine":
@@ -216,6 +242,8 @@ def _normalize_prompt_overrides(value: Any) -> dict[str, str]:
 def _normalize_prompt_injections(value: Any) -> dict[str, str]:
     """Normalize per-step additive prompt injections from runtime config."""
     return _normalize_prompt_overrides(value)
+
+
 
 
 def get_configurable_step_prompt_defaults() -> dict[str, str]:
@@ -514,6 +542,8 @@ _VERIFY_ALLOWED_REASON_CODES = {
     "assertion_failure",
     "type_error",
     "lint_violation",
+    "baseline_failure",
+    "scope_violation",
     "tool_missing",
     "config_missing",
     "no_tests",
@@ -579,6 +609,338 @@ def _normalize_planning_text(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _frontend_gate_root(project_dir: Path) -> Path | None:
+    """Best-effort locate frontend workspace root for tsc/vite gate checks."""
+    direct_pkg = project_dir / "package.json"
+    if direct_pkg.exists():
+        try:
+            if '"vite"' in direct_pkg.read_text(encoding="utf-8", errors="replace"):
+                return project_dir
+        except Exception:
+            pass
+    nested = project_dir / "frontend"
+    if (nested / "package.json").exists():
+        return nested
+    return None
+
+
+def _collect_changed_paths(project_dir: Path) -> list[str]:
+    """Return relative changed paths from git status (tracked + untracked)."""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    changed: list[str] = []
+    for raw in (result.stdout or "").splitlines():
+        line = str(raw).rstrip()
+        if not line:
+            continue
+        payload = line[3:] if len(line) >= 4 else line
+        payload = payload.strip()
+        if not payload:
+            continue
+        if " -> " in payload:
+            payload = payload.split(" -> ", 1)[1].strip()
+        changed.append(payload.strip('"'))
+    return changed
+
+
+def _load_package_scripts(package_json_path: Path) -> dict[str, str]:
+    """Load npm scripts from a package.json file."""
+    try:
+        payload = json.loads(package_json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    scripts = payload.get("scripts")
+    if not isinstance(scripts, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in scripts.items():
+        if isinstance(key, str) and isinstance(value, str) and value.strip():
+            out[key.strip()] = value.strip()
+    return out
+
+
+def _path_suggests_js_ts_workspace(relative_path: str) -> bool:
+    """Return True when a changed path suggests JS/TS workspace verification."""
+    normalized = str(relative_path or "").strip().replace("\\", "/")
+    if not normalized:
+        return False
+    if normalized.startswith(_FRONTEND_HINT_PREFIXES):
+        return True
+    return Path(normalized).suffix.lower() in _JS_TS_SOURCE_EXTENSIONS
+
+
+def _nearest_workspace_with_package(project_dir: Path, relative_path: str) -> Path | None:
+    """Return closest ancestor workspace containing package.json for a changed path."""
+    rel = Path(str(relative_path).replace("\\", "/"))
+    search = rel if rel.suffix == "" else rel.parent
+    while True:
+        candidate = (project_dir / search / "package.json").resolve()
+        if candidate.exists():
+            return candidate.parent
+        if search == Path("."):
+            break
+        search = search.parent
+    return None
+
+
+def _npm_run_script_command(*, workspace: Path, project_dir: Path, script: str) -> str:
+    """Render a stable npm run command for a workspace script."""
+    if workspace.resolve() == project_dir.resolve():
+        return f"npm run {script}"
+    rel = workspace.resolve().relative_to(project_dir.resolve())
+    return f"npm --prefix {str(rel)} run {script}"
+
+
+def _detect_required_verify_commands(
+    project_dir: Path,
+    *,
+    changed_paths: Sequence[str] | None = None,
+) -> list[str]:
+    """Detect required JS/TS workspace verification commands for changed files."""
+    paths = list(changed_paths or _collect_changed_paths(project_dir))
+    if not paths:
+        return []
+    workspaces: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        normalized = str(path or "").strip()
+        if not _path_suggests_js_ts_workspace(normalized):
+            continue
+        workspace = _nearest_workspace_with_package(project_dir, normalized)
+        if workspace is None:
+            continue
+        resolved = workspace.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        workspaces.append(resolved)
+    required: list[str] = []
+    for workspace in workspaces:
+        scripts = _load_package_scripts(workspace / "package.json")
+        for script in ("build", "typecheck"):
+            if script in scripts:
+                required.append(_npm_run_script_command(workspace=workspace, project_dir=project_dir, script=script))
+    deduped: list[str] = []
+    seen_cmds: set[str] = set()
+    for cmd in required:
+        if cmd in seen_cmds:
+            continue
+        seen_cmds.add(cmd)
+        deduped.append(cmd)
+    return deduped
+
+
+def _inject_required_verify_commands(
+    project_commands: dict[str, dict[str, str]] | None,
+    project_languages: list[str] | None,
+    required_commands: Sequence[str],
+) -> dict[str, dict[str, str]]:
+    """Merge required verify commands into the command hint map."""
+    merged: dict[str, dict[str, str]] = {
+        lang: dict(cmds)
+        for lang, cmds in (project_commands or {}).items()
+        if isinstance(cmds, dict)
+    }
+    normalized_required = [str(cmd).strip() for cmd in required_commands if str(cmd).strip()]
+    if not normalized_required:
+        return merged
+    preferred_lang = (
+        "typescript"
+        if (project_languages and "typescript" in project_languages)
+        else (
+            "javascript"
+            if (project_languages and "javascript" in project_languages)
+            else ("typescript" if "typescript" in merged else ("javascript" if "javascript" in merged else "typescript"))
+        )
+    )
+    lang_cmds = merged.get(preferred_lang, {})
+    if not isinstance(lang_cmds, dict):
+        lang_cmds = {}
+    existing_typecheck = str(lang_cmds.get("typecheck") or "").strip()
+    chain: list[str] = []
+    if existing_typecheck:
+        chain.append(existing_typecheck)
+    for cmd in normalized_required:
+        if existing_typecheck and cmd in existing_typecheck:
+            continue
+        chain.append(cmd)
+    lang_cmds["typecheck"] = " && ".join(chain) if chain else existing_typecheck
+    merged[preferred_lang] = lang_cmds
+    return merged
+
+
+def _has_prisma_schema(project_dir: Path) -> bool:
+    """Return whether this task worktree contains a Prisma schema."""
+    return (project_dir / "prisma" / "schema.prisma").exists()
+
+
+def _inject_prisma_verify_command_hints(
+    project_commands: dict[str, dict[str, str]] | None,
+    project_languages: list[str] | None,
+) -> dict[str, dict[str, str]]:
+    """Inject deterministic Prisma verification commands into command hints."""
+    merged: dict[str, dict[str, str]] = {
+        lang: dict(cmds)
+        for lang, cmds in (project_commands or {}).items()
+        if isinstance(cmds, dict)
+    }
+    preferred_lang = (
+        "typescript"
+        if (project_languages and "typescript" in project_languages)
+        else ("javascript" if (project_languages and "javascript" in project_languages) else "typescript")
+    )
+    lang_cmds = merged.get(preferred_lang, {})
+    if not isinstance(lang_cmds, dict):
+        lang_cmds = {}
+    prisma_verify = (
+        "docker compose up -d postgres && "
+        "sh -lc 'for i in $(seq 1 30); do "
+        "docker compose ps --format json 2>/dev/null | rg -q \"healthy\" && exit 0; "
+        "sleep 1; done; exit 1' && "
+        "./node_modules/.bin/prisma format && "
+        "./node_modules/.bin/prisma validate && "
+        "sh -lc 'for i in $(seq 1 5); do "
+        "./node_modules/.bin/prisma migrate deploy && exit 0; "
+        "sleep 2; done; exit 1'"
+    )
+    existing_format = str(lang_cmds.get("format") or "").strip()
+    if existing_format:
+        if prisma_verify not in existing_format:
+            lang_cmds["format"] = f"{existing_format} && {prisma_verify}"
+    else:
+        lang_cmds["format"] = prisma_verify
+    merged[preferred_lang] = lang_cmds
+    return merged
+
+
+def _normalize_verify_environment_note(
+    *,
+    note: str,
+    reason_code: str,
+    project_dir: Path,
+    task: Task,
+) -> tuple[str, str | None, str | None]:
+    """Rewrite common frontend gate infra failures into deterministic diagnostics."""
+    text = str(note or "").strip()
+    if not text:
+        return text, None, None
+    lower = text.lower()
+    task_context = f"{task.title}\n{task.description}".lower()
+    verify_reason_override: str | None = None
+
+    # Prefer deterministic Prisma blockers by priority:
+    # missing env var > docker unavailable > local toolchain missing > network.
+    mentions_prisma = any(
+        token in lower or token in task_context
+        for token in ("prisma", "migrate dev", "schema.prisma", "database_url")
+    )
+    if mentions_prisma and reason_code in {"tool_missing", "config_missing", "infrastructure", "unknown", "os_incompatibility"}:
+        has_prisma_schema = (project_dir / "prisma" / "schema.prisma").exists()
+        has_package_json = (project_dir / "package.json").exists()
+        prisma_bin = project_dir / "node_modules" / ".bin" / "prisma"
+        node_modules_dir = project_dir / "node_modules"
+        missing_database_url = (
+            "environment variable not found: database_url" in lower
+            or ("database_url" in lower and "not found" in lower)
+        )
+        docker_unavailable = any(
+            token in lower
+            for token in (
+                "cannot connect to the docker daemon",
+                "is the docker daemon running",
+                "/var/run/docker.sock",
+                "docker.sock",
+            )
+        )
+        registry_unavailable = any(
+            token in lower
+            for token in (
+                "enotfound registry.npmjs.org",
+                "getaddrinfo enotfound registry.npmjs.org",
+            )
+        )
+        prisma_toolchain_missing = has_prisma_schema and has_package_json and (
+            not node_modules_dir.is_dir() or not prisma_bin.exists()
+        )
+
+        if missing_database_url:
+            normalized = (
+                "Prisma verification is blocked in this task worktree: required environment variable "
+                "`DATABASE_URL` is missing. Set `DATABASE_URL` for the task environment and re-run verify. "
+                "[reason_code=config_missing; env_kind=prisma_env_missing]"
+            )
+            return normalized, "prisma_env_missing", "config_missing"
+
+        if docker_unavailable:
+            normalized = (
+                "Prisma verification is blocked in this environment: Docker daemon is unavailable for the "
+                "required Postgres migration flow (for example `prisma migrate dev`). Start Docker/Compose "
+                "and re-run verify. [reason_code=infrastructure; env_kind=docker_unavailable]"
+            )
+            return normalized, "docker_unavailable", "infrastructure"
+
+        if prisma_toolchain_missing:
+            normalized = (
+                "Prisma verification is blocked in this task worktree: local Prisma CLI is missing "
+                f"(expected `{prisma_bin}`). Install dependencies in the same environment (for example: "
+                "`npm install`) and re-run verify. "
+                "[reason_code=tool_missing; env_kind=prisma_cli_missing]"
+            )
+            return normalized, "prisma_cli_missing", "tool_missing"
+
+        if registry_unavailable:
+            normalized = (
+                "Prisma verification is blocked by network constraints in this environment: npm registry "
+                "is unreachable (`registry.npmjs.org`). Restore network access and re-run verify. "
+                "[reason_code=infrastructure; env_kind=network_unavailable]"
+            )
+            return normalized, "network_unavailable", "infrastructure"
+
+    mentions_frontend_gate = any(
+        token in lower or token in task_context
+        for token in ("tsc --noemit", "vite build", "build gate")
+    )
+    if not mentions_frontend_gate:
+        return text, None, None
+    if reason_code not in {"tool_missing", "config_missing", "infrastructure", "unknown", "os_incompatibility"}:
+        return text, None, None
+
+    frontend_root = _frontend_gate_root(project_dir)
+    if frontend_root is None:
+        return text, None, None
+    missing: list[str] = []
+    if not (frontend_root / "node_modules").is_dir():
+        missing.append("frontend/node_modules")
+    if not (frontend_root / "node_modules" / ".bin" / "tsc").exists():
+        missing.append("tsc binary")
+    if not (frontend_root / "node_modules" / ".bin" / "vite").exists():
+        missing.append("vite binary")
+    if not missing:
+        return text, None, None
+
+    rel = frontend_root.relative_to(project_dir) if frontend_root != project_dir else Path(".")
+    rel_display = str(rel).rstrip("/") or "."
+    normalized = (
+        "Frontend build gate is blocked in this task worktree: missing local frontend toolchain "
+        f"({', '.join(missing)}) under `{rel_display}`. Install dependencies in the same environment "
+        f"(for example: `cd {rel_display} && npm ci`) and re-run verify. "
+        "[reason_code=tool_missing; env_kind=frontend_toolchain_missing]"
+    )
+    verify_reason_override = "tool_missing"
+    return normalized, "frontend_toolchain_missing", verify_reason_override
+
+
 def _load_workdoc_snapshot(task: Task, project_dir: Path) -> str:
     """Load canonical/worktree workdoc text for run-end summary context."""
     candidates: list[Path] = []
@@ -606,6 +968,8 @@ def build_step_prompt(
     attempt: int,
     project_languages: list[str] | None = None,
     project_commands: dict[str, dict[str, str]] | None = None,
+    require_prisma_verify: bool = False,
+    required_verify_commands: list[str] | None = None,
     prompt_overrides: dict[str, str] | None = None,
     prompt_injections: dict[str, str] | None = None,
 ) -> str:
@@ -621,6 +985,10 @@ def build_step_prompt(
             to populate language-specific guidance in the prompt.
         project_commands (dict[str, dict[str, str]] | None): Optional
             language-to-command mapping surfaced to workers as execution hints.
+        require_prisma_verify (bool): Whether to include mandatory Prisma
+            verification gates in the rendered prompt.
+        required_verify_commands (list[str] | None): Deterministic extra verify
+            gates inferred from changed JS/TS workspace files.
         prompt_overrides (dict[str, str] | None): Optional per-step prompt text
             overrides loaded from project settings.
         prompt_injections (dict[str, str] | None): Optional per-step prompt text
@@ -723,6 +1091,25 @@ def build_step_prompt(
         parts.append("")
         parts.append(workdoc_block)
 
+    # Inject source context for commit_review steps.
+    if step == "commit_review" and isinstance(task.metadata, dict):
+        _cr_desc = str(task.metadata.get("source_description") or "").strip()
+        _cr_plan = str(task.metadata.get("source_plan") or "").strip()
+        _cr_diff = str(task.metadata.get("source_diff") or "").strip()
+        _cr_sha = str(task.metadata.get("source_commit_sha") or "").strip()
+        if _cr_desc:
+            parts.append("")
+            parts.append("## Original task description")
+            parts.append(_cr_desc)
+        if _cr_plan:
+            parts.append("")
+            parts.append("## Original task plan")
+            parts.append(_cr_plan)
+        if _cr_diff:
+            parts.append("")
+            parts.append(f"## Commit diff to review ({_cr_sha[:12]})" if _cr_sha else "## Commit diff to review")
+            parts.append(f"```diff\n{_cr_diff}\n```")
+
     # Inject outputs from prior pipeline steps.
     # For implement/implement_fix, rely on the workdoc as the single source of truth.
     step_outputs = task.metadata.get("step_outputs") if isinstance(task.metadata, dict) else None
@@ -784,6 +1171,33 @@ def build_step_prompt(
     ):
         parts.append("")
         parts.append("## Issues to fix")
+
+    scope_contract = (
+        normalize_scope_contract(task.metadata.get("scope_contract"))
+        if isinstance(task.metadata, dict)
+        else None
+    )
+    if is_fix_step and isinstance(scope_contract, dict) and scope_contract.get("mode") == "restricted":
+        allowed = list(scope_contract.get("allowed_globs") or [])
+        forbidden = list(scope_contract.get("forbidden_globs") or [])
+        parts.append("")
+        parts.append("## Scope contract")
+        parts.append("This task is scope-restricted. Do NOT modify files outside allowed globs.")
+        if allowed:
+            parts.append("Allowed globs:")
+            for pattern in allowed:
+                parts.append(f"- `{pattern}`")
+        if forbidden:
+            parts.append("Forbidden globs:")
+            for pattern in forbidden:
+                parts.append(f"- `{pattern}`")
+        baseline_ref = str(scope_contract.get("baseline_ref") or "").strip()
+        if baseline_ref:
+            parts.append(f"Baseline ref: `{baseline_ref}`")
+        parts.append(
+            "If verification failures are outside this scope and unchanged by your diff, "
+            "report them as baseline debt rather than editing out-of-scope files."
+        )
 
     # Include review findings for fix steps.
     if review_findings and isinstance(review_findings, list) and is_fix_step:
@@ -915,6 +1329,22 @@ def build_step_prompt(
                 if isinstance(info, str) and info.strip():
                     parts.append(info.strip())
 
+        merge_attempt = int(task.metadata.get("merge_conflict_attempt") or 0)
+        merge_max_attempts = int(task.metadata.get("merge_conflict_max_attempts") or 0)
+        previous_error = str(task.metadata.get("merge_conflict_previous_error") or "").strip()
+        if merge_attempt > 1:
+            parts.append("")
+            parts.append("## Retry context")
+            if merge_max_attempts > 0:
+                parts.append(f"Attempt: {merge_attempt} of {merge_max_attempts}")
+            else:
+                parts.append(f"Attempt: {merge_attempt}")
+            if previous_error:
+                parts.append(f"Previous attempt error: {previous_error}")
+            parts.append(
+                "Re-check all conflicted files carefully. Resolve every unmerged entry and remove all conflict markers."
+            )
+
         parts.append("")
         parts.append("Edit the conflicted files to resolve all conflicts. "
                       "Ensure BOTH this task's and the other task(s)' objectives are preserved.")
@@ -970,6 +1400,24 @@ def build_step_prompt(
         if cmds_block:
             parts.append("")
             parts.append(cmds_block)
+    if category == "verification" and require_prisma_verify:
+        parts.append("")
+        parts.append("## Required Prisma verification gates")
+        parts.append("- If `prisma/schema.prisma` exists in this worktree, run Prisma checks using the local CLI (do not use bare `npx prisma`).")
+        parts.append("- Required commands:")
+        parts.append("  - `docker compose up -d postgres`")
+        parts.append("  - wait until Postgres is healthy before migration checks")
+        parts.append("  - `./node_modules/.bin/prisma format`")
+        parts.append("  - `./node_modules/.bin/prisma validate`")
+        parts.append("  - retry `./node_modules/.bin/prisma migrate deploy` a few times if connection is still starting")
+        parts.append("  - `./node_modules/.bin/prisma migrate deploy`")
+    if category == "verification" and required_verify_commands:
+        parts.append("")
+        parts.append("## Required verification gates")
+        parts.append("- The following checks are required for the changed JS/TS workspace files in this task.")
+        parts.append("- Run every command and report exit codes/evidence; do not skip them.")
+        for command in required_verify_commands:
+            parts.append(f"- `{command}`")
 
     # Inject dependency policy instruction
     dep_policy = getattr(task, "dependency_policy", "prudent") or "prudent"
@@ -1154,7 +1602,7 @@ class LiveWorkerAdapter:
             timeout = int(value)
         except (TypeError, ValueError):
             return default
-        return timeout if timeout > 0 else default
+        return timeout if timeout >= 0 else default
 
     def _default_step_timeout_seconds(self) -> int:
         cfg = self._container.config.load()
@@ -1178,7 +1626,14 @@ class LiveWorkerAdapter:
         except Exception:
             return default_timeout
 
-        step_timeouts = {sd.name: self._coerce_timeout(sd.timeout_seconds, default_timeout) for sd in template.steps}
+        # Only honour template-level timeouts that were explicitly set (i.e.
+        # differ from the StepDef dataclass default of 600s).  Steps using the
+        # default should defer to the global ``step_timeout_seconds`` config
+        # value so that a user-configured default actually applies everywhere.
+        step_timeouts: dict[str, int] = {}
+        for sd in template.steps:
+            if sd.timeout_seconds != _DEFAULT_STEP_TIMEOUT_SECONDS:
+                step_timeouts[sd.name] = self._coerce_timeout(sd.timeout_seconds, default_timeout)
         for key in (step, _STEP_TIMEOUT_ALIASES.get(step)):
             if key and key in step_timeouts:
                 return step_timeouts[key]
@@ -1238,11 +1693,45 @@ class LiveWorkerAdapter:
         return self._execute_step(task=task, step=step, attempt=attempt, persist=False)
 
     def _execute_step(self, *, task: Task, step: str, attempt: int, persist: bool) -> StepResult:
+        worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
+        project_dir = Path(worktree_path) if worktree_path else self._container.project_dir
+
         # 1. Resolve worker
         try:
             cfg = self._container.config.load()
             runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
             spec = resolve_worker_for_step(runtime, step)
+            env_cfg = workers_environment_config(cfg)
+            required_caps = required_capabilities_for_step(step=step, project_dir=project_dir, cfg=cfg)
+            if env_cfg.get("capability_fallback", True) and required_caps:
+                if not provider_has_capabilities(
+                    provider_capabilities=spec.capabilities,
+                    required_capabilities=required_caps,
+                ):
+                    fallback_name: str | None = None
+                    fallback_spec = None
+                    for candidate_name, candidate_spec in runtime.providers.items():
+                        if candidate_name == spec.name:
+                            continue
+                        if candidate_spec.type not in {"codex", "claude", "ollama"}:
+                            continue
+                        if provider_has_capabilities(
+                            provider_capabilities=candidate_spec.capabilities,
+                            required_capabilities=required_caps,
+                        ):
+                            fallback_name = candidate_name
+                            fallback_spec = candidate_spec
+                            break
+                    if fallback_spec is not None and fallback_name is not None:
+                        if isinstance(task.metadata, dict):
+                            task.metadata["environment_provider_fallback"] = {
+                                "step": step,
+                                "from_provider": spec.name,
+                                "to_provider": fallback_name,
+                                "required_capabilities": list(required_caps),
+                                "ts": now_iso(),
+                            }
+                        spec = fallback_spec
             if spec.type in {"codex", "claude"}:
                 task_model = str(getattr(task, "worker_model", "") or "").strip()
                 if not task_model and isinstance(task.metadata, dict):
@@ -1257,9 +1746,37 @@ class LiveWorkerAdapter:
         except (ValueError, KeyError) as exc:
             return StepResult(status="error", summary=f"Cannot resolve worker: {exc}")
 
-        # 2. Build prompt
-        worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
-        project_dir = Path(worktree_path) if worktree_path else self._container.project_dir
+        # 2. Environment preflight and best-effort auto-remediation.
+        preflight = run_environment_preflight(step=step, project_dir=project_dir, cfg=cfg)
+        if isinstance(task.metadata, dict):
+            if preflight.ok:
+                task.metadata.pop("environment_preflight", None)
+            else:
+                task.metadata["environment_preflight"] = {
+                    "step": step,
+                    "required_capabilities": list(preflight.required_capabilities),
+                    "attempted_remediation": preflight.attempted_remediation,
+                    "issues": [
+                        {
+                            "code": issue.code,
+                            "summary": issue.summary,
+                            "capability": issue.capability,
+                            "recoverable": issue.recoverable,
+                        }
+                        for issue in preflight.issues
+                    ],
+                    "remediation_log": preflight.remediation_log,
+                    "ts": now_iso(),
+                }
+        if not preflight.ok:
+            issue_text = "; ".join(issue.summary for issue in preflight.issues[:4])
+            remediation_text = f" Remediation: {preflight.remediation_log}" if preflight.remediation_log else ""
+            return StepResult(
+                status="error",
+                summary=f"Environment preflight failed: {issue_text}.{remediation_text}",
+            )
+
+        # 3. Build prompt
         langs = detect_project_languages(project_dir)
         raw_commands = (cfg.get("project") or {}).get("commands") or {}
         raw_prompt_overrides = (cfg.get("project") or {}).get("prompt_overrides")
@@ -1291,6 +1808,18 @@ class LiveWorkerAdapter:
                 project_commands = None
         # Resolve relative executable paths against the *original* project dir
         # so workers in git worktrees can find binaries in gitignored dirs.
+        require_prisma_verify = _step_category(step) == "verification" and _has_prisma_schema(project_dir)
+        required_verify_commands: list[str] = []
+        if _step_category(step) == "verification":
+            required_verify_commands = _detect_required_verify_commands(project_dir)
+            if required_verify_commands:
+                project_commands = _inject_required_verify_commands(
+                    project_commands,
+                    langs or None,
+                    required_verify_commands,
+                )
+        if require_prisma_verify:
+            project_commands = _inject_prisma_verify_command_hints(project_commands, langs or None)
         if project_commands:
             project_commands = _resolve_command_paths(
                 project_commands, self._container.project_dir,
@@ -1299,11 +1828,13 @@ class LiveWorkerAdapter:
             task=task, step=step, attempt=attempt,
             project_languages=langs or None,
             project_commands=project_commands,
+            require_prisma_verify=require_prisma_verify,
+            required_verify_commands=required_verify_commands or None,
             prompt_overrides=prompt_overrides or None,
             prompt_injections=prompt_injections or None,
         )
 
-        # 3. Execute
+        # 4. Execute
         run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
         progress_path = run_dir / "progress.json"
         stdout_path = run_dir / "stdout.log"
@@ -1354,12 +1885,12 @@ class LiveWorkerAdapter:
             if persist:
                 self._container.tasks.upsert(task)
 
-        # 4. Map result
-        step_result = self._map_result(result, spec, step, task)
+        # 5. Map result
+        step_result = self._map_result(result, spec, step, task, project_dir)
         raw_json = _extract_json(result.response_text) if result.response_text else None
         raw_is_json = isinstance(raw_json, dict)
 
-        # 5. For verification steps that fell through to default "ok"
+        # 6. For verification steps that fell through to default "ok"
         #    (no structured summary), run a lightweight LLM formatter to parse the
         #    freeform output into pass/fail.
         category = _step_category(step)
@@ -1376,7 +1907,7 @@ class LiveWorkerAdapter:
                 task=task,
             )
 
-        # 6. For review steps that fell through with no findings,
+        # 7. For review steps that fell through with no findings,
         #    run a lightweight LLM formatter to extract structured findings.
         if (
             category == "review"
@@ -1391,7 +1922,7 @@ class LiveWorkerAdapter:
                 project_dir=project_dir,
             )
 
-        # 7. For task generation steps that fell through with no
+        # 8. For task generation steps that fell through with no
         #    generated_tasks, run a lightweight LLM formatter to extract them.
         if (
             category == "task_generation"
@@ -1441,6 +1972,8 @@ class LiveWorkerAdapter:
         except Exception:
             logger.debug("Verify formatter call failed; returning error")
             return StepResult(status="error", summary="Verification output formatter failed")
+        finally:
+            shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
@@ -1458,8 +1991,20 @@ class LiveWorkerAdapter:
             return StepResult(status="error", summary=str(summary) if summary else response_text[:500])
         if status_val == "environment":
             note = str(summary) if summary else response_text[:500]
+            note, env_kind, normalized_reason = _normalize_verify_environment_note(
+                note=note,
+                reason_code=reason_code,
+                project_dir=project_dir,
+                task=task,
+            )
             if isinstance(task.metadata, dict):
                 task.metadata["verify_environment_note"] = note
+                if normalized_reason:
+                    task.metadata["verify_reason_code"] = normalized_reason
+                if env_kind:
+                    task.metadata["verify_environment_kind"] = env_kind
+                else:
+                    task.metadata.pop("verify_environment_kind", None)
             return StepResult(status="ok", summary=note)
         return StepResult(status="ok", summary=str(summary) if summary else None)
 
@@ -1495,6 +2040,8 @@ class LiveWorkerAdapter:
         except Exception:
             logger.debug("Review formatter call failed; returning error")
             return StepResult(status="error", summary="Review output formatter failed")
+        finally:
+            shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
@@ -1547,6 +2094,8 @@ class LiveWorkerAdapter:
         except Exception:
             logger.debug("Task generation formatter call failed; returning error")
             return StepResult(status="error", summary="Task generation output formatter failed")
+        finally:
+            shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
@@ -1563,7 +2112,14 @@ class LiveWorkerAdapter:
 
         return StepResult(status="error", summary="Task generation output formatter returned no tasks list")
 
-    def _map_result(self, result: WorkerRunResult, spec: Any, step: str, task: Task) -> StepResult:
+    def _map_result(
+        self,
+        result: WorkerRunResult,
+        spec: Any,
+        step: str,
+        task: Task,
+        project_dir: Path,
+    ) -> StepResult:
         if result.human_blocking_issues:
             return StepResult(
                 status="human_blocked",
@@ -1623,8 +2179,20 @@ class LiveWorkerAdapter:
                     return StepResult(status="error", summary=str(verify_summary) if verify_summary else "Verification failed")
                 if status_val == "environment":
                     note = str(verify_summary) if verify_summary else "Verification blocked by environment constraints"
+                    note, env_kind, normalized_reason = _normalize_verify_environment_note(
+                        note=note,
+                        reason_code=reason_code,
+                        project_dir=project_dir,
+                        task=task,
+                    )
                     if isinstance(task.metadata, dict):
                         task.metadata["verify_environment_note"] = note
+                        if normalized_reason:
+                            task.metadata["verify_reason_code"] = normalized_reason
+                        if env_kind:
+                            task.metadata["verify_environment_kind"] = env_kind
+                        else:
+                            task.metadata.pop("verify_environment_kind", None)
                     return StepResult(status="ok", summary=note)
                 return StepResult(status="ok", summary=str(verify_summary) if verify_summary else "")
 
@@ -1808,6 +2376,8 @@ class LiveWorkerAdapter:
         except Exception:
             logger.debug("Summarize call failed; returning fallback")
             return "Summary generation failed"
+        finally:
+            shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
         parsed = _extract_json(fmt_result.response_text or "")
         if isinstance(parsed, dict):

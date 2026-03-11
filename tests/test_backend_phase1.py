@@ -5,7 +5,7 @@ import hashlib
 import sqlite3
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -298,24 +298,29 @@ def test_task_dependency_guard_blocks_ready_transition(tmp_path: Path) -> None:
         )
         assert dep_resp.status_code == 200
 
+        # Queueing with unresolved deps is allowed — the scheduler gates execution
         transition = client.post(
             f"/api/tasks/{blocked['id']}/transition",
             json={"status": "queued"},
         )
-        assert transition.status_code == 400
-        assert "Unresolved blocker" in transition.text
+        assert transition.status_code == 200
+        assert transition.json()["task"]["status"] == "queued"
+
+        # But manual run is still blocked while deps are unresolved
+        run_resp = client.post(f"/api/tasks/{blocked['id']}/run")
+        assert run_resp.status_code == 400
+        assert "unresolved blocker" in run_resp.text.lower()
 
         # Queue and run the blocker so it completes
         client.post(f"/api/tasks/{blocker['id']}/transition", json={"status": "queued"})
         done = client.post(f"/api/tasks/{blocker['id']}/run")
         assert done.status_code == 200
         assert done.json()["task"]["status"] == "done"
-        ok_transition = client.post(
-            f"/api/tasks/{blocked['id']}/transition",
-            json={"status": "queued"},
-        )
-        assert ok_transition.status_code == 200
-        assert ok_transition.json()["task"]["status"] == "queued"
+
+        # Now manual run succeeds
+        run_ok = client.post(f"/api/tasks/{blocked['id']}/run")
+        assert run_ok.status_code == 200
+        assert run_ok.json()["task"]["status"] == "done"
 
 
 def test_execution_leases_use_dedicated_sqlite_table(tmp_path: Path) -> None:
@@ -941,6 +946,7 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert baseline.json()["orchestrator"]["concurrency"] == 2
         assert baseline.json()["orchestrator"]["auto_deps"] is True
         assert baseline.json()["orchestrator"]["max_review_attempts"] == 10
+        assert baseline.json()["orchestrator"]["max_merge_conflict_attempts"] == 3
         assert baseline.json()["orchestrator"]["step_timeout_seconds"] == 600
         assert baseline.json()["orchestrator"]["gate_reminder_minutes"] == 30
         assert baseline.json()["orchestrator"]["gate_stale_minutes"] == 0
@@ -948,10 +954,21 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert baseline.json()["orchestrator"]["gate_timeout_action"] == "none"
         assert baseline.json()["agent_routing"]["default_role"] == "general"
         assert baseline.json()["defaults"]["quality_gate"]["high"] == 0
+        assert baseline.json()["defaults"]["task_generation"] == {
+            "child_status": "backlog",
+            "child_hitl_mode": "inherit_parent",
+            "infer_deps": True,
+        }
         assert baseline.json()["workers"]["default"] == "codex"
         assert baseline.json()["workers"]["heartbeat_seconds"] == 60
         assert baseline.json()["workers"]["heartbeat_grace_seconds"] == 240
         assert baseline.json()["workers"]["providers"]["codex"]["type"] == "codex"
+        assert baseline.json()["workers"]["environment"] == {
+            "auto_prepare": True,
+            "max_auto_retries": 3,
+            "capability_fallback": True,
+            "required_capabilities_by_step": {},
+        }
 
         updated = client.patch(
             "/api/settings",
@@ -960,6 +977,7 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
                     "concurrency": 5,
                     "auto_deps": False,
                     "max_review_attempts": 4,
+                    "max_merge_conflict_attempts": 6,
                     "step_timeout_seconds": 900,
                     "gate_reminder_minutes": 15,
                     "gate_stale_minutes": 120,
@@ -971,19 +989,36 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
                     "task_type_roles": {"bug": "debugger"},
                     "role_provider_overrides": {"reviewer": "openai"},
                 },
-                "defaults": {"quality_gate": {"critical": 1, "high": 2, "medium": 3, "low": 4}},
+                "defaults": {
+                    "quality_gate": {"critical": 1, "high": 2, "medium": 3, "low": 4},
+                    "task_generation": {
+                        "child_status": "queued",
+                        "child_hitl_mode": "review_only",
+                        "infer_deps": False,
+                    },
+                },
                 "workers": {
                     "default": "ollama-dev",
                     "default_model": "gpt-5-codex",
                     "heartbeat_seconds": 90,
                     "heartbeat_grace_seconds": 360,
                     "routing": {"plan": "codex", "implement": "ollama-dev"},
+                    "environment": {
+                        "auto_prepare": True,
+                        "max_auto_retries": 5,
+                        "capability_fallback": True,
+                        "required_capabilities_by_step": {
+                            "verify": ["docker", "network"],
+                        },
+                    },
                     "providers": {
                         "codex": {
                             "type": "codex",
                             "command": "codex exec",
                             "model": "gpt-5-codex",
                             "reasoning_effort": "high",
+                            "execution_mode": "host_access",
+                            "capabilities": ["docker", "network"],
                         },
                         "ollama-dev": {
                             "type": "ollama",
@@ -997,6 +1032,7 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
                             "command": "claude -p",
                             "model": "sonnet",
                             "reasoning_effort": "medium",
+                            "execution_mode": "sandboxed",
                         },
                     },
                 },
@@ -1007,6 +1043,7 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert body["orchestrator"]["concurrency"] == 5
         assert body["orchestrator"]["auto_deps"] is False
         assert body["orchestrator"]["max_review_attempts"] == 4
+        assert body["orchestrator"]["max_merge_conflict_attempts"] == 6
         assert body["orchestrator"]["step_timeout_seconds"] == 900
         assert body["orchestrator"]["gate_reminder_minutes"] == 15
         assert body["orchestrator"]["gate_stale_minutes"] == 120
@@ -1019,21 +1056,35 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert body["defaults"]["quality_gate"]["high"] == 2
         assert body["defaults"]["quality_gate"]["medium"] == 3
         assert body["defaults"]["quality_gate"]["low"] == 4
+        assert body["defaults"]["task_generation"] == {
+            "child_status": "queued",
+            "child_hitl_mode": "review_only",
+            "infer_deps": False,
+        }
         assert body["workers"]["default"] == "ollama-dev"
         assert body["workers"]["default_model"] == "gpt-5-codex"
         assert body["workers"]["heartbeat_seconds"] == 90
         assert body["workers"]["heartbeat_grace_seconds"] == 360
         assert body["workers"]["routing"]["plan"] == "codex"
         assert body["workers"]["routing"]["implement"] == "ollama-dev"
+        assert body["workers"]["environment"] == {
+            "auto_prepare": True,
+            "max_auto_retries": 5,
+            "capability_fallback": True,
+            "required_capabilities_by_step": {"verify": ["docker", "network"]},
+        }
         assert body["workers"]["providers"]["codex"]["type"] == "codex"
         assert body["workers"]["providers"]["codex"]["model"] == "gpt-5-codex"
         assert body["workers"]["providers"]["codex"]["reasoning_effort"] == "high"
+        assert body["workers"]["providers"]["codex"]["execution_mode"] == "host_access"
+        assert body["workers"]["providers"]["codex"]["capabilities"] == ["docker", "network"]
         assert body["workers"]["providers"]["ollama-dev"]["type"] == "ollama"
         assert body["workers"]["providers"]["ollama-dev"]["model"] == "llama3.1:8b"
         assert body["workers"]["providers"]["claude"]["type"] == "claude"
         assert body["workers"]["providers"]["claude"]["command"] == "claude -p"
         assert body["workers"]["providers"]["claude"]["model"] == "sonnet"
         assert body["workers"]["providers"]["claude"]["reasoning_effort"] == "medium"
+        assert body["workers"]["providers"]["claude"]["execution_mode"] == "sandboxed"
 
         reloaded = client.get("/api/settings")
         assert reloaded.status_code == 200
@@ -1050,6 +1101,7 @@ def test_settings_patch_preserves_unspecified_orchestrator_fields(tmp_path: Path
                     "concurrency": 3,
                     "auto_deps": True,
                     "max_review_attempts": 10,
+                    "max_merge_conflict_attempts": 7,
                     "step_timeout_seconds": 600,
                     "gate_reminder_minutes": 5,
                     "gate_stale_minutes": 7,
@@ -1067,10 +1119,33 @@ def test_settings_patch_preserves_unspecified_orchestrator_fields(tmp_path: Path
         assert partial.status_code == 200
         orch = partial.json()["orchestrator"]
         assert orch["concurrency"] == 4
+        assert orch["max_merge_conflict_attempts"] == 7
         assert orch["gate_reminder_minutes"] == 5
         assert orch["gate_stale_minutes"] == 7
         assert orch["gate_max_wait_minutes"] == 9
         assert orch["gate_timeout_action"] == "block"
+
+
+def test_settings_patch_rejects_invalid_merge_conflict_attempts(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        too_low = client.patch(
+            "/api/settings",
+            json={"orchestrator": {"max_merge_conflict_attempts": 0}},
+        )
+        assert too_low.status_code == 422
+
+        too_high = client.patch(
+            "/api/settings",
+            json={"orchestrator": {"max_merge_conflict_attempts": 11}},
+        )
+        assert too_high.status_code == 422
+
+        non_int = client.patch(
+            "/api/settings",
+            json={"orchestrator": {"max_merge_conflict_attempts": "abc"}},
+        )
+        assert non_int.status_code == 422
 
 
 def test_create_task_worker_model_round_trip(tmp_path: Path) -> None:
@@ -1110,6 +1185,30 @@ def test_task_step_timeout_round_trip(tmp_path: Path) -> None:
         assert cleared.status_code == 200
         assert cleared.json()["task"]["step_timeout_seconds"] is None
         assert "step_timeouts" not in (cleared.json()["task"]["metadata"] or {})
+
+
+def test_create_task_strips_internal_context_metadata_keys(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={
+                "title": "Sanitize metadata",
+                "metadata": {
+                    "worktree_dir": "/tmp/bad",
+                    "task_context": {"expected_on_retry": True},
+                    "preserved_branch": "task-bad",
+                    "user.note": "keep",
+                },
+            },
+        )
+        assert created.status_code == 200
+        task = created.json()["task"]
+        metadata = task["metadata"] or {}
+        assert "worktree_dir" not in metadata
+        assert "task_context" not in metadata
+        assert "preserved_branch" not in metadata
+        assert metadata.get("user.note") == "keep"
 
 
 def test_task_payload_includes_gate_context(tmp_path: Path) -> None:
@@ -1413,6 +1512,13 @@ def test_task_logs_include_steps_from_all_runs_and_support_run_id_selection(tmp_
         assert merged_body["step_latest_run"]["verify"] == run_new.id
         assert any(item["step"] == "verify" and item["run_id"] == run_old.id for item in merged_body["step_history"])
         assert any(item["step"] == "verify" and item["run_id"] == run_new.id for item in merged_body["step_history"])
+        verify_attempts = {
+            item["run_id"]: int(item["attempt"])
+            for item in merged_body["step_history"]
+            if item["step"] == "verify"
+        }
+        assert verify_attempts.get(run_old.id) == 1
+        assert verify_attempts.get(run_new.id) == 2
 
         scoped_old = client.get(f"/api/tasks/{task.id}/logs?step=verify&run_id={run_old.id}")
         assert scoped_old.status_code == 200
@@ -1434,6 +1540,137 @@ def test_task_logs_include_steps_from_all_runs_and_support_run_id_selection(tmp_
         assert strict_miss_body["mode"] == "none"
         assert strict_miss_body["run_id"] is None
         assert strict_miss_body["stdout"] == ""
+
+
+def test_task_logs_latest_selection_uses_run_timestamps_not_run_ids_order(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Log ordering resilience"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        logs_dir = container.state_root / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        verify_old = logs_dir / "verify.ts.old.stdout.log"
+        verify_old.write_text("verify ts old\n", encoding="utf-8")
+        verify_new = logs_dir / "verify.ts.new.stdout.log"
+        verify_new.write_text("verify ts new\n", encoding="utf-8")
+
+        run_old = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-03-01T14:44:01Z",
+            finished_at="2026-03-01T14:44:31Z",
+            steps=[
+                {
+                    "step": "verify",
+                    "status": "ok",
+                    "stdout_path": str(verify_old),
+                    "started_at": "2026-03-01T14:44:01Z",
+                    "ts": "2026-03-01T14:44:31Z",
+                },
+            ],
+        )
+        run_new = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-03-01T14:48:03Z",
+            finished_at="2026-03-01T14:50:33Z",
+            steps=[
+                {
+                    "step": "verify",
+                    "status": "ok",
+                    "stdout_path": str(verify_new),
+                    "started_at": "2026-03-01T14:48:03Z",
+                    "ts": "2026-03-01T14:50:33Z",
+                },
+            ],
+        )
+        container.runs.upsert(run_old)
+        container.runs.upsert(run_new)
+
+        # Intentionally reverse run_ids to emulate legacy/inconsistent ordering.
+        task.run_ids = [run_new.id, run_old.id]
+        task.status = "in_progress"
+        task.current_step = "verify"
+        container.tasks.upsert(task)
+
+        merged = client.get(f"/api/tasks/{task.id}/logs?step=verify")
+        assert merged.status_code == 200
+        body = merged.json()
+        assert body["run_id"] == run_new.id
+        assert body["step_latest_run"]["verify"] == run_new.id
+        verify_attempts = {
+            item["run_id"]: int(item["attempt"])
+            for item in body["step_history"]
+            if item["step"] == "verify"
+        }
+        assert verify_attempts.get(run_old.id) == 1
+        assert verify_attempts.get(run_new.id) == 2
+
+
+def test_task_logs_default_selection_prefers_latest_history_over_stale_last_logs(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Default logs selection"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        logs_dir = container.state_root / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        verify_old = logs_dir / "verify.default.old.stdout.log"
+        verify_old.write_text("verify default old\n", encoding="utf-8")
+        verify_new = logs_dir / "verify.default.new.stdout.log"
+        verify_new.write_text("verify default new\n", encoding="utf-8")
+
+        run_old = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-03-01T14:44:01Z",
+            finished_at="2026-03-01T14:44:31Z",
+            steps=[
+                {
+                    "step": "verify",
+                    "status": "ok",
+                    "stdout_path": str(verify_old),
+                    "started_at": "2026-03-01T14:44:01Z",
+                    "ts": "2026-03-01T14:44:31Z",
+                },
+            ],
+        )
+        run_new = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-03-01T14:48:03Z",
+            finished_at="2026-03-01T14:50:33Z",
+            steps=[
+                {
+                    "step": "verify",
+                    "status": "ok",
+                    "stdout_path": str(verify_new),
+                    "started_at": "2026-03-01T14:48:03Z",
+                    "ts": "2026-03-01T14:50:33Z",
+                },
+            ],
+        )
+        container.runs.upsert(run_old)
+        container.runs.upsert(run_new)
+
+        task.run_ids = [run_old.id, run_new.id]
+        task.status = "done"
+        task.current_step = "verify"
+        task.metadata = dict(task.metadata or {})
+        task.metadata["last_logs"] = {"step": "verify", "stdout_path": str(verify_old), "run_id": run_old.id}
+        container.tasks.upsert(task)
+
+        merged = client.get(f"/api/tasks/{task.id}/logs")
+        assert merged.status_code == 200
+        body = merged.json()
+        assert body["mode"] == "history"
+        assert body["run_id"] == run_new.id
+        assert body["stdout"] == "verify default new\n"
 
 
 def test_cancel_task_clears_pending_gate_and_checkpoint(tmp_path: Path) -> None:
@@ -1461,6 +1698,142 @@ def test_cancel_task_clears_pending_gate_and_checkpoint(tmp_path: Path) -> None:
         assert updated.pending_gate is None
         assert updated.current_agent_id is None
         assert "execution_checkpoint" not in (updated.metadata or {})
+
+
+def test_cancel_task_immediately_cleans_retained_context_and_branch(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "init",
+        ],
+        tmp_path,
+    )
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Cancel cleanup"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        retained_branch = f"task-{task.id}"
+        retained_worktree = container.state_root / "worktrees" / task.id
+        subprocess.run(
+            ["git", "worktree", "add", str(retained_worktree), "-b", retained_branch],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        task.status = "blocked"
+        task.metadata = {
+            "worktree_dir": str(retained_worktree),
+            "task_context": {
+                "context_id": "ctx-cancel-cleanup",
+                "worktree_dir": str(retained_worktree),
+                "task_branch": retained_branch,
+                "retained": True,
+                "expected_on_retry": True,
+            },
+        }
+        container.tasks.upsert(task)
+
+        resp = client.post(f"/api/tasks/{task.id}/cancel")
+        assert resp.status_code == 200
+        payload = resp.json()["task"]
+        assert payload["status"] == "cancelled"
+
+        updated = container.tasks.get(task.id)
+        assert updated is not None
+        assert not retained_worktree.exists()
+        branch_listing = subprocess.run(
+            ["git", "branch", "--list", retained_branch],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert branch_listing == ""
+        metadata = updated.metadata if isinstance(updated.metadata, dict) else {}
+        assert "worktree_dir" not in metadata
+        assert "task_context" not in metadata
+        assert "cancel_cleanup_pending" not in metadata
+
+
+def test_transition_to_cancelled_uses_same_cleanup_path(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "init",
+        ],
+        tmp_path,
+    )
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Transition cancel cleanup"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        retained_branch = f"task-{task.id}"
+        retained_worktree = container.state_root / "worktrees" / task.id
+        subprocess.run(
+            ["git", "worktree", "add", str(retained_worktree), "-b", retained_branch],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        task.status = "blocked"
+        task.metadata = {
+            "worktree_dir": str(retained_worktree),
+            "task_context": {
+                "context_id": "ctx-transition-cancel",
+                "worktree_dir": str(retained_worktree),
+                "task_branch": retained_branch,
+                "retained": True,
+                "expected_on_retry": True,
+            },
+        }
+        container.tasks.upsert(task)
+
+        resp = client.post(f"/api/tasks/{task.id}/transition", json={"status": "cancelled"})
+        assert resp.status_code == 200
+        payload = resp.json()["task"]
+        assert payload["status"] == "cancelled"
+
+        updated = container.tasks.get(task.id)
+        assert updated is not None
+        assert not retained_worktree.exists()
+        branch_listing = subprocess.run(
+            ["git", "branch", "--list", retained_branch],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert branch_listing == ""
+        metadata = updated.metadata if isinstance(updated.metadata, dict) else {}
+        assert "worktree_dir" not in metadata
+        assert "task_context" not in metadata
+        assert "cancel_cleanup_pending" not in metadata
 
 
 def test_get_task_timing_summary_prefers_earliest_active_run(tmp_path: Path) -> None:
@@ -1692,6 +2065,26 @@ def test_state_machine_allows_and_rejects_expected_transitions(tmp_path: Path) -
         assert "Invalid transition" in invalid.text
 
 
+def test_transition_rejects_blocked_and_in_review_bypass_paths(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        blocked = client.post("/api/tasks", json={"title": "Blocked", "status": "blocked"}).json()["task"]
+        blocked_to_review = client.post(
+            f"/api/tasks/{blocked['id']}/transition",
+            json={"status": "in_review"},
+        )
+        assert blocked_to_review.status_code == 400
+        assert "cannot transition to in_review directly" in str(blocked_to_review.json().get("detail") or "").lower()
+
+        in_review = client.post("/api/tasks", json={"title": "In review", "status": "in_review"}).json()["task"]
+        review_to_done = client.post(
+            f"/api/tasks/{in_review['id']}/transition",
+            json={"status": "done"},
+        )
+        assert review_to_done.status_code == 400
+        assert "cannot transition to done directly" in str(review_to_done.json().get("detail") or "").lower()
+
+
 def test_delete_terminal_task_cleans_relationship_references(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     container = Container(tmp_path)
@@ -1714,6 +2107,8 @@ def test_delete_terminal_task_cleans_relationship_references(tmp_path: Path) -> 
         payload = resp.json()
         assert payload["deleted"] is True
         assert payload["task_id"] == task_to_delete.id
+        assert payload["archived_context_count"] == 0
+        assert payload["archived_context_manifest_path"] == ""
 
     fresh = Container(tmp_path)
     assert fresh.tasks.get(task_to_delete.id) is None
@@ -1734,6 +2129,39 @@ def test_delete_non_terminal_task_rejected(tmp_path: Path) -> None:
         assert "Only terminal tasks" in resp.json()["detail"]
 
 
+def test_delete_terminal_task_archives_context_manifest(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    retained_dir = tmp_path / ".agent_orchestrator" / "worktrees" / "task-delete-context"
+    task = Task(
+        title="Delete context task",
+        status="done",
+        metadata={
+            "worktree_dir": str(retained_dir),
+            "task_context": {
+                "context_id": "ctx-delete",
+                "worktree_dir": str(retained_dir),
+                "task_branch": "task-delete-context",
+                "retained": True,
+                "expected_on_retry": True,
+            },
+        },
+    )
+    container.tasks.upsert(task)
+
+    with TestClient(app) as client:
+        resp = client.delete(f"/api/tasks/{task.id}")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["deleted"] is True
+        assert payload["archived_context_count"] == 1
+        manifest_path = Path(str(payload["archived_context_manifest_path"] or ""))
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["count"] == 1
+        assert manifest["items"][0]["task_id"] == task.id
+
+
 def test_clear_tasks_archives_state_and_reinitializes_board(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
@@ -1743,6 +2171,8 @@ def test_clear_tasks_archives_state_and_reinitializes_board(tmp_path: Path) -> N
         assert clear_resp.status_code == 200
         body = clear_resp.json()
         assert body["cleared"] is True
+        assert body["archived_context_count"] == 0
+        assert body["archived_context_manifest_path"] == ""
         archived_to = str(body["archived_to"] or "")
         assert archived_to
         assert "Archived previous runtime state to" in body["message"]
@@ -1775,6 +2205,146 @@ def test_clear_tasks_archives_state_and_reinitializes_board(tmp_path: Path) -> N
         status_resp = client.get("/api/orchestrator/status")
         assert status_resp.status_code == 200
         assert status_resp.json().get("scheduler_attached") is True
+
+
+def test_clear_tasks_archives_context_manifest_when_present(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    retained_dir = tmp_path / ".agent_orchestrator" / "worktrees" / "task-retained"
+    task = Task(
+        title="Retained blocked task",
+        status="blocked",
+        metadata={
+            "worktree_dir": str(retained_dir),
+            "task_context": {
+                "context_id": "ctx-retained",
+                "worktree_dir": str(retained_dir),
+                "task_branch": "task-retained",
+                "retained": True,
+                "expected_on_retry": True,
+            },
+        },
+    )
+    container.tasks.upsert(task)
+
+    with TestClient(app) as client:
+        clear_resp = client.post("/api/tasks/clear")
+        assert clear_resp.status_code == 200
+        body = clear_resp.json()
+        assert body["cleared"] is True
+        assert body["archived_context_count"] == 1
+        manifest_path = Path(str(body["archived_context_manifest_path"] or ""))
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["count"] == 1
+        assert manifest["items"][0]["task_id"] == task.id
+
+
+def test_clear_tasks_rejects_when_active_execution_present_without_force(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Still running", "status": "queued"}).json()["task"]
+        key = str(tmp_path.resolve())
+        orchestrator = app.state.orchestrators[key]
+        stuck_future: Future[object] = Future()
+        with orchestrator._futures_lock:
+            orchestrator._futures[created["id"]] = stuck_future
+
+        clear_resp = client.post("/api/tasks/clear?timeout_seconds=0")
+        assert clear_resp.status_code == 409
+        detail = clear_resp.json()["detail"]
+        assert "Cannot clear tasks while execution is still active." in str(detail.get("detail") or "")
+        assert detail["code"] == "active_execution"
+        assert created["id"] in set(detail["data"]["active_execution"]["task_ids"])
+
+        assert Container(tmp_path).tasks.get(created["id"]) is not None
+        stuck_future.set_result(None)
+
+
+def test_clear_tasks_reject_does_not_flip_paused_orchestrator_state(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        pause = client.post("/api/orchestrator/control", json={"action": "pause"})
+        assert pause.status_code == 200
+        created = client.post("/api/tasks", json={"title": "Paused clear guard", "status": "queued"}).json()["task"]
+        key = str(tmp_path.resolve())
+        orchestrator = app.state.orchestrators[key]
+        stuck_future: Future[object] = Future()
+        with orchestrator._futures_lock:
+            orchestrator._futures[created["id"]] = stuck_future
+
+        clear_resp = client.post("/api/tasks/clear?timeout_seconds=0")
+        assert clear_resp.status_code == 409
+        status_resp = client.get("/api/orchestrator/status")
+        assert status_resp.status_code == 200
+        assert status_resp.json().get("status") == "paused"
+
+        stuck_future.set_result(None)
+
+
+def test_clear_tasks_force_cancels_in_progress_blockers_and_succeeds(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    executing = Task(title="Force clear blocker", status="in_progress", pending_gate="before_implement")
+    container.tasks.upsert(executing)
+
+    with TestClient(app) as client:
+        # Ensure app-owned orchestrator is initialized, then attach an active lease.
+        status_resp = client.get("/api/orchestrator/status")
+        assert status_resp.status_code == 200
+        key = str(tmp_path.resolve())
+        orchestrator = app.state.orchestrators[key]
+        live = container.tasks.get(executing.id)
+        assert live is not None
+        orchestrator._acquire_execution_lease(live)
+
+        clear_resp = client.post("/api/tasks/clear?force=true&timeout_seconds=0")
+        assert clear_resp.status_code == 200
+        body = clear_resp.json()
+        assert body["cleared"] is True
+        assert body["force"] is True
+        assert executing.id in set(body["active_execution_before"]["task_ids"])
+        assert body["quiescence_result"]["quiescent"] is True
+        assert executing.id in set(body["force_cancel_result"]["cancelled_task_ids"])
+        assert Container(tmp_path).tasks.get(executing.id) is None
+
+
+def test_clear_tasks_force_times_out_when_active_future_persists(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Should remain", "status": "queued"}).json()["task"]
+        key = str(tmp_path.resolve())
+        orchestrator = app.state.orchestrators[key]
+        stuck_future: Future[object] = Future()
+        with orchestrator._futures_lock:
+            orchestrator._futures["ghost-running"] = stuck_future
+
+        clear_resp = client.post("/api/tasks/clear?force=true&timeout_seconds=0")
+        assert clear_resp.status_code == 409
+        detail = clear_resp.json()["detail"]
+        assert "Forced clear timed out waiting for active execution to stop." in str(detail.get("detail") or "")
+        assert detail["code"] == "active_execution_timeout"
+        assert "ghost-running" in set(detail["data"]["active_execution"]["task_ids"])
+        assert Container(tmp_path).tasks.get(created["id"]) is not None
+
+        stuck_future.set_result(None)
+
+
+def test_force_cancel_tasks_skips_done_tasks(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        done_task = client.post("/api/tasks", json={"title": "Done task", "status": "done"}).json()["task"]
+        key = str(tmp_path.resolve())
+        orchestrator = app.state.orchestrators[key]
+
+        result = orchestrator.force_cancel_tasks([done_task["id"]], source="test_force_cancel")
+        assert result["cancelled_task_ids"] == []
+        assert result["terminal_skipped_task_ids"] == [done_task["id"]]
+        assert result["failed"] == {}
+
+        latest = Container(tmp_path).tasks.get(done_task["id"])
+        assert latest is not None
+        assert latest.status == "done"
 
 
 def test_api_surfaces_human_blocking_issues_on_task_and_timeline(tmp_path: Path) -> None:
@@ -2037,7 +2607,7 @@ def test_retry_run_appends_attempt_marker_to_workdoc(tmp_path: Path) -> None:
         content = workdoc_resp.json()["content"]
         assert "## Retry Attempt 2" in content
         assert "Resume from verify" in content
-        assert "### Attempt 2" in content
+        assert "### Attempt 1" in content
         assert "Retry verify completed" in content
 
         container = Container(tmp_path)
@@ -2211,6 +2781,635 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
         assert latest_run is not None
         assert latest_run.status == "done"
         assert latest_run.finished_at is not None
+
+
+def test_review_approve_rejects_blocked_task_status(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={"title": "Blocked review approve", "status": "blocked"},
+        ).json()["task"]
+        resp = client.post(f"/api/review/{task['id']}/approve", json={})
+        assert resp.status_code == 400
+        assert "not in_review" in str(resp.json().get("detail") or "")
+
+
+def test_review_approve_blocks_on_dirty_overlapping_merge_failure(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Dirty overlap on approve"}).json()["task"]
+        task_branch = f"task-{task['id']}"
+        _git(["checkout", "-b", task_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("task branch change\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "task branch commit",
+            ],
+            tmp_path,
+        )
+        _git(["checkout", base_branch], tmp_path)
+        # Overlapping local dirty edit should block merge.
+        (tmp_path / "tracked.txt").write_text("local dirty change\n", encoding="utf-8")
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "in_review"
+        stored.current_step = "review"
+        stored.metadata["preserved_branch"] = task_branch
+        container.tasks.upsert(stored)
+
+        resp = client.post(f"/api/review/{task['id']}/approve", json={})
+        assert resp.status_code == 200
+        payload = resp.json()["task"]
+        assert payload["status"] == "blocked"
+        assert payload["current_step"] == "commit"
+        assert "local changes" in str(payload.get("error") or "").lower()
+        assert payload["metadata"].get("merge_failure_reason_code") == "dirty_overlapping"
+        assert payload["can_finalize_merge_conflict"] is False
+        assert payload["finalize_merge_conflict_reason_code"] == "not_merge_conflict_block"
+        updated = container.tasks.get(task["id"])
+        assert updated is not None
+        latest_run = None
+        for run_id in reversed(updated.run_ids):
+            latest_run = container.runs.get(run_id)
+            if latest_run:
+                break
+        if latest_run is not None:
+            assert "overlapping local integration changes" in str(latest_run.summary or "").lower()
+
+
+def test_task_payload_surfaces_skip_to_precommit_eligibility(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        feature = client.post("/api/tasks", json={"title": "Eligible blocked skip"}).json()["task"]
+        feature_branch = f"task-{feature['id']}"
+        _git(["checkout", "-b", feature_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("base\nfeature change\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "feature work",
+            ],
+            tmp_path,
+        )
+        _git(["checkout", base_branch], tmp_path)
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(feature["id"])
+        assert stored is not None
+        stored.status = "blocked"
+        stored.current_step = "verify"
+        stored.metadata["preserved_branch"] = feature_branch
+        stored.error = "verify failed because local setup is incomplete"
+        container.tasks.upsert(stored)
+
+        payload = client.get(f"/api/tasks/{feature['id']}").json()["task"]
+        assert payload["can_skip_to_precommit"] is True
+        assert payload["skip_to_precommit_reason_code"] is None
+
+        research = client.post(
+            "/api/tasks",
+            json={"title": "Research blocked", "status": "blocked", "task_type": "research"},
+        ).json()["task"]
+        research_payload = client.get(f"/api/tasks/{research['id']}").json()["task"]
+        assert research_payload["can_skip_to_precommit"] is False
+        assert research_payload["skip_to_precommit_reason_code"] == "pipeline_not_supported"
+
+
+def test_skip_to_precommit_endpoint_moves_task_to_precommit_review(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Skip to precommit path"}).json()["task"]
+        task_branch = f"task-{task['id']}"
+        _git(["checkout", "-b", task_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("base\nskip-to-precommit change\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "task work",
+            ],
+            tmp_path,
+        )
+        _git(["checkout", base_branch], tmp_path)
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "blocked"
+        stored.current_step = "verify"
+        stored.error = "verify failed due missing env dependency"
+        stored.metadata["preserved_branch"] = task_branch
+        container.tasks.upsert(stored)
+
+        resp = client.post(
+            f"/api/tasks/{task['id']}/skip-to-precommit",
+            json={"guidance": "Accept risk and continue to commit"},
+        )
+        assert resp.status_code == 200
+        payload = resp.json()["task"]
+        assert payload["status"] == "in_review"
+        assert payload["current_step"] == "review"
+        assert payload["pending_gate"] is None
+        assert payload["metadata"]["pending_precommit_approval"] is True
+        assert payload["metadata"]["review_stage"] == "pre_commit"
+        assert payload["metadata"]["retry_from_step"] == "commit"
+        assert payload["can_skip_to_precommit"] is False
+        assert payload["skip_to_precommit_reason_code"] == "task_not_blocked"
+        actions = payload.get("human_review_actions") or []
+        assert actions
+        assert actions[-1]["action"] == "skip_to_precommit"
+        assert actions[-1]["guidance"] == "Accept risk and continue to commit"
+
+        approve = client.post(f"/api/review/{task['id']}/approve", json={})
+        assert approve.status_code == 200
+        assert approve.json()["task"]["status"] == "queued"
+
+
+def test_skip_to_precommit_endpoint_rejects_ineligible_task(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={"title": "Research blocked", "status": "blocked", "task_type": "research"},
+        ).json()["task"]
+        resp = client.post(f"/api/tasks/{task['id']}/skip-to-precommit", json={})
+        assert resp.status_code == 409
+        detail = str(resp.json().get("detail") or "")
+        assert "pipeline_not_supported" in detail
+
+
+def test_skip_to_precommit_eligibility_rejects_no_material_preserved_work(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "No preserved changes"}).json()["task"]
+        preserved_branch = f"task-{task['id']}"
+        _git(["checkout", "-b", preserved_branch], tmp_path)
+        # No changes committed on preserved branch.
+        _git(["checkout", base_branch], tmp_path)
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "blocked"
+        stored.current_step = "verify"
+        stored.error = "verify failed in environment setup"
+        stored.metadata["preserved_branch"] = preserved_branch
+        container.tasks.upsert(stored)
+
+        payload = client.get(f"/api/tasks/{task['id']}").json()["task"]
+        assert payload["can_skip_to_precommit"] is False
+        assert payload["skip_to_precommit_reason_code"] == "no_task_changes"
+
+        resp = client.post(f"/api/tasks/{task['id']}/skip-to-precommit", json={})
+        assert resp.status_code == 409
+        assert "no_task_changes" in str(resp.json().get("detail") or "")
+
+
+def test_task_payload_surfaces_finalize_merge_conflict_eligibility(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Manual merge finalize eligible"}).json()["task"]
+        task_branch = f"task-{task['id']}"
+        _git(["checkout", "-b", task_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("base\nmanual merge content\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "task commit",
+            ],
+            tmp_path,
+        )
+        _git(["checkout", base_branch], tmp_path)
+        _git(["merge", "--ff", task_branch], tmp_path)
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "blocked"
+        stored.current_step = "commit"
+        stored.metadata["merge_conflict"] = True
+        stored.metadata["preserved_branch"] = task_branch
+        container.tasks.upsert(stored)
+
+        payload = client.get(f"/api/tasks/{task['id']}").json()["task"]
+        assert payload["can_finalize_merge_conflict"] is True
+        assert payload["finalize_merge_conflict_reason_code"] is None
+
+
+def test_finalize_merge_conflict_endpoint_marks_task_done(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Finalize manual merge"}).json()["task"]
+        task_branch = f"task-{task['id']}"
+        _git(["checkout", "-b", task_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("base\nmanual finalize\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "task commit",
+            ],
+            tmp_path,
+        )
+        branch_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        _git(["checkout", base_branch], tmp_path)
+        _git(["merge", "--ff", task_branch], tmp_path)
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        run = RunRecord(
+            task_id=stored.id,
+            status="in_progress",
+            started_at=now_iso(),
+            steps=[{"step": "commit", "status": "ok", "commit": branch_sha}],
+        )
+        container.runs.upsert(run)
+        stored.run_ids.append(run.id)
+        stored.status = "blocked"
+        stored.current_step = "commit"
+        stored.error = "Merge conflict could not be resolved automatically"
+        stored.metadata["merge_conflict"] = True
+        stored.metadata["preserved_branch"] = task_branch
+        stored.metadata["merge_conflict_files"] = {"tracked.txt": "<<<<<<< ours"}
+        stored.metadata["merge_conflict_attempt"] = 2
+        stored.metadata["merge_conflict_max_attempts"] = 3
+        stored.metadata["merge_conflict_previous_error"] = "worker failed"
+        container.tasks.upsert(stored)
+
+        resp = client.post(
+            f"/api/tasks/{task['id']}/finalize-merge-conflict",
+            json={"guidance": "Resolved manually in git."},
+        )
+        assert resp.status_code == 200
+        payload = resp.json()["task"]
+        assert payload["status"] == "done"
+        assert payload["current_step"] is None
+        assert payload["error"] is None
+        for key in (
+            "merge_conflict",
+            "merge_conflict_files",
+            "merge_conflict_attempt",
+            "merge_conflict_max_attempts",
+            "merge_conflict_previous_error",
+            "pending_precommit_approval",
+            "review_stage",
+            "pipeline_phase",
+        ):
+            assert key not in payload["metadata"]
+        actions = payload.get("human_review_actions") or []
+        assert actions and actions[-1]["action"] == "finalize_merge_conflict"
+        assert actions[-1]["guidance"] == "Resolved manually in git."
+        assert payload["metadata"]["last_manual_merge_finalize"]["verified_ref"] == task_branch
+
+        latest_run = container.runs.get(run.id)
+        assert latest_run is not None
+        assert latest_run.status == "done"
+        assert latest_run.finished_at is not None
+
+
+def test_finalize_merge_conflict_endpoint_rejects_unintegrated_and_invalid_state(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Not integrated"}).json()["task"]
+        task_branch = f"task-{task['id']}"
+        _git(["checkout", "-b", task_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("base\nbranch only\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "branch commit",
+            ],
+            tmp_path,
+        )
+        _git(["checkout", base_branch], tmp_path)
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "blocked"
+        stored.current_step = "commit"
+        stored.metadata["merge_conflict"] = True
+        stored.metadata["preserved_branch"] = task_branch
+        container.tasks.upsert(stored)
+
+        not_integrated = client.post(f"/api/tasks/{task['id']}/finalize-merge-conflict", json={})
+        assert not_integrated.status_code == 409
+        assert "merge_not_integrated" in str(not_integrated.json().get("detail") or "")
+
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "queued"
+        container.tasks.upsert(stored)
+        wrong_state = client.post(f"/api/tasks/{task['id']}/finalize-merge-conflict", json={})
+        assert wrong_state.status_code == 409
+        assert "task_not_blocked" in str(wrong_state.json().get("detail") or "")
+
+
+def test_finalize_merge_conflict_endpoint_rejects_unmerged_index_entries(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Unmerged index"}).json()["task"]
+        task_branch = f"task-{task['id']}"
+        _git(["checkout", "-b", task_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("task branch change\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "task branch commit",
+            ],
+            tmp_path,
+        )
+        _git(["checkout", base_branch], tmp_path)
+        (tmp_path / "tracked.txt").write_text("base branch change\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], tmp_path)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "base branch commit",
+            ],
+            tmp_path,
+        )
+        merge_result = subprocess.run(
+            [
+                "git",
+                "-c", "user.name=AO Test",
+                "-c", "user.email=ao-test@example.com",
+                "merge", task_branch,
+            ],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert merge_result.returncode == 1, (
+            f"Expected conflict exit code 1, got {merge_result.returncode}: "
+            f"{merge_result.stderr}"
+        )
+        # Verify the index actually has unmerged entries
+        ls_unmerged = subprocess.run(
+            ["git", "ls-files", "--unmerged"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert ls_unmerged.stdout.strip(), (
+            f"Expected unmerged index entries but got none. "
+            f"Merge stderr: {merge_result.stderr}"
+        )
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "blocked"
+        stored.current_step = "commit"
+        stored.metadata["merge_conflict"] = True
+        stored.metadata["preserved_branch"] = task_branch
+        container.tasks.upsert(stored)
+
+        resp = client.post(f"/api/tasks/{task['id']}/finalize-merge-conflict", json={})
+        assert resp.status_code == 409
+        assert "unmerged_entries_present" in str(resp.json().get("detail") or "")
 
 
 def test_precommit_review_approve_rejects_missing_context(tmp_path: Path) -> None:
@@ -2389,6 +3588,49 @@ def test_task_changes_endpoint_ignores_out_of_scope_worktree_dir(tmp_path: Path)
         assert payload["diff"] == ""
 
 
+def test_task_changes_endpoint_rejects_blocked_repo_root_worktree_context(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "init",
+        ],
+        tmp_path,
+    )
+    (tmp_path / "tracked.txt").write_text("base\nrepo root change\n", encoding="utf-8")
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Blocked root context"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        stored.status = "blocked"
+        stored.metadata["worktree_dir"] = str(tmp_path)
+        stored.metadata["task_context"] = {
+            "context_id": "ctx-root",
+            "worktree_dir": str(tmp_path),
+            "task_branch": f"task-{stored.id}",
+            "retained": True,
+            "expected_on_retry": True,
+        }
+        container.tasks.upsert(stored)
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "none"
+        assert payload["reason"] == "invalid_worktree_context"
+        assert payload["diff"] == ""
+
+
 def test_task_changes_endpoint_does_not_fallback_to_repo_root_without_context(tmp_path: Path) -> None:
     _git(["init"], tmp_path)
     (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
@@ -2465,9 +3707,101 @@ def test_task_changes_endpoint_falls_back_when_commit_diff_errors(tmp_path: Path
         assert resp.status_code == 200
         payload = resp.json()
         assert payload["mode"] == "working_tree"
+        assert payload["context_source"] == "retained_worktree"
         assert payload["commit"] is None
         assert any(item.get("path") == "tracked.txt" for item in payload["files"])
         assert "+update" in payload["diff"]
+
+
+def test_task_changes_endpoint_prefers_blocked_retained_worktree_over_commit_diff(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "init",
+        ],
+        tmp_path,
+    )
+
+    old_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Blocked retained changes"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        retained_branch = f"task-{stored.id}"
+        retained_worktree = container.state_root / "worktrees" / stored.id
+        subprocess.run(
+            ["git", "worktree", "add", str(retained_worktree), "-b", retained_branch],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (retained_worktree / "tracked.txt").write_text("base\nold commit change\nnew retained change\n", encoding="utf-8")
+        _git(["add", "tracked.txt"], retained_worktree)
+        _git(
+            [
+                "-c",
+                "user.name=AO Test",
+                "-c",
+                "user.email=ao-test@example.com",
+                "commit",
+                "-m",
+                "retained work",
+            ],
+            retained_worktree,
+        )
+        stored.status = "blocked"
+        stored.metadata["worktree_dir"] = str(retained_worktree)
+        stored.metadata["task_context"] = {
+            "context_id": "ctx-retained",
+            "worktree_dir": str(retained_worktree),
+            "task_branch": retained_branch,
+            "base_branch": base_branch,
+            "retained": True,
+            "expected_on_retry": True,
+        }
+        run = RunRecord(
+            task_id=stored.id,
+            status="done",
+            started_at=now_iso(),
+            finished_at=now_iso(),
+            steps=[{"step": "commit", "status": "ok", "commit": old_commit}],
+        )
+        container.runs.upsert(run)
+        stored.run_ids.append(run.id)
+        container.tasks.upsert(stored)
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "working_tree"
+        assert payload["context_source"] == "retained_worktree"
+        assert payload["base_ref"] == base_branch
+        assert "+new retained change" in payload["diff"]
 
 
 def test_task_changes_endpoint_uses_preserved_branch_when_worktree_is_empty(tmp_path: Path) -> None:
@@ -3108,6 +4442,7 @@ def test_generate_tasks_endpoint(tmp_path: Path) -> None:
             "/api/tasks",
             json={
                 "title": "Generate from plan",
+                "task_type": "initiative_plan",
                 "status": "backlog",
                 "metadata": {
                     "scripted_generated_tasks": [
@@ -3127,6 +4462,156 @@ def test_generate_tasks_endpoint(tmp_path: Path) -> None:
         assert body["children"][0]["title"] == "Login endpoint"
         assert body["children"][1]["title"] == "Session store"
         assert body["task"]["children_ids"] == body["created_task_ids"]
+        assert body["effective_policy"]["child_status"] == "backlog"
+        assert body["effective_policy"]["child_hitl_mode"] == "autopilot"
+        assert body["effective_policy"]["infer_deps"] is True
+
+
+def test_generate_tasks_endpoint_normalizes_generated_task_types(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Normalize generated task types",
+                "task_type": "initiative_plan",
+                "status": "backlog",
+                "metadata": {
+                    "scripted_generated_tasks": [
+                        {"title": "Bug fix", "task_type": "bugfix"},
+                        {"title": "Bug fix with space", "task_type": "bug fix"},
+                        {"title": "Research spike", "task_type": "research"},
+                        {"title": "Housekeeping", "task_type": "chore"},
+                    ],
+                },
+            },
+        ).json()["task"]
+        _create_plan_revision(client, task["id"], "Plan body")
+
+        resp = client.post(f"/api/tasks/{task['id']}/generate-tasks", json={"source": "latest"})
+        assert resp.status_code == 200
+        payload = resp.json()
+        child_types = [child["task_type"] for child in payload["children"]]
+        assert child_types == ["bug", "bug", "feature", "chore"]
+
+
+def test_generate_tasks_endpoint_applies_policy_and_persists_defaults(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Generate with policy",
+                "task_type": "initiative_plan",
+                "hitl_mode": "supervised",
+                "status": "backlog",
+                "metadata": {
+                    "scripted_generated_tasks": [
+                        {"title": "Child A", "task_type": "feature", "status": "backlog", "hitl_mode": "autopilot"},
+                        {"title": "Child B", "task_type": "feature", "status": "backlog", "hitl_mode": "supervised"},
+                    ],
+                },
+            },
+        ).json()["task"]
+        _create_plan_revision(client, task["id"], "Plan body")
+
+        resp = client.post(
+            f"/api/tasks/{task['id']}/generate-tasks",
+            json={
+                "source": "latest",
+                "policy": {
+                    "child_status": "queued",
+                    "child_hitl_mode": "review_only",
+                    "infer_deps": False,
+                },
+                "save_as_default": True,
+            },
+        )
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["effective_policy"]["child_status"] == "queued"
+        assert payload["effective_policy"]["child_hitl_mode"] == "review_only"
+        assert payload["effective_policy"]["infer_deps"] is False
+        for child in payload["children"]:
+            assert child["status"] == "queued"
+            assert child["hitl_mode"] == "review_only"
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        parent = container.tasks.get(task["id"])
+        assert parent is not None
+        defaults = dict((parent.metadata or {}).get("task_generation_defaults") or {})
+        assert defaults == {
+            "child_status": "queued",
+            "child_hitl_mode": "review_only",
+            "infer_deps": False,
+        }
+
+
+def test_generate_tasks_endpoint_uses_saved_defaults_when_policy_omitted(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Generate from saved defaults",
+                "task_type": "initiative_plan",
+                "hitl_mode": "supervised",
+                "status": "backlog",
+                "metadata": {
+                    "scripted_generated_tasks": [
+                        {"id": "one", "title": "One", "task_type": "feature"},
+                        {"id": "two", "title": "Two", "task_type": "feature", "depends_on": ["one"]},
+                    ],
+                },
+            },
+        ).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        persisted = container.tasks.get(task["id"])
+        assert persisted is not None
+        persisted.metadata["task_generation_defaults"] = {
+            "child_status": "queued",
+            "child_hitl_mode": "inherit_parent",
+            "infer_deps": False,
+        }
+        container.tasks.upsert(persisted)
+        _create_plan_revision(client, task["id"], "Plan body")
+
+        resp = client.post(f"/api/tasks/{task['id']}/generate-tasks", json={"source": "latest"})
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["effective_policy"]["child_status"] == "queued"
+        assert payload["effective_policy"]["child_hitl_mode"] == "supervised"
+        assert payload["effective_policy"]["child_hitl_mode_selection"] == "inherit_parent"
+        assert payload["effective_policy"]["infer_deps"] is False
+
+        first = payload["children"][0]
+        second = payload["children"][1]
+        assert first["status"] == "queued"
+        assert second["status"] == "queued"
+        assert first["hitl_mode"] == "supervised"
+        assert second["hitl_mode"] == "supervised"
+        assert second.get("blocked_by") == []
+
+
+def test_generate_tasks_endpoint_rejects_incompatible_pipeline(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Feature task",
+                "task_type": "feature",
+                "status": "backlog",
+                "metadata": {
+                    "scripted_generated_tasks": [{"title": "Child", "task_type": "feature"}],
+                },
+            },
+        ).json()["task"]
+        _create_plan_revision(client, task["id"], "Plan body")
+
+        resp = client.post(f"/api/tasks/{task['id']}/generate-tasks", json={"source": "latest"})
+        assert resp.status_code == 400
+        assert "pipeline does not include generate_tasks" in resp.json()["detail"]
 
 
 def test_generate_tasks_endpoint_returns_400_when_worker_outputs_no_tasks(tmp_path: Path) -> None:
@@ -3137,6 +4622,7 @@ def test_generate_tasks_endpoint_returns_400_when_worker_outputs_no_tasks(tmp_pa
             "/api/tasks",
             json={
                 "title": "Generate no output",
+                "task_type": "initiative_plan",
                 "status": "backlog",
                 "metadata": {
                     "scripted_steps": {
@@ -3160,6 +4646,7 @@ def test_generate_tasks_with_override(tmp_path: Path) -> None:
             "/api/tasks",
             json={
                 "title": "Override plan test",
+                "task_type": "initiative_plan",
                 "metadata": {
                     "scripted_generated_tasks": [
                         {"title": "From override", "task_type": "feature"},
@@ -3184,6 +4671,87 @@ def test_generate_tasks_with_override(tmp_path: Path) -> None:
         assert resp.status_code == 200
         assert len(resp.json()["created_task_ids"]) == 1
         assert resp.json()["children"][0]["title"] == "From override"
+
+
+def test_approve_gate_before_generate_tasks_accepts_generation_policy(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={
+                "title": "Gate task",
+                "task_type": "initiative_plan",
+                "hitl_mode": "supervised",
+                "status": "in_progress",
+            },
+        ).json()["task"]
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+        task.pending_gate = "before_generate_tasks"
+        container.tasks.upsert(task)
+
+        resp = client.post(
+            f"/api/tasks/{task.id}/approve-gate",
+            json={
+                "action": "approve",
+                "generation_policy": {
+                    "child_status": "queued",
+                    "child_hitl_mode": "review_only",
+                    "infer_deps": False,
+                },
+                "save_generation_policy_as_default": True,
+            },
+        )
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["effective_generation_policy"]["child_status"] == "queued"
+        assert payload["effective_generation_policy"]["child_hitl_mode"] == "review_only"
+        assert payload["effective_generation_policy"]["infer_deps"] is False
+
+        updated = container.tasks.get(task.id)
+        assert updated is not None
+        override = dict((updated.metadata or {}).get("task_generation_override") or {})
+        assert override == {
+            "child_status": "queued",
+            "child_hitl_mode": "review_only",
+            "infer_deps": False,
+        }
+        defaults = dict((updated.metadata or {}).get("task_generation_defaults") or {})
+        assert defaults == {
+            "child_status": "queued",
+            "child_hitl_mode": "review_only",
+            "infer_deps": False,
+        }
+
+
+def test_approve_gate_rejects_generation_policy_for_non_generate_gate(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={
+                "title": "Non-generate gate task",
+                "task_type": "feature",
+                "status": "in_progress",
+            },
+        ).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+        task.pending_gate = "before_implement"
+        container.tasks.upsert(task)
+
+        resp = client.post(
+            f"/api/tasks/{task.id}/approve-gate",
+            json={
+                "action": "approve",
+                "generation_policy": {"child_status": "queued"},
+            },
+        )
+        assert resp.status_code == 400
+        assert "only valid for the before_generate_tasks gate" in resp.json()["detail"]
 
 
 def test_plan_refine_job_lifecycle_and_commit(tmp_path: Path) -> None:
@@ -3369,6 +4937,7 @@ def test_generate_tasks_with_explicit_plan_sources(tmp_path: Path) -> None:
             "/api/tasks",
             json={
                 "title": "Source selection",
+                "task_type": "initiative_plan",
                 "metadata": {
                     "scripted_generated_tasks": [{"title": "From selected source", "task_type": "feature"}],
                 },

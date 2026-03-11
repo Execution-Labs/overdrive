@@ -153,11 +153,26 @@ Notes:
 ### `POST /api/tasks/clear`
 Clear all board tasks by archiving runtime state and reinitializing empty state.
 
+Query parameters:
+- `force` (`false` by default): when `true`, cancel active tasks and wait for quiescence before clear.
+- `timeout_seconds` (`10.0` by default, `0..120`): max wait for shutdown/quiescence.
+
 Response:
 - `cleared` (`true` on success)
 - `archived_to` (absolute archive directory path; empty when no prior state existed)
 - `message` (user-facing archive/clear summary)
 - `cleared_at` (ISO timestamp)
+- `force`
+- `timeout_seconds`
+- `active_execution_before`
+- `active_execution_after`
+- `force_cancel_result`
+- `quiescence_result`
+
+Conflict responses (`409`):
+- `detail.detail` (human-readable message)
+- `detail.code` (`active_execution` or `active_execution_timeout`)
+- `detail.data` (structured diagnostics)
 
 ### `GET /api/tasks/execution-order`
 Returns dependency-aware batches for non-terminal tasks.
@@ -198,12 +213,18 @@ Valid transitions:
 - `backlog -> queued|cancelled`
 - `queued -> backlog|cancelled`
 - `in_progress -> cancelled`
-- `in_review -> done|blocked|cancelled`
-- `blocked -> queued|in_review|cancelled`
+- `in_review -> blocked|cancelled`
+- `blocked -> queued|cancelled`
 - `cancelled -> backlog`
 
 Notes:
-- Transitioning to `queued` requires all blockers resolved (`done|cancelled`).
+- Transitioning to `queued` is allowed even when dependencies are unresolved.
+- Execution is still guarded: `POST /api/tasks/{task_id}/run` returns `400`
+  while blockers remain unresolved.
+- Use `POST /api/review/{task_id}/approve` (not `/transition`) to finalize
+  `in_review` tasks.
+- Blocked tasks cannot be forced into `in_review` via `/transition`; use
+  `POST /api/tasks/{task_id}/skip-to-precommit` when eligible.
 
 ### `POST /api/tasks/{task_id}/run`
 Queue/execute a task through the orchestrator.
@@ -219,6 +240,29 @@ Behavior:
 - Clears `error` and `pending_gate`.
 - Increments `retry_count`.
 - Stores retry guidance metadata/history when provided.
+
+### `POST /api/tasks/{task_id}/skip-to-precommit`
+Move an eligible blocked task to pre-commit review without rerunning earlier steps.
+
+Request (optional):
+- `guidance`
+
+Behavior:
+- Only allowed for blocked tasks that satisfy backend eligibility checks
+  (pipeline capability, blocked step compatibility, and retry context availability).
+- Transitions task to `in_review` with `pending_precommit_approval=true`.
+
+### `POST /api/tasks/{task_id}/finalize-merge-conflict`
+Finalize a blocked merge-conflict task after manual Git resolution.
+
+Request (optional):
+- `guidance`
+
+Behavior:
+- Only allowed for `blocked` tasks at `commit` where `metadata.merge_conflict=true`.
+- Verifies Git has no unresolved index entries and that task work is already
+  integrated into the active base branch.
+- Marks task `done` and records an audit action in `human_review_actions`.
 
 ### `POST /api/tasks/{task_id}/cancel`
 Set task status to `cancelled`.
@@ -245,6 +289,18 @@ Run dependency inference across tasks and return inferred edges.
 
 ### `POST /api/tasks/{task_id}/reset-dep-analysis`
 Remove inferred dependency metadata and inferred blocker links for a task.
+
+### `POST /api/tasks/{task_id}/review-commit`
+Create a commit-review task from a completed task's commit.
+
+Behavior:
+- Validates source task exists and has status `done`.
+- Extracts commit SHA from the latest run's commit step.
+- Fetches the git diff and source task plan/description.
+- Creates a new `commit_review` task pre-loaded with source context.
+
+Response:
+- `task` — the newly created review task payload.
 
 ### `GET /api/tasks/{task_id}/workdoc`
 Return task work document payload.

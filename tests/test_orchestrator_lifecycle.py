@@ -58,6 +58,49 @@ def test_in_progress_tasks_recover_on_worker_start(tmp_path: Path) -> None:
         service.shutdown()
 
 
+def test_in_progress_commit_completed_run_recovers_to_done(tmp_path: Path) -> None:
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+
+    task = Task(
+        title="Recover completed commit",
+        task_type="feature",
+        status="in_progress",
+        current_step="commit",
+        pipeline_template=["plan", "implement", "verify", "review", "commit"],
+    )
+    container.tasks.upsert(task)
+    run = RunRecord(
+        task_id=task.id,
+        status="in_progress",
+        started_at=now_iso(),
+        steps=[
+            {"step": "plan", "status": "ok", "ts": now_iso()},
+            {"step": "implement", "status": "ok", "ts": now_iso()},
+            {"step": "verify", "status": "ok", "ts": now_iso()},
+            {"step": "review", "status": "approved", "ts": now_iso()},
+            {"step": "commit", "status": "ok", "ts": now_iso(), "commit": "abc123"},
+        ],
+    )
+    container.runs.upsert(run)
+
+    service = OrchestratorService(container, bus, worker_adapter=DefaultWorkerAdapter())
+    service.ensure_worker()
+    try:
+        recovered_task = container.tasks.get(task.id)
+        assert recovered_task is not None
+        assert recovered_task.status == "done"
+        assert recovered_task.error is None
+        assert recovered_task.current_step is None
+
+        recovered_run = container.runs.get(run.id)
+        assert recovered_run is not None
+        assert recovered_run.status == "done"
+        assert recovered_run.finished_at is not None
+    finally:
+        service.shutdown()
+
+
 def test_resume_reattaches_scheduler_after_shutdown(tmp_path: Path) -> None:
     container = Container(tmp_path)
     bus = EventBus(container.events, container.project_id)

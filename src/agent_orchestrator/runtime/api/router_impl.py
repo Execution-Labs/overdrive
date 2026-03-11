@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from hashlib import sha256
 import uuid
 from datetime import datetime, timezone
@@ -164,11 +163,22 @@ class CreatePlanRevisionRequest(BaseModel):
     feedback_note: Optional[str] = None
 
 
+class TaskGenerationPolicyRequest(BaseModel):
+    """Optional policy controls for child tasks generated from plans."""
+    child_status: Optional[Literal["backlog", "queued"]] = None
+    child_hitl_mode: Optional[Literal["inherit_parent", "autopilot", "supervised", "review_only"]] = None
+    infer_deps: Optional[bool] = None
+
+
 class GenerateTasksRequest(BaseModel):
     """Request body for deriving child tasks from committed or ad hoc plan text."""
     source: Optional[Literal["committed", "revision", "override", "latest"]] = None
     revision_id: Optional[str] = None
     plan_override: Optional[str] = None
+    policy: Optional[TaskGenerationPolicyRequest] = None
+    save_as_default: bool = False
+    # Backward-compatibility shim for legacy clients that send infer_deps
+    # at the top level rather than under policy.
     infer_deps: bool = True
 
 
@@ -177,6 +187,8 @@ class ApproveGateRequest(BaseModel):
     gate: Optional[str] = None
     action: Literal["approve", "request_changes"] = "approve"
     guidance: Optional[str] = None
+    generation_policy: Optional[TaskGenerationPolicyRequest] = None
+    save_generation_policy_as_default: bool = False
 
 
 class OrchestratorControlRequest(BaseModel):
@@ -189,6 +201,7 @@ class OrchestratorSettingsRequest(BaseModel):
     concurrency: int = Field(2, ge=1, le=128)
     auto_deps: bool = True
     max_review_attempts: int = Field(10, ge=1, le=50)
+    max_merge_conflict_attempts: int = Field(3, ge=1, le=10)
     step_timeout_seconds: int = Field(600, ge=1, le=7200)
     gate_reminder_minutes: int = Field(30, ge=0, le=10080)
     gate_stale_minutes: int = Field(0, ge=0, le=10080)
@@ -213,10 +226,20 @@ class WorkerProviderSettingsRequest(BaseModel):
     type: str = "codex"
     command: Optional[str] = None
     reasoning_effort: Optional[str] = None
+    execution_mode: Optional[Literal["sandboxed", "host_access"]] = None
+    capabilities: Optional[list[str]] = None
     endpoint: Optional[str] = None
     model: Optional[str] = None
     temperature: Optional[float] = None
     num_ctx: Optional[int] = None
+
+
+class WorkerEnvironmentSettingsRequest(BaseModel):
+    """Patch payload for worker environment preflight/remediation policy."""
+    auto_prepare: bool = True
+    max_auto_retries: int = Field(3, ge=0, le=20)
+    capability_fallback: bool = True
+    required_capabilities_by_step: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class WorkersSettingsRequest(BaseModel):
@@ -227,6 +250,7 @@ class WorkersSettingsRequest(BaseModel):
     heartbeat_grace_seconds: Optional[int] = Field(None, ge=1, le=7200)
     routing: dict[str, str] = Field(default_factory=dict)
     providers: dict[str, WorkerProviderSettingsRequest] = Field(default_factory=dict)
+    environment: Optional[WorkerEnvironmentSettingsRequest] = None
 
 
 class QualityGateSettingsRequest(BaseModel):
@@ -235,6 +259,13 @@ class QualityGateSettingsRequest(BaseModel):
     high: int = Field(0, ge=0)
     medium: int = Field(0, ge=0)
     low: int = Field(0, ge=0)
+
+
+class TaskGenerationDefaultsRequest(BaseModel):
+    """Default policy for generated child tasks."""
+    child_status: Literal["backlog", "queued"] = "backlog"
+    child_hitl_mode: Literal["inherit_parent", "autopilot", "supervised", "review_only"] = "inherit_parent"
+    infer_deps: bool = True
 
 
 class DefaultsSettingsRequest(BaseModel):
@@ -247,6 +278,7 @@ class DefaultsSettingsRequest(BaseModel):
     )
     dependency_policy: str = "prudent"
     hitl_mode: str = "autopilot"
+    task_generation: TaskGenerationDefaultsRequest = TaskGenerationDefaultsRequest()
 
 
 class LanguageCommandsRequest(BaseModel):
@@ -291,6 +323,16 @@ class RetryTaskRequest(BaseModel):
     start_from_step: Optional[str] = None
 
 
+class SkipToPrecommitRequest(BaseModel):
+    """Optional request body for blocked->pre-commit skip transitions."""
+    guidance: Optional[str] = None
+
+
+class FinalizeMergeConflictRequest(BaseModel):
+    """Optional request body for finalizing manually resolved merge conflicts."""
+    guidance: Optional[str] = None
+
+
 class AddFeedbackRequest(BaseModel):
     """Request body for storing structured reviewer feedback on a task."""
     task_id: str
@@ -315,8 +357,8 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     "backlog": {"queued", "cancelled"},
     "queued": {"backlog", "cancelled"},
     "in_progress": {"cancelled"},
-    "in_review": {"done", "blocked", "cancelled"},
-    "blocked": {"queued", "in_review", "cancelled"},
+    "in_review": {"blocked", "cancelled"},
+    "blocked": {"queued", "cancelled"},
     "done": set(),
     "cancelled": {"backlog"},
 }
@@ -466,6 +508,31 @@ def _normalize_human_blocking_issues(value: Any) -> list[dict[str, str]]:
                 issue[key] = text
         out.append(issue)
     return out[:20]
+
+
+def _normalize_wait_state(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    kind = str(value.get("kind") or "").strip()
+    if not kind:
+        return None
+    wait_state: dict[str, Any] = {"kind": kind}
+    for key in ("step", "reason_code", "next_retry_at", "updated_at"):
+        text = str(value.get(key) or "").strip()
+        if text:
+            wait_state[key] = text
+    for key in ("recoverable",):
+        if key in value:
+            wait_state[key] = bool(value.get(key))
+    for key in ("attempt", "max_attempts"):
+        raw = value.get(key)
+        if raw is None:
+            continue
+        try:
+            wait_state[key] = int(raw)
+        except (TypeError, ValueError):
+            continue
+    return wait_state
 
 
 def _iso_delta_seconds(start: str, end: str) -> Optional[float]:
@@ -632,7 +699,11 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
     }
 
 
-def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[str, Any]:
+def _task_payload(
+    task: Task,
+    container: Optional["Container"] = None,
+    orchestrator: Optional["OrchestratorService"] = None,
+) -> dict[str, Any]:
     payload = task.to_dict()
     payload["hitl_mode"] = normalize_hitl_mode(str(payload.get("hitl_mode") or "autopilot"))
     metadata = task.metadata if isinstance(task.metadata, dict) else {}
@@ -653,22 +724,59 @@ def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[s
                 step_timeout_seconds = candidate
                 break
     payload["step_timeout_seconds"] = step_timeout_seconds
+    wait_state = _normalize_wait_state(task.wait_state)
+    if wait_state is None:
+        pending_gate = str(task.pending_gate or "").strip() or None
+        if pending_gate:
+            wait_state = {
+                "kind": "intervention_wait" if pending_gate == "human_intervention" else "approval_wait",
+                "step": str(task.current_step or metadata.get("pipeline_phase") or "").strip() or None,
+                "reason_code": pending_gate,
+            }
+    payload["wait_state"] = wait_state
     pending_gate = str(task.pending_gate or "").strip() or None
     gate_display = _GATE_DISPLAY_LABELS.get(pending_gate or "", humanize_label(pending_gate) if pending_gate else None)
+    status_kind = str((wait_state or {}).get("kind") or "").strip()
+    if status_kind not in {"approval_wait", "intervention_wait"}:
+        status_kind = (
+            "intervention_wait"
+            if pending_gate == "human_intervention"
+            else ("approval_wait" if pending_gate else "")
+        )
     payload["gate_context"] = {
-        "is_waiting": bool(pending_gate),
+        "is_waiting": bool(pending_gate) or status_kind in {"approval_wait", "intervention_wait"},
         "gate": pending_gate,
         "display": gate_display,
         "step": str(task.current_step or metadata.get("pipeline_phase") or "").strip() or None,
-        "status_kind": (
-            "intervention_wait"
-            if pending_gate == "human_intervention"
-            else ("approval_wait" if pending_gate else None)
-        ),
+        "status_kind": status_kind or None,
     }
     payload["human_blocking_issues"] = _normalize_human_blocking_issues(metadata.get("human_blocking_issues"))
     raw_actions = metadata.get("human_review_actions")
     payload["human_review_actions"] = list(raw_actions) if isinstance(raw_actions, list) else []
+    can_skip_to_precommit = False
+    skip_to_precommit_reason_code: str | None = None
+    if orchestrator is not None:
+        try:
+            can_skip_to_precommit, skip_to_precommit_reason_code = orchestrator.can_skip_to_precommit(task)
+        except Exception:
+            can_skip_to_precommit = False
+            skip_to_precommit_reason_code = "eligibility_unavailable"
+    payload["can_skip_to_precommit"] = bool(can_skip_to_precommit)
+    payload["skip_to_precommit_reason_code"] = (
+        str(skip_to_precommit_reason_code).strip() if skip_to_precommit_reason_code else None
+    )
+    can_finalize_merge_conflict = False
+    finalize_merge_conflict_reason_code: str | None = None
+    if orchestrator is not None:
+        try:
+            can_finalize_merge_conflict, finalize_merge_conflict_reason_code = orchestrator.can_finalize_merge_conflict(task)
+        except Exception:
+            can_finalize_merge_conflict = False
+            finalize_merge_conflict_reason_code = "eligibility_unavailable"
+    payload["can_finalize_merge_conflict"] = bool(can_finalize_merge_conflict)
+    payload["finalize_merge_conflict_reason_code"] = (
+        str(finalize_merge_conflict_reason_code).strip() if finalize_merge_conflict_reason_code else None
+    )
     if container is not None:
         timing_summary = _build_task_timing_summary(task, container)
         if timing_summary is not None:
@@ -676,6 +784,13 @@ def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[s
         summary = _build_execution_summary(task, container)
         if summary is not None:
             payload["execution_summary"] = summary
+    # Strip bulky source-context metadata keys (diff, plan, description) that are
+    # only consumed by the worker adapter.  source_task_id and source_commit_sha
+    # are intentionally kept for UI provenance display.
+    payload_meta = payload.get("metadata")
+    if isinstance(payload_meta, dict):
+        for key in ("source_diff", "source_plan", "source_description"):
+            payload_meta.pop(key, None)
     return payload
 
 
@@ -835,6 +950,22 @@ def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
             default_command = "codex exec" if provider_type == "codex" else "claude -p"
             command = str(raw_item.get("command") or default_command).strip() or default_command
             provider: dict[str, Any] = {"type": provider_type, "command": command}
+            raw_execution_mode = str(raw_item.get("execution_mode") or "").strip().lower()
+            if raw_execution_mode in {"sandboxed", "host_access"}:
+                provider["execution_mode"] = raw_execution_mode
+            elif provider_type == "claude":
+                provider["execution_mode"] = "host_access"
+            else:
+                provider["execution_mode"] = "sandboxed"
+            raw_capabilities = raw_item.get("capabilities")
+            if isinstance(raw_capabilities, list):
+                normalized_caps: list[str] = []
+                for cap in raw_capabilities:
+                    text = str(cap or "").strip().lower()
+                    if text and text not in normalized_caps:
+                        normalized_caps.append(text)
+                if normalized_caps:
+                    provider["capabilities"] = normalized_caps
             model = str(raw_item.get("model") or "").strip()
             if model:
                 provider["model"] = model
@@ -863,12 +994,26 @@ def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
     codex_command = "codex exec"
     codex_model = None
     codex_reasoning = None
+    codex_execution_mode = "sandboxed"
     if isinstance(codex, dict):
         codex_command = str(codex.get("command") or "codex exec").strip() or "codex exec"
         codex_model = str(codex.get("model") or "").strip() or None
         raw_reasoning = str(codex.get("reasoning_effort") or "").strip().lower()
         codex_reasoning = raw_reasoning if raw_reasoning in {"low", "medium", "high"} else None
-    providers["codex"] = {"type": "codex", "command": codex_command}
+        raw_execution_mode = str(codex.get("execution_mode") or "").strip().lower()
+        if raw_execution_mode in {"sandboxed", "host_access"}:
+            codex_execution_mode = raw_execution_mode
+    providers["codex"] = {"type": "codex", "command": codex_command, "execution_mode": codex_execution_mode}
+    if isinstance(codex, dict):
+        raw_caps = codex.get("capabilities")
+        if isinstance(raw_caps, list):
+            codex_caps: list[str] = []
+            for cap in raw_caps:
+                text = str(cap or "").strip().lower()
+                if text and text not in codex_caps:
+                    codex_caps.append(text)
+            if codex_caps:
+                providers["codex"]["capabilities"] = codex_caps
     if codex_model:
         providers["codex"]["model"] = codex_model
     if codex_reasoning:
@@ -876,13 +1021,44 @@ def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
     return providers
 
 
+def _normalize_workers_environment(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    auto_prepare = _coerce_bool(raw.get("auto_prepare"), True)
+    max_auto_retries = _coerce_int(raw.get("max_auto_retries"), 3, minimum=0, maximum=20)
+    capability_fallback = _coerce_bool(raw.get("capability_fallback"), True)
+
+    normalized_required: dict[str, list[str]] = {}
+    raw_required = raw.get("required_capabilities_by_step")
+    if isinstance(raw_required, dict):
+        for raw_step, raw_caps in raw_required.items():
+            step = str(raw_step or "").strip()
+            if not step or not isinstance(raw_caps, list):
+                continue
+            caps: list[str] = []
+            for item in raw_caps:
+                cap = str(item or "").strip().lower()
+                if cap and cap not in caps:
+                    caps.append(cap)
+            if caps:
+                normalized_required[step] = caps
+
+    return {
+        "auto_prepare": auto_prepare,
+        "max_auto_retries": max_auto_retries,
+        "capability_fallback": capability_fallback,
+        "required_capabilities_by_step": normalized_required,
+    }
+
+
 def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     orchestrator = dict(cfg.get("orchestrator") or {})
     routing = dict(cfg.get("agent_routing") or {})
     defaults = dict(cfg.get("defaults") or {})
     quality_gate = dict(defaults.get("quality_gate") or {})
+    task_generation = dict(defaults.get("task_generation") or {})
     workers_cfg = dict(cfg.get("workers") or {})
     workers_providers = _normalize_workers_providers(workers_cfg.get("providers"))
+    workers_environment = _normalize_workers_environment(workers_cfg.get("environment"))
     workers_default = str(workers_cfg.get("default") or "codex").strip() or "codex"
     workers_default_model = str(workers_cfg.get("default_model") or "").strip()
     workers_heartbeat_seconds = _coerce_int(workers_cfg.get("heartbeat_seconds"), 60, minimum=1, maximum=3600)
@@ -898,6 +1074,14 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     prompt_overrides = _normalize_prompt_overrides(project_cfg.get("prompt_overrides"))
     prompt_injections = _normalize_prompt_injections(project_cfg.get("prompt_injections"))
     default_hitl_mode = normalize_hitl_mode(str(defaults.get("hitl_mode") or "autopilot"))
+    task_generation_status = str(task_generation.get("child_status") or "backlog").strip().lower()
+    if task_generation_status not in {"backlog", "queued"}:
+        task_generation_status = "backlog"
+    task_generation_hitl = str(task_generation.get("child_hitl_mode") or "inherit_parent").strip().lower()
+    if task_generation_hitl == "collaborative":
+        task_generation_hitl = "supervised"
+    if task_generation_hitl not in {"inherit_parent", "autopilot", "supervised", "review_only"}:
+        task_generation_hitl = "inherit_parent"
     raw_storage_backend = str(cfg.get("storage_backend") or "sqlite").strip().lower()
     storage_backend = raw_storage_backend if raw_storage_backend == "sqlite" else "sqlite"
     return {
@@ -909,6 +1093,9 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
             "concurrency": _coerce_int(orchestrator.get("concurrency"), 2, minimum=1, maximum=128),
             "auto_deps": _coerce_bool(orchestrator.get("auto_deps"), True),
             "max_review_attempts": _coerce_int(orchestrator.get("max_review_attempts"), 10, minimum=1, maximum=50),
+            "max_merge_conflict_attempts": _coerce_int(
+                orchestrator.get("max_merge_conflict_attempts"), 3, minimum=1, maximum=10
+            ),
             "step_timeout_seconds": _coerce_int(
                 orchestrator.get("step_timeout_seconds"), 600, minimum=1, maximum=7200
             ),
@@ -959,6 +1146,11 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
             },
             "dependency_policy": str(defaults.get("dependency_policy") or "prudent") if str(defaults.get("dependency_policy") or "prudent") in ("permissive", "prudent", "strict") else "prudent",
             "hitl_mode": default_hitl_mode,
+            "task_generation": {
+                "child_status": task_generation_status,
+                "child_hitl_mode": task_generation_hitl,
+                "infer_deps": _coerce_bool(task_generation.get("infer_deps"), True),
+            },
         },
         "workers": {
             "default": workers_default,
@@ -967,6 +1159,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
             "heartbeat_grace_seconds": workers_heartbeat_grace_seconds,
             "routing": _normalize_str_map(workers_cfg.get("routing")),
             "providers": workers_providers,
+            "environment": workers_environment,
         },
         "project": {
             "commands": dict(project_cfg.get("commands") or {}),
@@ -1405,6 +1598,7 @@ def create_router(
     resolve_container: Any,
     resolve_orchestrator: Any,
     job_store: dict[str, dict[str, Any]],
+    terminal_services: dict[str, TerminalService] | None = None,
 ) -> APIRouter:
     """Create the runtime API router.
 
@@ -1417,6 +1611,9 @@ def create_router(
         job_store (dict[str, dict[str, Any]]): Shared in-memory map used to keep
             asynchronous import and plan-refinement job state visible across API
             requests.
+        terminal_services (dict[str, TerminalService] | None): Shared map of
+            per-project terminal service instances.  When ``None`` a new dict is
+            created internally.
 
     Returns:
         APIRouter: Router exposing runtime endpoints for task lifecycle,
@@ -1424,7 +1621,8 @@ def create_router(
         import workflows.
     """
     router = APIRouter(prefix="/api", tags=["api"])
-    terminal_services: dict[str, TerminalService] = {}
+    if terminal_services is None:
+        terminal_services = {}
 
     def _ctx(project_dir: Optional[str]) -> tuple[Container, EventBus, OrchestratorService]:
         container: Container = resolve_container(project_dir)

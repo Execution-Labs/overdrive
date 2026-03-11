@@ -48,6 +48,39 @@ def _clear_cancelled_gate_artifacts(task: Task) -> bool:
     return changed
 
 
+def _latest_run_for_task(service: "OrchestratorService", task: Task) -> RunRecord | None:
+    """Return the newest persisted run for a task, if any."""
+    for run_id in reversed(task.run_ids or []):
+        run = service.container.runs.get(run_id)
+        if run is not None:
+            return run
+    return None
+
+
+def _run_contains_successful_commit(run: RunRecord) -> bool:
+    """Return True when the run captured a successful commit step."""
+    for step_data in reversed(run.steps or []):
+        if not isinstance(step_data, dict):
+            continue
+        if str(step_data.get("step") or "").strip() != "commit":
+            continue
+        return str(step_data.get("status") or "").strip().lower() == "ok"
+    return False
+
+
+def _task_has_done_commit_run(service: "OrchestratorService", task: Task) -> bool:
+    """Return True when task history contains a completed run with successful commit."""
+    for run_id in reversed(task.run_ids or []):
+        run = service.container.runs.get(run_id)
+        if run is None:
+            continue
+        if run.status != "done":
+            continue
+        if _run_contains_successful_commit(run):
+            return True
+    return False
+
+
 def apply_runtime_invariants(
     service: "OrchestratorService",
     *,
@@ -77,6 +110,33 @@ def apply_runtime_invariants(
     for task in tasks:
         changed = False
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        wait_state = task.wait_state if isinstance(task.wait_state, dict) else None
+        wait_kind = str(wait_state.get("kind") or "").strip() if isinstance(wait_state, dict) else ""
+
+        if wait_kind == "intervention_wait" and task.status != "blocked":
+            task.wait_state = None
+            changed = True
+            _record(
+                task,
+                code="stale_intervention_wait_state",
+                message="Cleared intervention wait-state on non-blocked task.",
+            )
+        if wait_kind == "approval_wait" and not task.pending_gate:
+            task.wait_state = None
+            changed = True
+            _record(
+                task,
+                code="stale_approval_wait_state",
+                message="Cleared approval wait-state without pending gate.",
+            )
+        if wait_kind == "auto_recovery_wait" and task.status == "blocked":
+            task.wait_state = None
+            changed = True
+            _record(
+                task,
+                code="stale_auto_recovery_wait_state",
+                message="Cleared auto-recovery wait-state on blocked task.",
+            )
 
         if task.status == "cancelled":
             if _clear_cancelled_gate_artifacts(task):
@@ -85,6 +145,28 @@ def apply_runtime_invariants(
                     task,
                     code="cancelled_cleanup",
                     message="Cleared gate and review artifacts from cancelled task.",
+                )
+            cleanup = service._cleanup_cancelled_task_context(
+                task,
+                active_future_task_ids=active_future_task_ids,
+            )
+            if cleanup.get("deferred"):
+                if cleanup.get("metadata_changed"):
+                    changed = True
+                    _record(
+                        task,
+                        code="cancelled_cleanup_deferred",
+                        message="Deferred cancelled context cleanup because execution is still active.",
+                    )
+            elif any(
+                bool(cleanup.get(key))
+                for key in ("metadata_changed", "worktree_removed", "branch_deleted", "lease_released")
+            ):
+                changed = True
+                _record(
+                    task,
+                    code="cancelled_context_cleanup",
+                    message="Cleaned retained context and branch artifacts from cancelled task.",
                 )
 
         if task.status == "queued" and task.pending_gate:
@@ -117,6 +199,46 @@ def apply_runtime_invariants(
                         task,
                         code="precommit_context_missing",
                         message="Pre-commit review context was missing and task was blocked.",
+                    )
+
+        if task.status == "blocked" and git_backed:
+            latest_run = _latest_run_for_task(service, task)
+            blocked_error = str(task.error or "").strip()
+            if (
+                blocked_error.startswith("Missing worktree workdoc during sync for task")
+                and _task_has_done_commit_run(service, task)
+            ):
+                task.status = "done"
+                task.error = None
+                task.pending_gate = None
+                task.current_step = None
+                task.current_agent_id = None
+                metadata.pop("pipeline_phase", None)
+                metadata.pop("execution_checkpoint", None)
+                metadata.pop("pending_precommit_approval", None)
+                metadata.pop("review_stage", None)
+                changed = True
+                _record(
+                    task,
+                    code="blocked_missing_workdoc_terminal_repair",
+                    message="Recovered blocked task to done because latest run had successful commit.",
+                )
+            context_raw = metadata.get("task_context")
+            context = context_raw if isinstance(context_raw, dict) else {}
+            expected_on_retry = bool(context.get("expected_on_retry"))
+            if expected_on_retry:
+                has_retained = service._resolve_retained_task_worktree(task) is not None
+                preserved_branch = str(metadata.get("preserved_branch") or "").strip()
+                has_preserved = bool(preserved_branch and _branch_exists(container.project_dir, preserved_branch))
+                if not has_retained and not has_preserved:
+                    message = "Retry context missing; request changes to regenerate task context."
+                    if task.error != message:
+                        task.error = message
+                        changed = True
+                    _record(
+                        task,
+                        code="context_missing_for_retry",
+                        message="Blocked task expected retry context but retained/preserved references were missing.",
                     )
 
         if task.status == "in_progress" and not task.pending_gate:
@@ -171,6 +293,24 @@ def apply_runtime_invariants(
                 "message": "Terminal task had active run metadata; run finalized.",
             }
         )
+
+    # If integration health is degraded and the fix task reached a terminal
+    # state, clear the degraded flag so dispatch can resume.  Treating
+    # *cancelled* the same as *done* prevents a deadlock when blocking is
+    # enabled and the user cancels the auto-generated fix task.
+    health = service._integration_health
+    if health.is_degraded():
+        fix_id = health._fix_task_id
+        if fix_id:
+            fix_task = container.tasks.get(fix_id)
+            if fix_task and fix_task.status in ("done", "cancelled"):
+                health.clear_degraded()
+                repairs.append({
+                    "entity": "integration_health",
+                    "task_id": fix_id,
+                    "code": "integration_health_cleared",
+                    "message": f"Fix task {fix_task.status}; integration health restored to healthy.",
+                })
 
     return {
         "source": source,

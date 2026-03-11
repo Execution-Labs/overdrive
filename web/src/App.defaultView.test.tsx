@@ -1206,13 +1206,75 @@ describe('App default route', () => {
     render(<App />)
 
     await waitFor(() => {
-      expect(screen.getByText('Awaiting approval')).toBeInTheDocument()
+      expect(screen.getByText('Awaiting Approval')).toBeInTheDocument()
     })
 
     fireEvent.click(screen.getByText('Task 1'))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /^Plan$/i })).toBeInTheDocument()
     })
+    await waitFor(() => {
+      expect(screen.getByText(/Pending gate:/i)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Approve plan/i })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Logs$/i }))
+    await waitFor(() => {
+      expect(screen.getByText(/Pending gate:/i)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Approve plan/i })).toBeInTheDocument()
+    })
+    expect(screen.getAllByText('Awaiting Approval').length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('shows needs intervention badge for human_intervention gate tasks', async () => {
+    const task = {
+      id: 'task-2',
+      title: 'Task 2',
+      description: 'Infra-limited verification',
+      priority: 'P1',
+      status: 'blocked',
+      task_type: 'feature',
+      blocked_by: [],
+      blocks: [],
+      pending_gate: 'human_intervention',
+      gate_context: {
+        is_waiting: true,
+        gate: 'human_intervention',
+        display: 'Human intervention required',
+        step: 'review',
+        status_kind: 'intervention_wait',
+      },
+    }
+    const mockedFetch = vi.fn().mockImplementation((url, init) => {
+      const u = String(url)
+      const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ columns: { backlog: [], queued: [], in_progress: [], in_review: [], blocked: [task], done: [] } }),
+        })
+      }
+      if (u.includes('/api/tasks/task-2') && method === 'GET') {
+        return Promise.resolve({ ok: true, json: async () => ({ task }) })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [task] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      if (u.includes('/api/agents')) return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      if (u.includes('/api/projects')) return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+    global.fetch = mockedFetch as unknown as typeof fetch
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Needs Intervention')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('Awaiting Approval')).toBeNull()
   })
 
   it('refreshes surfaces when websocket events arrive', async () => {

@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from ..domain.models import PlanRefineJob, PlanRevision, PlanRevisionStatus, Priority, now_iso
+from ...collaboration.modes import normalize_hitl_mode
+from ..domain.models import PlanRefineJob, PlanRevision, PlanRevisionStatus, Priority, TaskStatus, now_iso
 import logging
 
 if TYPE_CHECKING:
@@ -53,6 +54,34 @@ class PlanManager:
         section_end = min(end_candidates) if end_candidates else len(text)
         return text[:section_start] + replacement + text[section_end:]
 
+    def is_plan_mutable(self, task_id: str) -> bool:
+        """Return True when the plan is still open for edits/refines.
+
+        Plan is locked once the pipeline has moved past the planning stage.
+        """
+        task = self._service.container.tasks.get(task_id)
+        if not task:
+            return False
+        if task.status in ("done", "cancelled", "in_review"):
+            return False
+        if task.status in ("backlog", "queued"):
+            return True
+        # At a pre-implementation gate — plan is still open for changes
+        if task.pending_gate in ("before_plan", "before_implement", "before_generate_tasks"):
+            return True
+        if task.current_step == "plan":
+            return True
+        steps = task.pipeline_template or []
+        current = task.current_step
+        if not steps or not current:
+            return True  # can't determine, be permissive
+        if "plan" not in steps:
+            return False  # no plan step, task is executing
+        try:
+            return steps.index(current) <= steps.index("plan")
+        except ValueError:
+            return False  # virtual step (e.g. implement_fix), past plan
+
     def active_plan_refine_job(self, task_id: str) -> PlanRefineJob | None:
         """Return the active queued/running refine job for a task if present."""
         svc = self._service
@@ -89,6 +118,7 @@ class PlanManager:
             "committed_revision_id": committed_revision_id,
             "revisions": [item.to_dict() for item in revisions],
             "active_refine_job": active_job.to_dict() if active_job else None,
+            "plan_mutable": self.is_plan_mutable(task_id),
         }
 
     def create_plan_revision(
@@ -110,6 +140,8 @@ class PlanManager:
         task = svc.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
+        if source == "human_edit" and not self.is_plan_mutable(task_id):
+            raise RuntimeError("Plan is locked — pipeline has moved past the planning stage")
         if not isinstance(task.metadata, dict):
             task.metadata = {}
         body = str(content or "").strip()
@@ -167,6 +199,8 @@ class PlanManager:
                 task.metadata = {}
             if self.active_plan_refine_job(task_id):
                 raise RuntimeError("A plan refine job is already active for this task")
+            if not self.is_plan_mutable(task_id):
+                raise RuntimeError("Plan is locked — pipeline has moved past the planning stage")
             revisions = svc.container.plan_revisions.for_task(task_id)
             revisions.sort(key=lambda item: item.created_at)
             if not revisions:
@@ -350,6 +384,8 @@ class PlanManager:
         task = svc.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
+        if not self.is_plan_mutable(task_id):
+            raise RuntimeError("Plan is locked — pipeline has moved past the planning stage")
         target = svc.container.plan_revisions.get(revision_id)
         if not target or target.task_id != task_id:
             raise ValueError("Revision not found for task")
@@ -449,9 +485,15 @@ class PlanManager:
         task_defs: list[dict[str, Any]],
         *,
         apply_deps: bool = False,
+        generation_policy: dict[str, Any] | None = None,
     ) -> list[str]:
         """Create generated child tasks and optionally wire dependency edges."""
         svc = self._service
+        policy = dict(generation_policy) if isinstance(generation_policy, dict) else {}
+        child_status = str(policy.get("child_status") or "queued").strip().lower()
+        if child_status not in {"backlog", "queued"}:
+            child_status = "queued"
+        child_hitl_mode = normalize_hitl_mode(str(policy.get("child_hitl_mode") or "autopilot"))
         created_ids: list[str] = []
         for item in task_defs:
             if not isinstance(item, dict):
@@ -459,17 +501,31 @@ class PlanManager:
             priority = str(item.get("priority") or parent.priority)
             if priority not in {"P0", "P1", "P2", "P3"}:
                 priority = parent.priority
+            raw_dep_refs = item.get("depends_on")
+            generated_dep_refs = [
+                str(dep_ref or "").strip()
+                for dep_ref in raw_dep_refs
+                if str(dep_ref or "").strip()
+            ] if isinstance(raw_dep_refs, list) else []
+            child_metadata = dict(item.get("metadata") or {})
+            # Generated-task dependency policy is resolved at generation time.
+            # Marking as analyzed prevents redundant global auto-deps passes.
+            child_metadata["deps_analyzed"] = True
+            child_metadata["deps_analysis_source"] = "generate_tasks"
+            child_metadata["generated_depends_on"] = generated_dep_refs
             from ..domain.models import Task
 
             child = Task(
                 title=str(item.get("title") or "Generated task"),
                 description=str(item.get("description") or ""),
-                task_type=str(item.get("task_type") or "feature"),
+                task_type=self._normalize_generated_task_type(item.get("task_type")),
                 priority=cast(Priority, priority),
                 parent_id=parent.id,
+                status=cast(TaskStatus, child_status),
                 source="generated",
                 labels=list(item.get("labels") or []),
-                metadata=dict(item.get("metadata") or {}),
+                hitl_mode=child_hitl_mode,
+                metadata=child_metadata,
             )
             svc.container.tasks.upsert(child)
             created_ids.append(child.id)
@@ -477,7 +533,15 @@ class PlanManager:
                 channel="tasks",
                 event_type="task.created",
                 entity_id=child.id,
-                payload={"parent_id": parent.id, "source": "generate_tasks"},
+                payload={
+                    "parent_id": parent.id,
+                    "source": "generate_tasks",
+                    "generation_policy": {
+                        "child_status": child_status,
+                        "child_hitl_mode": child_hitl_mode,
+                        "infer_deps": bool(policy.get("infer_deps", apply_deps)),
+                    },
+                },
             )
 
         if apply_deps and created_ids:
@@ -520,22 +584,52 @@ class PlanManager:
             svc.container.tasks.upsert(parent)
         return created_ids
 
+    @staticmethod
+    def _normalize_generated_task_type(raw: Any) -> str:
+        """Constrain generated child task types to supported execution paths.
+
+        Generated tasks should use a narrow, stable set so pipeline selection
+        stays deterministic. We currently support:
+        - ``feature`` (default/fallback)
+        - ``bug`` (includes common bugfix aliases)
+        - ``chore``
+        """
+        value = str(raw or "").strip().lower()
+        if value in {"bug", "bugfix", "bug_fix", "bug-fix", "bug fix"}:
+            return "bug"
+        if value == "chore":
+            return "chore"
+        if value == "feature":
+            return "feature"
+        return "feature"
+
     def generate_tasks_from_plan(
         self,
         task_id: str,
         plan_text: str,
         *,
-        infer_deps: bool = True,
-    ) -> list[str]:
+        infer_deps: bool | None = True,
+        generation_policy_overrides: dict[str, Any] | None = None,
+        save_as_default: bool = False,
+    ) -> tuple[list[str], dict[str, Any]]:
         """Generate child tasks from an explicit plan text."""
         svc = self._service
         task = svc.container.tasks.get(task_id)
         if not task:
             raise ValueError(f"Task not found: {task_id}")
+        if not svc.supports_task_generation(task):
+            raise ValueError("Task pipeline does not include generate_tasks")
 
         if not isinstance(task.metadata, dict):
             task.metadata = {}
         task.metadata["plan_for_generation"] = plan_text
+        requested_policy = dict(generation_policy_overrides) if isinstance(generation_policy_overrides, dict) else {}
+        if infer_deps is not None and "infer_deps" not in requested_policy:
+            requested_policy["infer_deps"] = bool(infer_deps)
+        effective_policy = svc.resolve_task_generation_policy(task, request_overrides=requested_policy)
+        if save_as_default:
+            persisted_defaults = svc.persist_task_generation_defaults(task, effective_policy=effective_policy)
+            effective_policy["saved_defaults"] = persisted_defaults
         svc.container.tasks.upsert(task)
 
         try:
@@ -548,11 +642,25 @@ class PlanManager:
                 if detail:
                     raise ValueError(f"Worker returned no generated tasks: {detail}")
                 raise ValueError("Worker returned no generated tasks for the selected plan source")
-            created_ids = self.create_child_tasks(task, task_defs, apply_deps=infer_deps)
+            created_ids = self.create_child_tasks(
+                task,
+                task_defs,
+                apply_deps=bool(effective_policy.get("infer_deps", True)),
+                generation_policy=effective_policy,
+            )
             if not created_ids:
                 raise ValueError("Worker returned generated tasks, but none were valid task objects")
         finally:
             task.metadata.pop("plan_for_generation", None)
             svc.container.tasks.upsert(task)
 
-        return created_ids
+        svc.bus.emit(
+            channel="tasks",
+            event_type="task.generated_from_plan",
+            entity_id=task.id,
+            payload={
+                "created_task_ids": created_ids,
+                "effective_policy": effective_policy,
+            },
+        )
+        return created_ids, effective_policy

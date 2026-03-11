@@ -266,7 +266,6 @@ def test_init_bug_fix_uses_bug_template(service: OrchestratorService, project_di
     )
     canonical = service._init_workdoc(task, project_dir)
     content = canonical.read_text()
-    assert "## Reproduction Evidence" in content
     assert "## Diagnosis" in content
     assert "## Fix Implementation" in content
     assert "## Verification Results" in content
@@ -414,6 +413,7 @@ def test_builtin_pipelines_use_dedicated_templates(service: OrchestratorService)
         "repo_review": "repo_review",
         "security_audit": "security",
         "review": "review",
+        "commit_review": "commit_review",
         "performance": "performance",
         "hotfix": "hotfix",
         "spike": "spike",
@@ -595,6 +595,30 @@ def test_sync_fallback_writes_attempt_scoped_entries(service: OrchestratorServic
     assert "Attempt two verification" in content
 
 
+def test_sync_fallback_keeps_attempt_entries_inside_verification_sentinel(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Repeated verification summaries must stay inside the managed sentinel block."""
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+
+    service._sync_workdoc(task, "verify", project_dir, "first verify summary", attempt=1)
+    service._sync_workdoc(task, "verify", project_dir, "second verify summary", attempt=2)
+
+    content = canonical.read_text(encoding="utf-8")
+    start = content.index("<!-- WORKDOC:SECTION verification_results START -->")
+    end = content.index("<!-- WORKDOC:SECTION verification_results END -->")
+    body = content[start:end]
+    outside = content[end:]
+
+    assert "### Attempt 1" in body
+    assert "first verify summary" in body
+    assert "### Attempt 2" in body
+    assert "second verify summary" in body
+    assert "### Attempt 2" not in outside
+    assert "second verify summary" not in outside
+
+
 def test_sync_worker_changes_preserve_retry_history_sections(
     service: OrchestratorService, task: Task, project_dir: Path
 ) -> None:
@@ -617,6 +641,24 @@ def test_sync_worker_changes_preserve_retry_history_sections(
     assert "Worker-authored plan content" in content
     assert "## Retry Attempt 2" in content
     assert "## REMOVED BY WORKER" not in content
+
+
+def test_retry_attempt_marker_sanitizes_previous_error_to_single_line(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Retry marker should avoid dumping multiline transcript fragments into workdoc."""
+    service._init_workdoc(task, project_dir)
+    task.metadata["retry_guidance"] = {
+        "guidance": "",
+        "previous_error": "Worker stalled (no heartbeat)\nfrom noisy.trace import lines\nthinking\n...",
+    }
+
+    service._append_retry_attempt_marker(task, project_dir=project_dir, attempt=2, start_from_step="plan")
+
+    content = service._workdoc_canonical_path(task.id).read_text(encoding="utf-8")
+    assert "- Previous error: Worker stalled (no heartbeat)" in content
+    assert "from noisy.trace import lines" not in content
+    assert "\nthinking\n" not in content
 
 
 def test_sync_worker_changes_fallback_when_legacy_bounds_missing(
@@ -858,7 +900,7 @@ def test_sync_blocks_on_malformed_sentinel_comment_format(
 def test_shared_verification_section_appends_attempt_numbering_across_steps(
     service: OrchestratorService, project_dir: Path
 ) -> None:
-    """verify/benchmark/reproduce should share one section with append-only attempt blocks."""
+    """verify/benchmark should share one section with append-only attempt blocks."""
     task = Task(
         title="Shared verification",
         description="Validate shared verification section behavior",
@@ -869,7 +911,6 @@ def test_shared_verification_section_appends_attempt_numbering_across_steps(
 
     service._sync_workdoc(task, "verify", project_dir, "verify attempt one", attempt=1)
     service._sync_workdoc(task, "benchmark", project_dir, "benchmark attempt two", attempt=2)
-    service._sync_workdoc(task, "reproduce", project_dir, "reproduce attempt three", attempt=3)
 
     canonical = service._workdoc_canonical_path(task.id)
     content = canonical.read_text(encoding="utf-8")
@@ -877,8 +918,6 @@ def test_shared_verification_section_appends_attempt_numbering_across_steps(
     assert "verify attempt one" in content
     assert "### Attempt 2" in content
     assert "benchmark attempt two" in content
-    assert "### Attempt 3" in content
-    assert "reproduce attempt three" in content
 
 
 def test_sync_verify_ignores_worker_changes_and_uses_summary(
@@ -1257,7 +1296,7 @@ def test_run_non_review_step_blocks_when_workdoc_missing(
 
     ok = service._run_non_review_step(task, run, "implement", attempt=1)
 
-    assert ok is False
+    assert ok == "blocked"
     updated_task = service.container.tasks.get(task.id)
     assert updated_task is not None
     assert updated_task.status == "blocked"
@@ -1279,7 +1318,7 @@ def test_run_non_review_step_blocks_when_workdoc_invalid_encoding(
 
     ok = service._run_non_review_step(task, run, "implement", attempt=1)
 
-    assert ok is False
+    assert ok == "blocked"
     updated_task = service.container.tasks.get(task.id)
     assert updated_task is not None
     assert updated_task.status == "blocked"
@@ -1307,7 +1346,7 @@ def test_run_non_review_step_blocks_when_worktree_workdoc_missing_during_sync(
 
     ok = service._run_non_review_step(task, run, "plan", attempt=1)
 
-    assert ok is False
+    assert ok == "blocked"
     updated_task = service.container.tasks.get(task.id)
     assert updated_task is not None
     assert updated_task.status == "blocked"
@@ -1346,7 +1385,7 @@ def test_run_non_review_step_persists_sync_diagnostics_on_block(
 
     ok = service._run_non_review_step(task, run, "plan", attempt=2)
 
-    assert ok is False
+    assert ok == "blocked"
     updated_task = service.container.tasks.get(task.id)
     assert updated_task is not None
     assert updated_task.status == "blocked"
