@@ -1598,6 +1598,7 @@ def create_router(
     resolve_container: Any,
     resolve_orchestrator: Any,
     job_store: dict[str, dict[str, Any]],
+    terminal_services: dict[str, TerminalService] | None = None,
 ) -> APIRouter:
     """Create the runtime API router.
 
@@ -1610,6 +1611,9 @@ def create_router(
         job_store (dict[str, dict[str, Any]]): Shared in-memory map used to keep
             asynchronous import and plan-refinement job state visible across API
             requests.
+        terminal_services (dict[str, TerminalService] | None): Shared map of
+            per-project terminal service instances.  When ``None`` a new dict is
+            created internally.
 
     Returns:
         APIRouter: Router exposing runtime endpoints for task lifecycle,
@@ -1617,7 +1621,8 @@ def create_router(
         import workflows.
     """
     router = APIRouter(prefix="/api", tags=["api"])
-    terminal_services: dict[str, TerminalService] = {}
+    if terminal_services is None:
+        terminal_services = {}
 
     def _ctx(project_dir: Optional[str]) -> tuple[Container, EventBus, OrchestratorService]:
         container: Container = resolve_container(project_dir)

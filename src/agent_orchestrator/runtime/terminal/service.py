@@ -367,6 +367,32 @@ class TerminalService:
                 logger.debug("Failed to stop terminal session %s", session_id, exc_info=True)
             return session
 
+    def shutdown(self) -> None:
+        """Kill all live PTY sessions and close their file descriptors."""
+        with self._lock:
+            live_items = list(self._live.items())
+        for session_id, live in live_items:
+            try:
+                os.killpg(live.proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                live.proc.wait(timeout=2)
+            except Exception:
+                pass
+            try:
+                os.close(live.master_fd)
+            except OSError:
+                pass
+            session = self._container.terminal_sessions.get(session_id)
+            if session and session.status in {"starting", "running"}:
+                session.status = "exited"
+                session.finished_at = now_iso()
+                session.exit_code = live.proc.poll()
+                self._container.terminal_sessions.upsert(session)
+        with self._lock:
+            self._live.clear()
+
     def read_output(self, *, session_id: str, offset: int = 0, max_bytes: int = 65536) -> tuple[str, int]:
         """Read session output from the persisted log starting at byte offset.
 
