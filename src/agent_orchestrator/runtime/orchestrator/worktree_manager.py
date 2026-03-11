@@ -89,6 +89,7 @@ class WorktreeManager:
             cwd=svc.container.project_dir,
             capture_output=True,
             text=True,
+            timeout=60,
         )
         if worktree_dir.exists():
             shutil.rmtree(worktree_dir, ignore_errors=True)
@@ -127,6 +128,7 @@ class WorktreeManager:
                     check=True,
                     capture_output=True,
                     text=True,
+                    timeout=60,
                 )
                 return
             except subprocess.CalledProcessError as exc:
@@ -142,6 +144,7 @@ class WorktreeManager:
                             check=True,
                             capture_output=True,
                             text=True,
+                            timeout=60,
                         )
                         return
                     except subprocess.CalledProcessError as race_exc:
@@ -156,6 +159,7 @@ class WorktreeManager:
                     cwd=svc.container.project_dir,
                     capture_output=True,
                     text=True,
+                    timeout=10,
                 )
                 time.sleep(self._WORKTREE_ADD_RETRY_SLEEP_SECONDS * attempt)
         if last_exc is not None:
@@ -235,12 +239,14 @@ class WorktreeManager:
                 cwd=svc.container.project_dir,
                 capture_output=True,
                 text=True,
+                timeout=60,
             )
             subprocess.run(
                 ["git", "branch", "-D", branch],
                 cwd=svc.container.project_dir,
                 capture_output=True,
                 text=True,
+                timeout=10,
             )
             svc._integration_health.record_merge()
         return merge_outcome
@@ -261,6 +267,7 @@ class WorktreeManager:
             cwd=svc.container.project_dir,
             capture_output=True,
             text=True,
+            timeout=10,
         )
         if not result.stdout.strip():
             self._clear_preserved_context_metadata(task)
@@ -279,6 +286,7 @@ class WorktreeManager:
                 cwd=svc.container.project_dir,
                 capture_output=True,
                 text=True,
+                timeout=10,
             ).stdout.strip()
 
         subprocess.run(
@@ -286,6 +294,7 @@ class WorktreeManager:
             cwd=svc.container.project_dir,
             capture_output=True,
             text=True,
+            timeout=10,
         )
         svc._integration_health.record_merge()
         self._clear_preserved_context_metadata(task)
@@ -294,7 +303,14 @@ class WorktreeManager:
         return {"status": "ok", "commit_sha": sha}
 
     def _merge_branch_with_classification(self, task: Any, branch: str) -> MergeOutcome:
-        """Merge branch and classify failures into conflict/dirty/git-error buckets."""
+        """Merge branch and classify failures into conflict/dirty/git-error buckets.
+
+        When a merge conflict is detected, the merge lock is released before
+        dispatching to the external worker so that other git operations are not
+        blocked for the duration of the resolution attempt.  Git itself prevents
+        concurrent merges while unmerged entries exist, so releasing the lock is
+        safe in this state.
+        """
         svc = self._service
         try:
             subprocess.run(
@@ -303,12 +319,14 @@ class WorktreeManager:
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=30,
             )
             sha = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=svc.container.project_dir,
                 capture_output=True,
                 text=True,
+                timeout=10,
             ).stdout.strip()
             self._clear_merge_failure_metadata(task)
             return {"status": "ok", "reason_code": "ok", "commit_sha": sha}
@@ -317,13 +335,20 @@ class WorktreeManager:
             stdout = str(exc.stdout or "").strip()
             unmerged = self._safe_list_unmerged_files(svc.container.project_dir)
             if unmerged:
-                resolved = self.resolve_merge_conflict(task, branch)
+                # Release the merge lock before calling the external worker so
+                # other git operations are not blocked during resolution.
+                svc._merge_lock.release()
+                try:
+                    resolved = self.resolve_merge_conflict(task, branch)
+                finally:
+                    svc._merge_lock.acquire()
                 if resolved:
                     sha = subprocess.run(
                         ["git", "rev-parse", "HEAD"],
                         cwd=svc.container.project_dir,
                         capture_output=True,
                         text=True,
+                        timeout=10,
                     ).stdout.strip()
                     self._clear_merge_failure_metadata(task)
                     return {"status": "ok", "reason_code": "ok", "commit_sha": sha}
@@ -372,6 +397,22 @@ class WorktreeManager:
                 "error": error,
                 "blocking_paths": blocking_paths,
                 "stderr_excerpt": stderr_excerpt,
+            }
+        except subprocess.TimeoutExpired:
+            self._abort_merge_if_needed(svc.container.project_dir)
+            error = "Git merge timed out"
+            self._record_merge_failure(
+                task,
+                reason_code="git_error",
+                error=error,
+                stderr_excerpt=error,
+                is_conflict=False,
+            )
+            return {
+                "status": "git_error",
+                "reason_code": "git_error",
+                "error": error,
+                "stderr_excerpt": error,
             }
 
     @staticmethod
@@ -448,6 +489,7 @@ class WorktreeManager:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=10,
             )
         except Exception:
             return False
@@ -463,6 +505,7 @@ class WorktreeManager:
             capture_output=True,
             text=True,
             check=False,
+            timeout=10,
         )
 
     @staticmethod
@@ -562,6 +605,7 @@ class WorktreeManager:
                         check=True,
                         capture_output=True,
                         text=True,
+                        timeout=30,
                     )
                     unresolved_files = self._list_unmerged_files(svc.container.project_dir)
                     if unresolved_files:
@@ -595,6 +639,7 @@ class WorktreeManager:
                         check=True,
                         capture_output=True,
                         text=True,
+                        timeout=30,
                     )
                     return True
                 else:
@@ -642,6 +687,7 @@ class WorktreeManager:
             check=True,
             capture_output=True,
             text=True,
+            timeout=30,
         )
         return [f for f in result.stdout.strip().split("\n") if f]
 
@@ -675,6 +721,7 @@ class WorktreeManager:
                     check=True,
                     capture_output=True,
                     text=True,
+                    timeout=10,
                 )
             except Exception:
                 logger.warning("Failed to reset conflicted file before retry: %s", fpath, exc_info=True)
@@ -734,6 +781,7 @@ class WorktreeManager:
                     cwd=svc.container.project_dir,
                     capture_output=True,
                     text=True,
+                    timeout=60,
                 )
                 if branch_name not in referenced_branches:
                     subprocess.run(
@@ -741,6 +789,7 @@ class WorktreeManager:
                         cwd=svc.container.project_dir,
                         capture_output=True,
                         text=True,
+                        timeout=10,
                     )
 
     def ensure_branch(self) -> Optional[str]:
@@ -766,6 +815,7 @@ class WorktreeManager:
                     check=True,
                     capture_output=True,
                     text=True,
+                    timeout=10,
                 )
                 branch = result.stdout.strip()
                 if branch and branch != "HEAD":
@@ -788,13 +838,14 @@ class WorktreeManager:
         if working_dir is None:
             self.ensure_branch()
         try:
-            subprocess.run(["git", "add", "-A"], cwd=cwd, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "add", "-A"], cwd=cwd, check=True, capture_output=True, text=True, timeout=30)
             subprocess.run(
                 ["git", "commit", "-m", f"task({task.id}): {task.title[:60]}"],
                 cwd=cwd,
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=30,
             )
             sha = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
@@ -802,6 +853,7 @@ class WorktreeManager:
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=10,
             ).stdout.strip()
             return sha
         except subprocess.CalledProcessError:
@@ -816,6 +868,7 @@ class WorktreeManager:
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=10,
             )
             return bool(result.stdout.strip())
         except subprocess.CalledProcessError:
@@ -853,6 +906,7 @@ class WorktreeManager:
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=10,
             )
             return bool(result.stdout.strip())
         except subprocess.CalledProcessError:
@@ -890,6 +944,7 @@ class WorktreeManager:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=10,
             )
             if before_head_result.returncode == 0:
                 before_head = before_head_result.stdout.strip()
@@ -902,6 +957,7 @@ class WorktreeManager:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=10,
             )
             if after_head_result.returncode == 0:
                 after_head = after_head_result.stdout.strip()
@@ -948,6 +1004,7 @@ class WorktreeManager:
                     capture_output=True,
                     text=True,
                     check=True,
+                    timeout=10,
                 )
                 if not result.stdout.strip():
                     return {
@@ -965,6 +1022,7 @@ class WorktreeManager:
                 cwd=svc.container.project_dir,
                 capture_output=True,
                 text=True,
+                timeout=60,
             )
             task.metadata["preserved_branch"] = branch
             if base_ref != "HEAD":

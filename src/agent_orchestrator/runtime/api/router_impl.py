@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from hashlib import sha256
 import uuid
 from datetime import datetime, timezone

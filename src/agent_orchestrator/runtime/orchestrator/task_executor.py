@@ -95,6 +95,7 @@ class TaskExecutor:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=10,
             )
         except Exception:
             return False
@@ -283,6 +284,7 @@ class TaskExecutor:
                                 cwd=svc.container.project_dir,
                                 capture_output=True,
                                 text=True,
+                                timeout=60,
                             )
                         try:
                             worktree_dir = svc._create_worktree_from_branch(task, old_preserved)
@@ -884,6 +886,7 @@ class TaskExecutor:
                             cwd=commit_cwd,
                             capture_output=True,
                             text=True,
+                            timeout=10,
                         )
                         commit_sha = head_result.stdout.strip() if head_result.returncode == 0 else None
                     if not commit_sha:
@@ -994,12 +997,14 @@ class TaskExecutor:
                         cwd=svc.container.project_dir,
                         capture_output=True,
                         text=True,
+                        timeout=60,
                     )
                     subprocess.run(
                         ["git", "branch", "-D", f"task-{task.id}"],
                         cwd=svc.container.project_dir,
                         capture_output=True,
                         text=True,
+                        timeout=10,
                     )
                     worktree_dir = None
                     task.metadata.pop("worktree_dir", None)
@@ -1058,6 +1063,7 @@ class TaskExecutor:
                         cwd=svc.container.project_dir,
                         capture_output=True,
                         text=True,
+                        timeout=60,
                     )
                     worktree_removed = True
                     if task.metadata.pop("worktree_dir", None):
@@ -1071,6 +1077,7 @@ class TaskExecutor:
                             cwd=svc.container.project_dir,
                             capture_output=True,
                             text=True,
+                            timeout=10,
                         )
 
             if task.status == "cancelled":

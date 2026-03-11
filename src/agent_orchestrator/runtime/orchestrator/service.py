@@ -222,6 +222,14 @@ class OrchestratorService:
 
     @staticmethod
     def _execution_checkpoint(task: Task) -> dict[str, Any]:
+        """Return the execution checkpoint dict from task metadata.
+
+        Args:
+            task: Task whose checkpoint to retrieve.
+
+        Returns:
+            Checkpoint dict, or an empty dict if none is stored.
+        """
         if not isinstance(task.metadata, dict):
             task.metadata = {}
         raw = task.metadata.get("execution_checkpoint")
@@ -229,6 +237,12 @@ class OrchestratorService:
 
     @staticmethod
     def _save_execution_checkpoint(task: Task, checkpoint: dict[str, Any]) -> None:
+        """Persist or clear the execution checkpoint in task metadata.
+
+        Args:
+            task: Task to update.
+            checkpoint: Checkpoint dict to store, or empty dict to clear.
+        """
         if not isinstance(task.metadata, dict):
             task.metadata = {}
         if checkpoint:
@@ -237,12 +251,22 @@ class OrchestratorService:
             task.metadata.pop("execution_checkpoint", None)
 
     def _is_resume_requested(self, task: Task) -> bool:
+        """Return whether an in-progress task has a pending resume request.
+
+        Args:
+            task: Task to check.
+        """
         if task.status != "in_progress" or task.pending_gate:
             return False
         checkpoint = self._execution_checkpoint(task)
         return bool(str(checkpoint.get("resume_requested_at") or "").strip())
 
     def _clear_resume_request(self, task: Task) -> None:
+        """Remove the resume_requested_at field from the task checkpoint.
+
+        Args:
+            task: Task whose resume request to clear.
+        """
         checkpoint = self._execution_checkpoint(task)
         if not checkpoint:
             return
@@ -250,6 +274,15 @@ class OrchestratorService:
         self._save_execution_checkpoint(task, checkpoint)
 
     def _consume_gate_resume_approval(self, task: Task, gate_name: str) -> bool:
+        """Consume a gate approval if it matches, clearing the wait state.
+
+        Args:
+            task: Task with a pending gate.
+            gate_name: Gate name that must match the approved checkpoint.
+
+        Returns:
+            ``True`` when the approval was consumed, ``False`` otherwise.
+        """
         checkpoint = self._execution_checkpoint(task)
         approved_gate = str(checkpoint.get("approved_gate") or "").strip()
         if approved_gate != gate_name:
@@ -269,6 +302,13 @@ class OrchestratorService:
         return True
 
     def _mark_gate_waiting(self, task: Task, gate_name: str, *, resume_step: str | None = None) -> None:
+        """Pause the task at a human gate and record checkpoint state.
+
+        Args:
+            task: Task to pause.
+            gate_name: Identifier for the gate (e.g. ``"before_implement"``).
+            resume_step: Pipeline step to resume from after approval.
+        """
         if not isinstance(task.metadata, dict):
             task.metadata = {}
         resolved_resume_step = resume_step if resume_step is not None else self._GATE_RESUME_STEP.get(gate_name, task.current_step or "")
@@ -308,6 +348,18 @@ class OrchestratorService:
         max_attempts: int | None = None,
         next_retry_at: str | None = None,
     ) -> None:
+        """Attach structured wait-state metadata to a task.
+
+        Args:
+            task: Task to annotate.
+            kind: Wait category (e.g. ``"approval"``, ``"intervention"``).
+            step: Pipeline step the task is waiting at.
+            reason_code: Machine-readable reason identifier.
+            recoverable: Whether the wait can auto-resolve.
+            attempt: Current retry attempt number.
+            max_attempts: Maximum allowed retries.
+            next_retry_at: ISO timestamp for the next retry window.
+        """
         wait_state: dict[str, Any] = {"kind": str(kind).strip() or "none"}
         if step:
             wait_state["step"] = str(step).strip()
@@ -326,6 +378,11 @@ class OrchestratorService:
 
     @staticmethod
     def _clear_wait_state(task: Task) -> None:
+        """Remove the wait-state annotation from a task.
+
+        Args:
+            task: Task whose wait state to clear.
+        """
         task.wait_state = None
 
     def _gate_for_step(
@@ -367,6 +424,14 @@ class OrchestratorService:
 
     @staticmethod
     def _parse_iso_epoch(value: Any) -> float | None:
+        """Parse an ISO-8601 timestamp string into a UTC epoch float.
+
+        Args:
+            value: Raw timestamp value (string or None).
+
+        Returns:
+            Epoch seconds as a float, or ``None`` on invalid input.
+        """
         raw = str(value or "").strip()
         if not raw:
             return None
@@ -381,6 +446,13 @@ class OrchestratorService:
 
     @staticmethod
     def _coerce_nonnegative_int(value: Any, default: int, *, maximum: int) -> int:
+        """Coerce a value to a non-negative integer within bounds.
+
+        Args:
+            value: Raw value to parse.
+            default: Fallback when parsing fails.
+            maximum: Upper bound to clamp the result.
+        """
         try:
             parsed = int(value)
         except (TypeError, ValueError):
@@ -392,6 +464,7 @@ class OrchestratorService:
         return parsed
 
     def _reconcile_interval_seconds(self) -> int:
+        """Return the configured reconciliation interval in seconds."""
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         return self._coerce_nonnegative_int(
@@ -399,21 +472,29 @@ class OrchestratorService:
         )
 
     def _tick_stale_seconds(self) -> int:
+        """Return the tick staleness threshold in seconds."""
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         return self._coerce_nonnegative_int(orchestrator_cfg.get("tick_stale_seconds"), 15, maximum=3600)
 
     def _tick_failure_threshold(self) -> int:
+        """Return the consecutive tick failure count before alerting."""
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         return max(1, self._coerce_nonnegative_int(orchestrator_cfg.get("tick_failure_threshold"), 5, maximum=1000))
 
     def _lease_ttl_seconds(self) -> int:
+        """Return the execution lease time-to-live in seconds."""
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         return max(15, self._coerce_nonnegative_int(orchestrator_cfg.get("lease_ttl_seconds"), 120, maximum=86400))
 
     def _acquire_execution_lease(self, task: Task) -> None:
+        """Create a new execution lease for a task being dispatched.
+
+        Args:
+            task: Task to lease.
+        """
         if not isinstance(task.metadata, dict):
             task.metadata = {}
         task.metadata.pop("execution_lease", None)
@@ -431,6 +512,11 @@ class OrchestratorService:
         self.container.db.save_execution_lease(task.id, lease)
 
     def _heartbeat_execution_lease(self, task: Task) -> None:
+        """Refresh the heartbeat and expiry of an existing execution lease.
+
+        Args:
+            task: Task whose lease to extend.
+        """
         if not isinstance(task.metadata, dict):
             task.metadata = {}
         task.metadata.pop("execution_lease", None)
@@ -1382,9 +1468,9 @@ class OrchestratorService:
         if isinstance(value, str):
             lowered = value.strip().lower()
             if lowered in {"true", "1", "yes", "on"}:
-                return "ok"
+                return True
             if lowered in {"false", "0", "no", "off"}:
-                return "blocked"
+                return False
         if isinstance(value, (int, float)):
             return bool(value)
         return default
@@ -2846,23 +2932,6 @@ class OrchestratorService:
             payload={"step": step, "violations": violations},
         )
         self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
-
-    @staticmethod
-    def _verify_failure_mentions_changed_files(summary: str, changed_files: list[str]) -> bool:
-        text = str(summary or "").lower()
-        if not text or not changed_files:
-            return False
-        for path in changed_files:
-            rel = OrchestratorService._rel_path(path).lower()
-            if not rel:
-                continue
-            basename = Path(rel).name.lower()
-            # Match both full path and basename when meaningful.
-            if rel in text:
-                return "ok"
-            if len(basename) >= 5 and basename in text:
-                return "ok"
-        return False
 
     @staticmethod
     def _baseline_debt_signature(summary: str, changed_files: list[str]) -> str:

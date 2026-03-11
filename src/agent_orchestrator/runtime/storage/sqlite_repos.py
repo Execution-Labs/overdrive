@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
 from typing import Any, Callable, List, Optional
 
 from ..domain.models import AgentRecord, PlanRefineJob, PlanRevision, ReviewCycle, RunRecord, Task, TerminalSession, now_iso
@@ -20,6 +19,7 @@ from .interfaces import (
     TerminalSessionRepository,
 )
 from .sqlite_db import SQLiteDB
+from .task_helpers import is_retry_backoff_elapsed, is_resume_requested, priority_rank
 
 
 def _json_dumps(payload: dict[str, Any]) -> str:
@@ -34,22 +34,9 @@ def _json_loads(value: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _priority_rank(priority: str) -> int:
-    return {"P0": 0, "P1": 1, "P2": 2, "P3": 3}.get(priority, 99)
-
-
-def _is_retry_backoff_elapsed(task: Task) -> bool:
-    """Return whether task-level retry backoff window has elapsed."""
-    if task.status != "queued" or not isinstance(task.metadata, dict):
-        return True
-    raw_not_before = str(task.metadata.get("environment_next_retry_at") or "").strip()
-    if not raw_not_before:
-        return True
-    try:
-        not_before = datetime.fromisoformat(raw_not_before.replace("Z", "+00:00"))
-    except Exception:
-        return True
-    return datetime.now(timezone.utc) >= not_before
+_priority_rank = priority_rank
+_is_retry_backoff_elapsed = is_retry_backoff_elapsed
+_resume_requested = is_resume_requested
 
 
 class SqliteTaskRepository(TaskRepository):
@@ -114,20 +101,10 @@ class SqliteTaskRepository(TaskRepository):
             rows = conn.execute("SELECT payload FROM tasks").fetchall()
             tasks = [Task.from_dict(_json_loads(str(row["payload"]))) for row in rows]
 
-            def _resume_requested(task: Task) -> bool:
-                if task.status != "in_progress" or task.pending_gate:
-                    return False
-                if not isinstance(task.metadata, dict):
-                    return False
-                checkpoint = task.metadata.get("execution_checkpoint")
-                if not isinstance(checkpoint, dict):
-                    return False
-                return bool(str(checkpoint.get("resume_requested_at") or "").strip())
-
             in_progress = [
                 task
                 for task in tasks
-                if task.status == "in_progress" and not task.pending_gate and not _resume_requested(task)
+                if task.status == "in_progress" and not task.pending_gate and not is_resume_requested(task)
             ]
             if len(in_progress) >= max_in_progress:
                 return None

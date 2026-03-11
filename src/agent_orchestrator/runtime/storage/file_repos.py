@@ -6,7 +6,6 @@ import json
 import os
 import threading
 import uuid
-from datetime import datetime, timezone
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Generic, List, Optional, TypeVar
@@ -23,6 +22,7 @@ from .interfaces import (
     RunRepository,
     TaskRepository,
 )
+from .task_helpers import is_retry_backoff_elapsed, is_resume_requested, priority_rank
 
 try:
     import yaml  # type: ignore[import-untyped]
@@ -38,21 +38,9 @@ def _require_yaml() -> None:
 T = TypeVar("T")
 
 
-def _priority_rank(priority: str) -> int:
-    return {"P0": 0, "P1": 1, "P2": 2, "P3": 3}.get(priority, 99)
-
-
-def _is_retry_backoff_elapsed(task: Task) -> bool:
-    if task.status != "queued" or not isinstance(task.metadata, dict):
-        return True
-    raw_not_before = str(task.metadata.get("environment_next_retry_at") or "").strip()
-    if not raw_not_before:
-        return True
-    try:
-        not_before = datetime.fromisoformat(raw_not_before.replace("Z", "+00:00"))
-    except Exception:
-        return True
-    return datetime.now(timezone.utc) >= not_before
+_priority_rank = priority_rank
+_is_retry_backoff_elapsed = is_retry_backoff_elapsed
+_resume_requested = is_resume_requested
 
 
 class _YamlCollectionRepo(Generic[T]):
@@ -208,20 +196,10 @@ class FileTaskRepository(TaskRepository):
             with self._repo._lock:
                 tasks = self._repo._load()
 
-                def _resume_requested(task: Task) -> bool:
-                    if task.status != "in_progress" or task.pending_gate:
-                        return False
-                    if not isinstance(task.metadata, dict):
-                        return False
-                    checkpoint = task.metadata.get("execution_checkpoint")
-                    if not isinstance(checkpoint, dict):
-                        return False
-                    return bool(str(checkpoint.get("resume_requested_at") or "").strip())
-
                 in_progress = [
                     t
                     for t in tasks
-                    if t.status == "in_progress" and not t.pending_gate and not _resume_requested(t)
+                    if t.status == "in_progress" and not t.pending_gate and not is_resume_requested(t)
                 ]
                 if len(in_progress) >= max_in_progress:
                     return None
