@@ -5838,7 +5838,7 @@ export default function App() {
                   {fileChunks.length > 0 ? (
                     <div className="diff-file-sections">
                       {fileChunks.map((chunk) => (
-                        <details key={chunk.path} className="diff-file-section" open>
+                        <details key={chunk.path} className="diff-file-section">
                           <summary className="diff-file-header">
                             <code className="diff-file-name">{chunk.path}</code>
                             <span className="diff-file-stats">
