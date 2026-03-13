@@ -947,7 +947,7 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert baseline.json()["orchestrator"]["auto_deps"] is True
         assert baseline.json()["orchestrator"]["max_review_attempts"] == 10
         assert baseline.json()["orchestrator"]["max_merge_conflict_attempts"] == 3
-        assert baseline.json()["orchestrator"]["step_timeout_seconds"] == 600
+        assert baseline.json()["orchestrator"]["step_timeout_seconds"] == 0
         assert baseline.json()["orchestrator"]["gate_reminder_minutes"] == 30
         assert baseline.json()["orchestrator"]["gate_stale_minutes"] == 0
         assert baseline.json()["orchestrator"]["gate_max_wait_minutes"] == 0

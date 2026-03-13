@@ -10,6 +10,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from ...collaboration.modes import normalize_hitl_mode
+from ..orchestrator.env_resolver import resolved_env_vars_view
 from ..orchestrator.human_guidance import (
     clear_active_human_guidance,
     set_active_human_guidance,
@@ -23,6 +24,7 @@ OrchestratorControlRequest = impl.OrchestratorControlRequest
 ReviewActionRequest = impl.ReviewActionRequest
 UpdateSettingsRequest = impl.UpdateSettingsRequest
 _settings_payload = impl._settings_payload
+_mask_settings_env_vars = impl._mask_settings_env_vars
 _task_payload = impl._task_payload
 _workers_health_payload = impl._workers_health_payload
 _workers_routing_payload = impl._workers_routing_payload
@@ -456,7 +458,14 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         """
         container, _, _ = deps.ctx(project_dir)
         cfg = container.config.load()
-        return _settings_payload(cfg)
+        payload = _mask_settings_env_vars(_settings_payload(cfg))
+        try:
+            payload["resolved_env_vars"] = resolved_env_vars_view(
+                project_dir=container.project_dir, cfg=cfg,
+            )
+        except Exception:
+            payload["resolved_env_vars"] = []
+        return payload
 
     @router.get("/workers/health")
     async def workers_health(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -560,7 +569,9 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             if "providers" in incoming_workers:
                 workers_cfg["providers"] = dict(incoming_workers.get("providers") or {})
             if "environment" in incoming_workers:
-                workers_cfg["environment"] = dict(incoming_workers.get("environment") or {})
+                existing_env = dict(workers_cfg.get("environment") or {})
+                existing_env.update(dict(incoming_workers.get("environment") or {}))
+                workers_cfg["environment"] = existing_env
 
             normalized_workers = _settings_payload({"workers": workers_cfg})["workers"]
             cfg["workers"] = normalized_workers
@@ -629,4 +640,11 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             entity_id=container.project_id,
             payload={"sections": touched_sections},
         )
-        return _settings_payload(cfg)
+        payload = _mask_settings_env_vars(_settings_payload(cfg))
+        try:
+            payload["resolved_env_vars"] = resolved_env_vars_view(
+                project_dir=container.project_dir, cfg=cfg,
+            )
+        except Exception:
+            payload["resolved_env_vars"] = []
+        return payload

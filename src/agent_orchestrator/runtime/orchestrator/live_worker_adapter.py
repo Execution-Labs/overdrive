@@ -21,6 +21,7 @@ from ...workers.run import WorkerRunResult, run_worker
 from ..domain.models import RunRecord, Task, now_iso
 from ..domain.scope_contract import normalize_scope_contract
 from ..storage.container import Container
+from .env_resolver import resolve_env_vars
 from .environment_preflight import (
     provider_has_capabilities,
     required_capabilities_for_step,
@@ -1861,6 +1862,13 @@ class LiveWorkerAdapter:
             fresh = self._container.tasks.get(task.id)
             return fresh is not None and fresh.status == "cancelled"
 
+        # Build merged env vars for subprocess workers (codex/claude only).
+        # Always pass the resolved dict so auto-detected, config, and task
+        # env vars reach the subprocess.
+        worker_env: dict[str, str] | None = None
+        if spec.type in {"codex", "claude"}:
+            worker_env = resolve_env_vars(project_dir=project_dir, cfg=cfg, task=task)
+
         try:
             result = run_worker(
                 spec=spec,
@@ -1872,6 +1880,7 @@ class LiveWorkerAdapter:
                 heartbeat_grace_seconds=heartbeat_grace_seconds,
                 progress_path=progress_path,
                 is_cancelled=_check_task_cancelled,
+                env=worker_env,
             )
         except WorkerCancelledError:
             raise  # Let the orchestrator handle cancellation
@@ -1964,7 +1973,7 @@ class LiveWorkerAdapter:
                 prompt=formatter_prompt,
                 project_dir=project_dir,
                 run_dir=fmt_run_dir,
-                timeout_seconds=60,
+                timeout_seconds=0,
                 heartbeat_seconds=30,
                 heartbeat_grace_seconds=60,
                 progress_path=progress_path,
@@ -2032,7 +2041,7 @@ class LiveWorkerAdapter:
                 prompt=formatter_prompt,
                 project_dir=project_dir,
                 run_dir=fmt_run_dir,
-                timeout_seconds=60,
+                timeout_seconds=0,
                 heartbeat_seconds=30,
                 heartbeat_grace_seconds=60,
                 progress_path=progress_path,
@@ -2086,7 +2095,7 @@ class LiveWorkerAdapter:
                 prompt=formatter_prompt,
                 project_dir=project_dir,
                 run_dir=fmt_run_dir,
-                timeout_seconds=90,
+                timeout_seconds=0,
                 heartbeat_seconds=30,
                 heartbeat_grace_seconds=60,
                 progress_path=progress_path,
@@ -2368,7 +2377,7 @@ class LiveWorkerAdapter:
                 prompt=prompt,
                 project_dir=project_dir,
                 run_dir=fmt_run_dir,
-                timeout_seconds=120,
+                timeout_seconds=0,
                 heartbeat_seconds=30,
                 heartbeat_grace_seconds=90,
                 progress_path=progress_path,
@@ -2465,7 +2474,7 @@ class LiveWorkerAdapter:
                 prompt=prompt,
                 project_dir=self._container.project_dir,
                 run_dir=fmt_run_dir,
-                timeout_seconds=60,
+                timeout_seconds=0,
                 heartbeat_seconds=30,
                 heartbeat_grace_seconds=90,
                 progress_path=progress_path,

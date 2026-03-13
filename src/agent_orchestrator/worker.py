@@ -64,6 +64,7 @@ def _run_codex_worker(
     expected_run_id: Optional[str] = None,
     on_spawn: Optional[Callable[[int], None]] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
+    env: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     prompt_path = run_dir / "prompt.txt"
     prompt_path.write_text(prompt)
@@ -98,6 +99,7 @@ def _run_codex_worker(
     process = subprocess.Popen(
         command_parts,
         cwd=project_dir,
+        env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

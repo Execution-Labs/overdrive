@@ -394,6 +394,7 @@ def run_worker(
     expected_run_id: Optional[str] = None,
     on_spawn: Optional[Callable[[int], None]] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
+    env: Optional[dict[str, str]] = None,
 ) -> WorkerRunResult:
     """Run the selected provider and return a normalized run result.
 
@@ -409,6 +410,8 @@ def run_worker(
         expected_run_id (Optional[str]): Identifier for the related expected run.
         on_spawn (Optional[Callable[[int], None]]): On spawn for this call.
         is_cancelled (Optional[Callable[[], bool]]): Is cancelled for this call.
+        env (Optional[dict[str, str]]): Environment variables for the subprocess.
+            ``None`` inherits the parent process environment.
 
     Returns:
         WorkerRunResult: Result produced by this call.
@@ -429,6 +432,7 @@ def run_worker(
             expected_run_id=expected_run_id,
             on_spawn=on_spawn,
             is_cancelled=is_cancelled,
+            env=env,
         )
         stdout_text = _read_text(str(run_result.get("stdout_path") or ""))
         response_text = stdout_text

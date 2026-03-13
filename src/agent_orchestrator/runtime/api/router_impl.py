@@ -53,7 +53,7 @@ class CreateTaskRequest(BaseModel):
     dependency_policy: str = ""
     source: str = "manual"
     worker_model: Optional[str] = None
-    step_timeout_seconds: Optional[int] = Field(None, ge=1, le=7200)
+    step_timeout_seconds: Optional[int] = Field(None, ge=0, le=7200)
     metadata: dict[str, Any] = Field(default_factory=dict)
     project_commands: Optional[dict[str, dict[str, str]]] = None
     classifier_pipeline_id: Optional[str] = None
@@ -90,7 +90,7 @@ class UpdateTaskRequest(BaseModel):
     hitl_mode: Optional[str] = None
     dependency_policy: Optional[str] = None
     worker_model: Optional[str] = None
-    step_timeout_seconds: Optional[int] = Field(None, ge=1, le=7200)
+    step_timeout_seconds: Optional[int] = Field(None, ge=0, le=7200)
     metadata: Optional[dict[str, Any]] = None
     project_commands: Optional[dict[str, dict[str, str]]] = None
 
@@ -202,7 +202,7 @@ class OrchestratorSettingsRequest(BaseModel):
     auto_deps: bool = True
     max_review_attempts: int = Field(10, ge=1, le=50)
     max_merge_conflict_attempts: int = Field(3, ge=1, le=10)
-    step_timeout_seconds: int = Field(600, ge=1, le=7200)
+    step_timeout_seconds: int = Field(0, ge=0, le=7200)
     gate_reminder_minutes: int = Field(30, ge=0, le=10080)
     gate_stale_minutes: int = Field(0, ge=0, le=10080)
     gate_max_wait_minutes: int = Field(0, ge=0, le=43200)
@@ -240,6 +240,7 @@ class WorkerEnvironmentSettingsRequest(BaseModel):
     max_auto_retries: int = Field(3, ge=0, le=20)
     capability_fallback: bool = True
     required_capabilities_by_step: dict[str, list[str]] = Field(default_factory=dict)
+    env_vars: Optional[dict[str, str]] = None
 
 
 class WorkersSettingsRequest(BaseModel):
@@ -792,6 +793,9 @@ def _task_payload(
     if isinstance(payload_meta, dict):
         for key in ("source_diff", "source_plan", "source_description"):
             payload_meta.pop(key, None)
+        # Mask env var values in task payloads (security)
+        if "env_vars" in payload_meta and isinstance(payload_meta["env_vars"], dict):
+            payload_meta["env_vars"] = {k: "***" for k in payload_meta["env_vars"]}
     return payload
 
 
@@ -1043,12 +1047,23 @@ def _normalize_workers_environment(value: Any) -> dict[str, Any]:
             if caps:
                 normalized_required[step] = caps
 
-    return {
+    normalized_env_vars: dict[str, str] = {}
+    raw_env_vars = raw.get("env_vars")
+    if isinstance(raw_env_vars, dict):
+        for raw_key, raw_val in raw_env_vars.items():
+            key = str(raw_key or "").strip()
+            if key and isinstance(raw_val, str):
+                normalized_env_vars[key] = raw_val
+
+    result: dict[str, Any] = {
         "auto_prepare": auto_prepare,
         "max_auto_retries": max_auto_retries,
         "capability_fallback": capability_fallback,
         "required_capabilities_by_step": normalized_required,
     }
+    if normalized_env_vars:
+        result["env_vars"] = normalized_env_vars
+    return result
 
 
 def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -1098,7 +1113,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
                 orchestrator.get("max_merge_conflict_attempts"), 3, minimum=1, maximum=10
             ),
             "step_timeout_seconds": _coerce_int(
-                orchestrator.get("step_timeout_seconds"), 600, minimum=1, maximum=7200
+                orchestrator.get("step_timeout_seconds"), 0, minimum=0, maximum=7200
             ),
             "gate_reminder_minutes": _coerce_int(
                 orchestrator.get("gate_reminder_minutes"), 30, minimum=0, maximum=10080
@@ -1169,6 +1184,22 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
             "prompt_defaults": prompt_defaults,
         },
     }
+
+
+def _mask_settings_env_vars(payload: dict[str, Any]) -> dict[str, Any]:
+    """Mask env_vars values in a settings payload for API responses.
+
+    Must be called at the response boundary — never before persistence.
+    """
+    workers = payload.get("workers")
+    if isinstance(workers, dict):
+        env = workers.get("environment")
+        if isinstance(env, dict) and "env_vars" in env:
+            workers["environment"] = dict(env)
+            workers["environment"]["env_vars"] = {
+                k: "***" for k in env["env_vars"]
+            }
+    return payload
 
 
 def _workers_health_payload(cfg: dict[str, Any]) -> dict[str, Any]:
