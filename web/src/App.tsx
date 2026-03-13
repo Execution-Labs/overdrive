@@ -544,7 +544,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
     auto_deps: true,
     max_review_attempts: 10,
     max_merge_conflict_attempts: 3,
-    step_timeout_seconds: 600,
+    step_timeout_seconds: 0,
   },
   agent_routing: {
     default_role: 'general',
@@ -1173,7 +1173,7 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
         ? Math.min(10, Math.max(1, Math.floor(maybeMaxMergeConflictAttempts)))
         : DEFAULT_SETTINGS.orchestrator.max_merge_conflict_attempts,
       step_timeout_seconds: Number.isFinite(maybeStepTimeoutSeconds)
-        ? Math.min(7200, Math.max(1, Math.floor(maybeStepTimeoutSeconds)))
+        ? Math.min(7200, Math.max(0, Math.floor(maybeStepTimeoutSeconds)))
         : DEFAULT_SETTINGS.orchestrator.step_timeout_seconds,
     },
     agent_routing: {
@@ -4413,7 +4413,7 @@ export default function App() {
           ),
           step_timeout_seconds: Math.min(
             7200,
-            Math.max(1, parseNonNegativeInt(settingsStepTimeoutSeconds, DEFAULT_SETTINGS.orchestrator.step_timeout_seconds)),
+            Math.max(0, parseNonNegativeInt(settingsStepTimeoutSeconds, DEFAULT_SETTINGS.orchestrator.step_timeout_seconds)),
           ),
         },
         agent_routing: {
@@ -6453,7 +6453,7 @@ export default function App() {
                 {settingsDependencyPolicy === 'strict' && 'Workers must not install any new dependencies. All solutions must use only what is already in the project.'}
               </p>
 
-              <label className="field-label" htmlFor="settings-step-timeout-seconds">Default task timeout (seconds)</label>
+              <label className="field-label" htmlFor="settings-step-timeout-seconds">Default task timeout (seconds, 0 = no timeout)</label>
               <input
                 id="settings-step-timeout-seconds"
                 value={settingsStepTimeoutSeconds}
