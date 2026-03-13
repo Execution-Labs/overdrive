@@ -8,7 +8,7 @@ import remarkGfm from 'remark-gfm'
 import { humanizeLabel } from './ui/labels'
 import './styles/orchestrator.css'
 
-type RouteKey = 'board' | 'planning' | 'execution' | 'agents' | 'settings'
+type RouteKey = 'board' | 'execution' | 'agents' | 'settings'
 type CreateTab = 'task' | 'import'
 type TaskDetailTab = 'overview' | 'plan' | 'workdoc' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
 type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate' | 'review_commit'
@@ -446,7 +446,6 @@ function createEmptyLogAccum(taskId = ''): LogAccumState {
 
 const ROUTES: Array<{ key: RouteKey; label: string }> = [
   { key: 'board', label: 'Board' },
-  { key: 'planning', label: 'Planning' },
   { key: 'execution', label: 'Execution' },
   { key: 'agents', label: 'Workers' },
   { key: 'settings', label: 'Settings' },
@@ -1487,25 +1486,6 @@ function repoNameFromPath(projectPath: string): string {
   return parts[parts.length - 1] || normalized
 }
 
-function summarizePlanDiff(nextText: string, prevText: string): { added: number; removed: number; preview: string[] } {
-  const nextLines = nextText.split('\n')
-  const prevSet = new Set(prevText.split('\n'))
-  const nextSet = new Set(nextLines)
-  let added = 0
-  for (const line of nextLines) {
-    if (!prevSet.has(line)) added += 1
-  }
-  let removed = 0
-  for (const line of prevSet) {
-    if (!nextSet.has(line)) removed += 1
-  }
-  const preview = nextLines
-    .filter((line) => !prevSet.has(line))
-    .map((line) => `+ ${line}`.trimEnd())
-    .slice(0, 8)
-  return { added, removed, preview }
-}
-
 type StructuredStdoutChunk = {
   text: string
   hasContent: boolean
@@ -1798,7 +1778,6 @@ export default function App() {
   const modalDismissedRef = useRef(false)
   const modalExplicitRef = useRef(false)
   const taskSelectTabRef = useRef<TaskDetailTab | undefined>(undefined)
-  const [planningTaskId, setPlanningTaskId] = useState('')
   const [selectedTaskDetail, setSelectedTaskDetail] = useState<TaskRecord | null>(null)
   const [selectedTaskDetailLoading, setSelectedTaskDetailLoading] = useState(false)
   const [taskDetailNowMs, setTaskDetailNowMs] = useState<number>(() => Date.now())
@@ -1815,15 +1794,9 @@ export default function App() {
   const [planRefineStdout, setPlanRefineStdout] = useState('')
   const [planRefineUiState, setPlanRefineUiState] = useState<'idle' | 'running' | 'done'>('idle')
   const [planRefineTrackedJobId, setPlanRefineTrackedJobId] = useState('')
-  const [planningWorkerTab, setPlanningWorkerTab] = useState<'plan' | 'manual'>('plan')
   const [planTabMode, setPlanTabMode] = useState<'view' | 'edit' | 'refine'>('view')
   const [planSavingManual, setPlanSavingManual] = useState(false)
   const [planCommitting, setPlanCommitting] = useState(false)
-  const [planGenerateLoading, setPlanGenerateLoading] = useState(false)
-  const [planGenerateStdout, setPlanGenerateStdout] = useState('')
-  const [planGenerateSource, setPlanGenerateSource] = useState<'committed' | 'revision' | 'override' | 'latest'>('latest')
-  const [planGenerateRevisionId, setPlanGenerateRevisionId] = useState('')
-  const [planGenerateOverride, setPlanGenerateOverride] = useState('')
   const [planGenerateChildStatus, setPlanGenerateChildStatus] = useState<GeneratedTaskStatus>('backlog')
   const [planGenerateChildHitlMode, setPlanGenerateChildHitlMode] = useState<GeneratedTaskHitlSelection>('inherit_parent')
   const [planGenerateInferDeps, setPlanGenerateInferDeps] = useState(true)
@@ -1970,7 +1943,6 @@ export default function App() {
   const [selectedTaskLogsLoading, setSelectedTaskLogsLoading] = useState(false)
   const planManualSeedRef = useRef<{ taskId: string; workerText: string }>({ taskId: '', workerText: '' })
   const planRefineOutputRef = useRef<{ taskId: string; logId: string; jobKey: string; text: string }>({ taskId: '', logId: '', jobKey: '', text: '' })
-  const planGenerateOutputRef = useRef<{ taskId: string; logId: string; jobKey: string; text: string }>({ taskId: '', logId: '', jobKey: '', text: '' })
   const logAccumRef = useRef<LogAccumState>(createEmptyLogAccum())
   const [stdoutHistory, setStdoutHistory] = useState('')
   const [stderrHistory, setStderrHistory] = useState('')
@@ -2116,8 +2088,6 @@ export default function App() {
     setNewDependencyId('')
     setDependencyActionMessage('')
     setPlanRefineFeedback('')
-    setPlanGenerateSource('latest')
-    setPlanGenerateOverride('')
     setTaskDiff(null)
     setTaskDiffLoading(false)
     setReviewGuidance('')
@@ -2241,28 +2211,6 @@ export default function App() {
       setSelectedTaskId(prioritized[0].id)
     }
   }, [route, board, selectedTaskId])
-
-  useEffect(() => {
-    if (route !== 'planning') return
-    const planTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => isPlanningTaskType(t.task_type))
-    if (planTasks.length === 0) {
-      if (planningTaskId) setPlanningTaskId('')
-      return
-    }
-
-    const hasPlanningTask = !!(planningTaskId && planTasks.some((task) => task.id === planningTaskId))
-    const hasSelectedTask = !!(selectedTaskId && planTasks.some((task) => task.id === selectedTaskId))
-    const nextTaskId = hasPlanningTask
-      ? planningTaskId
-      : (hasSelectedTask ? selectedTaskId : planTasks[0].id)
-
-    if (planningTaskId !== nextTaskId) {
-      setPlanningTaskId(nextTaskId)
-    }
-    if (selectedTaskId !== nextTaskId) {
-      setSelectedTaskId(nextTaskId)
-    }
-  }, [route, board, planningTaskId, selectedTaskId])
 
   function applySettings(payload: SystemSettings): void {
     setSettingsConcurrency(String(payload.orchestrator.concurrency))
@@ -2510,12 +2458,6 @@ export default function App() {
         }
         return committedOrLatest
       })
-      setPlanGenerateRevisionId((prev) => {
-        if (prev && planDoc.revisions.some((item) => item.id === prev)) {
-          return prev
-        }
-        return committedOrLatest
-      })
       setPlanActionError('')
     } catch (err) {
       if (selectedTaskIdRef.current !== taskId) {
@@ -2542,13 +2484,10 @@ export default function App() {
     const refineOut = planRefineOutputRef.current
     if (refineOut.taskId !== selectedTaskId) {
       planRefineOutputRef.current = { taskId: selectedTaskId || '', logId: '', jobKey: '', text: '' }
-      planGenerateOutputRef.current = { taskId: selectedTaskId || '', logId: '', jobKey: '', text: '' }
       planManualSeedRef.current = { taskId: selectedTaskId || '', workerText: '' }
       setPlanRefineUiState('idle')
       setPlanRefineTrackedJobId('')
       setPlanRefineStdout('')
-      setPlanGenerateStdout('')
-      setPlanningWorkerTab('plan')
       setPlanManualContent('')
       setPlanManualFeedbackNote('')
     }
@@ -2590,50 +2529,6 @@ export default function App() {
       setPlanRefineStdout(merged)
     }
   }
-
-  function appendPlanGenerateStdout(
-    taskId: string,
-    logId: string,
-    jobKey: string,
-    incoming: string,
-    mode: 'reset' | 'prepend' | 'append',
-  ): void {
-    if (!taskId || !jobKey) return
-    const nextText = String(incoming || '')
-    const current = planGenerateOutputRef.current
-    const logChanged = !!(logId && current.logId && logId !== current.logId)
-    if (current.taskId !== taskId || current.jobKey !== jobKey || logChanged || mode === 'reset') {
-      planGenerateOutputRef.current = { taskId, logId, jobKey, text: nextText }
-      setPlanGenerateStdout(nextText)
-      return
-    }
-    const merged = mergeTranscriptChunk(current.text, nextText, mode)
-    if (merged !== current.text) {
-      planGenerateOutputRef.current = { taskId, logId: logId || current.logId, jobKey, text: merged }
-      setPlanGenerateStdout(merged)
-    }
-  }
-
-  function openPlanningWorkerTab(taskId: string, nextTab: 'plan' | 'manual', workerPlanText: string): void {
-    if (nextTab === 'manual') {
-      const planText = String(workerPlanText || '').trim()
-      if (planText) {
-        setPlanManualContent((current) => {
-          const currentTrimmed = current.trim()
-          const seeded = planManualSeedRef.current
-          const wasSeededForTask = seeded.taskId === taskId && seeded.workerText.trim().length > 0
-          const sameAsSeeded = wasSeededForTask && currentTrimmed === seeded.workerText.trim()
-          if (!currentTrimmed || sameAsSeeded) {
-            planManualSeedRef.current = { taskId, workerText: planText }
-            return planText
-          }
-          return current
-        })
-      }
-    }
-    setPlanningWorkerTab(nextTab)
-  }
-
 
   async function loadCollaboration(taskId: string): Promise<void> {
     if (!taskId) {
@@ -2757,11 +2652,9 @@ export default function App() {
         logAccumRef.current = reset
         snapshotLogScrollOps('reset', 'reset')
         planRefineOutputRef.current = { taskId, logId: payloadLogId, jobKey: '', text: '' }
-        planGenerateOutputRef.current = { taskId, logId: payloadLogId, jobKey: '', text: '' }
         // Don't clear display state here — let the re-fetch replace it
         // to avoid a blank flash between step transitions.
         setPlanRefineStdout('')
-        setPlanGenerateStdout('')
         void loadTaskLogs(taskId, true, logViewStepRef.current || undefined, logViewRunIdRef.current || undefined)
         return
       }
@@ -2925,9 +2818,6 @@ export default function App() {
         if (step === 'plan_refine') {
           const refineJobKey = String(selectedTaskPlan?.active_refine_job?.id || payload.started_at || payload.log_id || 'plan_refine')
           appendPlanRefineStdout(taskId, payloadLogId, refineJobKey, stdoutChunkRendered, stdoutChunkMode)
-        } else if (step === 'generate_tasks') {
-          const generateJobKey = String(payload.started_at || payload.finished_at || payload.log_id || 'generate_tasks')
-          appendPlanGenerateStdout(taskId, payloadLogId, generateJobKey, stdoutChunkRendered, stdoutChunkMode)
         }
       }
 
@@ -4173,71 +4063,6 @@ export default function App() {
     }
   }
 
-  async function generateTasksFromPlan(taskId: string): Promise<void> {
-    setPlanGenerateLoading(true)
-    planGenerateOutputRef.current = { taskId, logId: '', jobKey: '', text: '' }
-    setPlanGenerateStdout('')
-    setPlanActionMessage('')
-    setPlanActionError('')
-    void loadTaskLogs(taskId, true)
-    try {
-      const payload: Record<string, unknown> = {
-        source: planGenerateSource,
-        policy: {
-          child_status: planGenerateChildStatus,
-          child_hitl_mode: planGenerateChildHitlMode,
-          infer_deps: planGenerateInferDeps,
-        },
-        save_as_default: planGenerateSaveAsDefault,
-        infer_deps: planGenerateInferDeps,
-      }
-      if (planGenerateSource === 'revision') {
-        const revisionId = planGenerateRevisionId || selectedPlanRevisionId || selectedTaskPlan?.latest_revision_id || ''
-        if (!revisionId) {
-          throw new Error('Choose a revision source before generating.')
-        }
-        payload.revision_id = revisionId
-      }
-      if (planGenerateSource === 'override') {
-        if (!planGenerateOverride.trim()) {
-          throw new Error('Manual override plan text is required.')
-        }
-        payload.plan_override = planGenerateOverride
-      }
-      const result = await requestJson<{
-        created_task_ids: string[]
-        effective_policy?: {
-          child_status?: string
-          child_hitl_mode?: string
-          infer_deps?: boolean
-        }
-      }>(buildApiUrl(`/api/tasks/${taskId}/generate-tasks`, projectDir), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-      const effectiveStatus = result.effective_policy?.child_status ? humanizeLabel(result.effective_policy.child_status) : ''
-      const effectiveHitl = result.effective_policy?.child_hitl_mode ? humanizeLabel(result.effective_policy.child_hitl_mode) : ''
-      const policySuffix = effectiveStatus || effectiveHitl
-        ? ` (${[effectiveStatus, effectiveHitl].filter(Boolean).join(' / ')})`
-        : ''
-      setPlanActionMessage(`Generated ${result.created_task_ids?.length || 0} task(s) from plan${policySuffix}.`)
-      try {
-        const boardData = await requestJson<BoardResponse>(buildApiUrl('/api/tasks/board', projectDir))
-        setBoard(normalizeBoard(boardData))
-      } catch {
-        // Keep user-facing flow resilient even if ancillary reloads fail.
-      }
-      await reloadAll()
-      await loadTaskPlan(taskId)
-    } catch (err) {
-      setPlanActionError(toErrorMessage('Failed to generate tasks', err))
-    } finally {
-      await loadTaskLogs(taskId, true)
-      setPlanGenerateLoading(false)
-    }
-  }
-
   async function saveTaskEdits(taskId: string): Promise<void> {
     const parsedStepTimeout = parseOptionalPositiveInt(editTaskStepTimeout)
     if (editTaskStepTimeout.trim() && parsedStepTimeout === null) {
@@ -4817,7 +4642,6 @@ export default function App() {
   const selectedTaskView = selectedTaskDetail && selectedTaskDetail.id === selectedTaskId ? selectedTaskDetail : selectedTask
   const blockerIds = selectedTaskView?.blocked_by || []
   const blockedIds = selectedTaskView?.blocks || []
-  const isPlanTask = isPlanningTaskType(selectedTaskView?.task_type)
   const selectedTaskSupportsGeneration = taskSupportsGenerateTasks(selectedTaskView)
   const isTaskActionBusy = taskActionPending !== null
   const configLocked = !new Set(['backlog', 'queued', 'blocked', 'cancelled']).has(selectedTaskView?.status || '')
@@ -4828,7 +4652,6 @@ export default function App() {
     return !dep || (dep.status !== 'done' && dep.status !== 'cancelled')
   })
   const hasUnresolvedBlockers = unresolvedBlockers.length > 0
-  const showViewPlan = isPlanTask && selectedTaskView?.status === 'done'
   const showPlanGate = !!(
     selectedTaskView
     && selectedTaskView.status !== 'cancelled'
@@ -6922,310 +6745,7 @@ export default function App() {
     setWorkOpen(true)
   }
 
-  function renderPlanning(): JSX.Element {
-    const allTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => isPlanningTaskType(t.task_type))
-    const planningTask = allTasks.find((t) => t.id === planningTaskId) || null
-    const planningTaskSupportsGeneration = taskSupportsGenerateTasks(planningTask)
-    const planRevisions = selectedTaskPlan?.revisions || []
-    const selectedPlanRevision = selectedPlanRevisionId
-      ? (planRevisions.find((item) => item.id === selectedPlanRevisionId) || null)
-      : null
-    const latestPlanRevision = selectedTaskPlan?.latest_revision_id
-      ? (planRevisions.find((item) => item.id === selectedTaskPlan.latest_revision_id) || null)
-      : null
-    const effectiveWorkerPlanRevision = selectedPlanRevision || latestPlanRevision
-    const selectedPlanParentRevision = effectiveWorkerPlanRevision?.parent_revision_id
-      ? planRevisions.find((item) => item.id === effectiveWorkerPlanRevision.parent_revision_id) || null
-      : null
-    const selectedPlanDiff = effectiveWorkerPlanRevision && selectedPlanParentRevision
-      ? summarizePlanDiff(effectiveWorkerPlanRevision.content || '', selectedPlanParentRevision.content || '')
-      : null
-    const effectiveGenerateRevisionId = planGenerateRevisionId || selectedPlanRevisionId || selectedTaskPlan?.latest_revision_id || ''
-    const workerPlanContent = (effectiveWorkerPlanRevision?.content || '').trim()
-    const isRefining = !!(selectedTaskPlan?.active_refine_job
-      && (selectedTaskPlan.active_refine_job.status === 'queued' || selectedTaskPlan.active_refine_job.status === 'running'))
-    const workerOutputDisplay = planRefineStdout || ' '
-    const generateOutputDisplay = planGenerateStdout || ' '
-
-    function selectPlanningTask(taskId: string): void {
-      setPlanningTaskId(taskId)
-      setSelectedTaskId(taskId)
-      setPlanActionMessage('')
-      setPlanActionError('')
-    }
-
-    function openCreatePlanTaskModal(): void {
-      openCreateWorkModal('task', 'initiative_plan')
-    }
-
-    return (
-      <section className="panel">
-        <header className="panel-head">
-          <h2>Planning</h2>
-          <div className="inline-actions">
-            <button className="button button-primary" onClick={openCreatePlanTaskModal}>Create Plan</button>
-          </div>
-        </header>
-        <div className="planning-layout">
-          <aside className="planning-task-list">
-            <p className="field-label">Select a planning task</p>
-            <div className="list-stack">
-              {allTasks.map((task) => (
-                <button
-                  key={task.id}
-                  className={`task-card task-card-button ${planningTaskId === task.id ? 'is-selected' : ''}`}
-                  onClick={() => selectPlanningTask(task.id)}
-                >
-                  <p className="task-title">{task.title}</p>
-                  <p className="task-meta">{task.priority} · {humanizeLabel(task.status)} · {humanizeLabel(task.task_type || 'feature')}{(task.children_ids?.length ?? 0) > 0 ? ` · ${task.children_ids!.length} tasks generated` : ''}</p>
-                </button>
-              ))}
-              {allTasks.length === 0 ? <p className="empty">No planning tasks yet. Create one with "Create Plan".</p> : null}
-            </div>
-          </aside>
-          <div className="planning-content">
-            {planningTask ? (
-              <div className="list-stack">
-                <p className="task-title">{planningTask.title}</p>
-                <p className="task-meta">{planningTask.id} · {humanizeLabel(planningTask.status)}</p>
-                {isRefining ? (
-                  <div className="refine-banner">
-                    <span className="refine-banner-dot" />
-                    <span>Refining plan{selectedTaskPlan?.active_refine_job?.id ? ` · ${selectedTaskPlan.active_refine_job.id}` : ''}</span>
-                  </div>
-                ) : null}
-                <div className="row-card">
-                  <p className="task-meta">
-                    Latest: {selectedTaskPlan?.latest_revision_id || '-'} · Committed: {selectedTaskPlan?.committed_revision_id || '-'}
-                  </p>
-                </div>
-                <label className="field-label" htmlFor="planning-revision-selector">Select revision</label>
-                <select
-                  id="planning-revision-selector"
-                  value={selectedPlanRevisionId}
-                  onChange={(event) => {
-                    setSelectedPlanRevisionId(event.target.value)
-                    setPlanGenerateRevisionId(event.target.value)
-                  }}
-                >
-                  <option value="">(latest)</option>
-                  {planRevisions.map((revision) => (
-                    <option key={revision.id} value={revision.id}>
-                      {revision.id} · {humanizeLabel(revision.source)} · {toLocaleTimestamp(revision.created_at) || revision.created_at}
-                    </option>
-                  ))}
-                </select>
-                <div className="form-stack">
-                  <div className="detail-tabs planning-worker-tabs" role="tablist" aria-label="Worker plan panels">
-                    <button
-                      className={`detail-tab ${planningWorkerTab === 'plan' ? 'is-active' : ''}`}
-                      aria-pressed={planningWorkerTab === 'plan'}
-                      onClick={() => openPlanningWorkerTab(planningTask.id, 'plan', workerPlanContent)}
-                    >
-                      Worker Plan
-                    </button>
-                    <button
-                      className={`detail-tab ${planningWorkerTab === 'manual' ? 'is-active' : ''}`}
-                      aria-pressed={planningWorkerTab === 'manual'}
-                      onClick={() => openPlanningWorkerTab(planningTask.id, 'manual', workerPlanContent)}
-                    >
-                      Manual Revision
-                    </button>
-                  </div>
-                  {planningWorkerTab === 'plan' ? (
-                    workerPlanContent ? (
-                      <div className="preview-box">
-                        {effectiveWorkerPlanRevision ? (
-                          <p className="task-meta">
-                            {humanizeLabel(effectiveWorkerPlanRevision.source)}
-                            {effectiveWorkerPlanRevision.step ? ` · ${humanizeLabel(effectiveWorkerPlanRevision.step)}` : ''}
-                            {effectiveWorkerPlanRevision.provider ? ` · ${effectiveWorkerPlanRevision.provider}` : ''}
-                            {effectiveWorkerPlanRevision.model ? `/${effectiveWorkerPlanRevision.model}` : ''}
-                            {' · '}
-                            {humanizeLabel(effectiveWorkerPlanRevision.status)}
-                            {!selectedPlanRevisionId ? ' · latest' : ''}
-                          </p>
-                        ) : null}
-                        <RenderedMarkdown content={workerPlanContent} className="plan-content-field" />
-                        {selectedPlanDiff ? (
-                          <p className="task-meta">
-                            Compared to parent: +{selectedPlanDiff.added} / -{selectedPlanDiff.removed} lines
-                          </p>
-                        ) : null}
-                      </div>
-                    ) : (
-                      <p className="empty">No worker plan yet.</p>
-                    )
-                  ) : (
-                    <div className="form-stack">
-                      <textarea
-                        id="planning-manual-content"
-                        className="plan-content-field"
-                        rows={20}
-                        value={planManualContent}
-                        onChange={(event) => setPlanManualContent(event.target.value)}
-                        placeholder="Paste or edit full plan text."
-                      />
-                      <div className="inline-actions">
-                        <button
-                          className="button"
-                          onClick={() => void saveManualPlanRevision(planningTask.id)}
-                          disabled={planSavingManual}
-                        >
-                          {planSavingManual ? 'Saving...' : 'Save Revision'}
-                        </button>
-                        <button
-                          className="button button-primary"
-                          onClick={() => void commitPlanRevision(planningTask.id, selectedPlanRevisionId || selectedTaskPlan?.latest_revision_id || '')}
-                          disabled={planCommitting}
-                        >
-                          {planCommitting ? 'Committing...' : 'Commit Selected Revision'}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div className="form-stack">
-                  <label className="field-label" htmlFor="planning-refine-feedback">Request changes from worker</label>
-                  <div className="planning-refine-inline">
-                    <input
-                      id="planning-refine-feedback"
-                      value={planRefineFeedback}
-                      onChange={(event) => setPlanRefineFeedback(event.target.value)}
-                      placeholder="Describe what should change in the plan."
-                    />
-                    <button
-                      className="button"
-                      onClick={() => void refineTaskPlan(planningTask.id)}
-                      disabled={planJobLoading || isRefining || !planRefineFeedback.trim()}
-                    >
-                      {planJobLoading ? 'Requesting changes...' : isRefining ? 'Requesting changes...' : 'Refine'}
-                    </button>
-                  </div>
-                  <div className="preview-box">
-                    <p className="field-label">Worker output{isRefining ? ' (live)' : ''}</p>
-                    <pre className="task-log-output plan-content-field planning-worker-output">{workerOutputDisplay}</pre>
-                  </div>
-                </div>
-
-                <div className="form-stack">
-                  <label className="field-label" htmlFor="planning-generate-source">Generate tasks from</label>
-                  <select
-                    id="planning-generate-source"
-                    value={planGenerateSource}
-                    onChange={(event) => setPlanGenerateSource(event.target.value as 'committed' | 'revision' | 'override' | 'latest')}
-                  >
-                    <option value="latest">Latest revision</option>
-                    <option value="committed">Committed revision</option>
-                    <option value="revision">Selected revision</option>
-                    <option value="override">Manual override text</option>
-                  </select>
-                  {planGenerateSource === 'revision' ? (
-                    <select
-                      value={effectiveGenerateRevisionId}
-                      onChange={(event) => setPlanGenerateRevisionId(event.target.value)}
-                      aria-label="Generate from revision"
-                    >
-                      <option value="">Select revision</option>
-                      {planRevisions.map((revision) => (
-                        <option key={`gen-${revision.id}`} value={revision.id}>{revision.id}</option>
-                      ))}
-                    </select>
-                  ) : null}
-                  {planGenerateSource === 'override' ? (
-                    <textarea
-                      rows={4}
-                      value={planGenerateOverride}
-                      onChange={(event) => setPlanGenerateOverride(event.target.value)}
-                      placeholder="Provide full plan text override."
-                      aria-label="Manual generate override"
-                    />
-                  ) : null}
-                  {planningTaskSupportsGeneration ? (
-                    <>
-                      <label className="field-label" htmlFor="planning-generate-status">Start generated tasks in</label>
-                      <select
-                        id="planning-generate-status"
-                        value={planGenerateChildStatus}
-                        onChange={(event) => setPlanGenerateChildStatus(normalizeGeneratedTaskStatus(event.target.value))}
-                      >
-                        <option value="backlog">Backlog</option>
-                        <option value="queued">Queue</option>
-                      </select>
-                      <label className="field-label" htmlFor="planning-generate-hitl">Generated task HITL mode</label>
-                      <select
-                        id="planning-generate-hitl"
-                        value={planGenerateChildHitlMode}
-                        onChange={(event) => setPlanGenerateChildHitlMode(normalizeGeneratedTaskHitlSelection(event.target.value))}
-                      >
-                        <option value="inherit_parent">Inherit parent task mode</option>
-                        <option value="autopilot">Autopilot</option>
-                        <option value="supervised">Supervised</option>
-                        <option value="review_only">Review only</option>
-                      </select>
-                      <label className="checkbox-row">
-                        <input
-                          type="checkbox"
-                          checked={planGenerateInferDeps}
-                          onChange={(event) => setPlanGenerateInferDeps(event.target.checked)}
-                        />
-                        Infer dependencies between generated tasks
-                      </label>
-                      <label className="checkbox-row">
-                        <input
-                          type="checkbox"
-                          checked={planGenerateSaveAsDefault}
-                          onChange={(event) => setPlanGenerateSaveAsDefault(event.target.checked)}
-                        />
-                        Save these settings as this task's generation defaults
-                      </label>
-                    </>
-                  ) : (
-                    <p className="field-label">This pipeline does not support task generation.</p>
-                  )}
-                  <button
-                    className="button button-primary"
-                    onClick={() => void generateTasksFromPlan(planningTask.id)}
-                    disabled={planGenerateLoading || !planningTaskSupportsGeneration}
-                  >
-                    {planGenerateLoading ? 'Generating...' : 'Generate Tasks'}
-                  </button>
-                  <div className="preview-box">
-                    <p className="field-label">Worker output{planGenerateLoading ? ' (live)' : ''}</p>
-                    <pre className="task-log-output plan-content-field planning-worker-output">{generateOutputDisplay}</pre>
-                  </div>
-                </div>
-
-                <div className="list-stack planning-job-history">
-                  <p className="field-label">Refine job history</p>
-                  {selectedTaskPlanJobs.map((job) => (
-                    <div className="refine-job-card" key={job.id}>
-                      <div className="refine-job-head">
-                        <span className={`status-pill ${job.status === 'completed' ? 'status-done' : job.status === 'failed' ? 'status-failed' : job.status === 'running' || job.status === 'queued' ? 'status-running' : 'status-paused'}`}>{humanizeLabel(job.status)}</span>
-                        <span className="task-meta">{toLocaleTimestamp(job.created_at) || job.created_at}</span>
-                      </div>
-                      {job.feedback ? <p className="refine-job-feedback">{job.feedback}</p> : null}
-                      {job.error ? <p className="refine-job-error">{job.error}</p> : null}
-                      <p className="task-meta">{job.id}{job.result_revision_id ? ` · result: ${job.result_revision_id}` : ''}</p>
-                    </div>
-                  ))}
-                  {selectedTaskPlanJobs.length === 0 ? <p className="empty">No refine jobs yet.</p> : null}
-                </div>
-                {planActionError ? <p className="error-banner">{planActionError}</p> : null}
-                {planActionMessage ? <p className="field-label">{planActionMessage}</p> : null}
-              </div>
-            ) : (
-              <p className="empty">Select a task to view its plan.</p>
-            )}
-          </div>
-        </div>
-      </section>
-    )
-  }
-
   function renderRoute(): JSX.Element {
-    if (route === 'planning') return renderPlanning()
     if (route === 'execution') return renderExecution()
     if (route === 'agents') return renderAgents()
     if (route === 'settings') return renderSettings()
@@ -7437,9 +6957,6 @@ export default function App() {
                     <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'backlog')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'backlog' ? 'Moving...' : 'Move to Backlog'}</button>
                     <button className="button button-danger" onClick={() => void deleteTask(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'delete' ? 'Deleting...' : 'Delete'}</button>
                   </>
-                ) : null}
-                {taskStatus === 'done' && showViewPlan ? (
-                  <button className="button button-primary" onClick={() => { setPlanningTaskId(selectedTaskView.id); handleRouteChange('planning'); modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') }}>View Plan</button>
                 ) : null}
                 {taskStatus === 'done' && selectedTaskView.execution_summary?.steps.some((s) => s.commit) ? (
                   <button className="button" onClick={() => void reviewCommit(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'review_commit' ? 'Creating...' : 'Review Commit'}</button>

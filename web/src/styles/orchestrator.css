@@ -255,30 +255,6 @@ a:focus-visible {
   margin: 0;
 }
 
-.planning-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 2.5fr);
-  gap: 0.8rem;
-}
-
-.planning-task-list {
-  border: 1px solid var(--color-border-default);
-  border-radius: 14px;
-  padding: 0.7rem;
-  background: rgba(255, 255, 255, 0.75);
-  min-width: 0;
-  max-height: 80vh;
-  overflow-y: auto;
-}
-
-.planning-content {
-  min-width: 0;
-}
-
-.planning-worker-tabs {
-  margin-top: -0.1rem;
-}
-
 .planning-worker-output {
   margin-top: 0.2rem;
   min-height: 1.35rem;
@@ -331,48 +307,6 @@ a:focus-visible {
 
 .planning-refine-inline > input {
   min-width: 0;
-}
-
-.planning-job-history {
-  max-height: 24rem;
-  overflow: auto;
-  padding-right: 0.2rem;
-}
-
-.planning-job-history > .field-label {
-  margin: 0;
-}
-
-/* ── Refine job history cards ── */
-.refine-job-card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  padding: 0.6rem 0.8rem;
-  border: 1px solid var(--color-border-default);
-  border-radius: 10px;
-  background: var(--color-bg-primary);
-}
-
-.refine-job-head {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.refine-job-feedback {
-  margin: 0;
-  font-size: 0.84rem;
-  color: var(--color-text-primary);
-}
-
-.refine-job-error {
-  margin: 0;
-  font-size: 0.82rem;
-  color: #8c2a2a;
-  background: #fdf0f0;
-  border-radius: 6px;
-  padding: 0.3rem 0.55rem;
 }
 
 /* ── Generated tasks section (task detail overview) ── */
@@ -1719,10 +1653,6 @@ textarea {
   }
 
   .dependency-graph-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .planning-layout {
     grid-template-columns: 1fr;
   }
 
