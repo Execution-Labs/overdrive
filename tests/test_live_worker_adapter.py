@@ -1370,6 +1370,10 @@ def test_verify_environment_note_normalizes_prisma_missing_database_url(
             return_value=(True, "ok"),
         ),
         patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=()),
+        ),
+        patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
