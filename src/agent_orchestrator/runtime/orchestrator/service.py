@@ -2641,15 +2641,43 @@ class OrchestratorService:
     def _sync_workdoc_with_diagnostics(
         self, task: Task, step: str, project_dir: Path, summary: str | None, attempt: int | None = None
     ) -> None:
-        """Sync workdoc and surface invalid/unreadable file diagnostics as ValueError."""
-        self._workdoc_manager.sync_workdoc(
-            task,
-            step,
-            project_dir,
-            summary,
-            attempt,
-            read_workdoc_pair=lambda: self._read_workdoc_pair(task, project_dir),
+        """Sync workdoc with repair-and-retry on structural failures.
+
+        Layer 1: normal sync (sentinel merge / heading fallback).
+        Layer 2: if sync fails, repair the workdoc by re-injecting the
+                 missing section from the pipeline template, then retry.
+        Layer 3: if repair-retry also fails, store the summary in task
+                 metadata and continue the pipeline instead of blocking.
+        """
+        read_pair = lambda: self._read_workdoc_pair(task, project_dir)
+        try:
+            self._workdoc_manager.sync_workdoc(task, step, project_dir, summary, attempt, read_workdoc_pair=read_pair)
+            return
+        except ValueError:
+            pass
+
+        # Layer 2: attempt structural repair and retry.
+        repaired = self._workdoc_manager.repair_missing_section(task, step)
+        if repaired:
+            logger.warning("Repaired missing workdoc section for step '%s' on task %s", step, task.id)
+            try:
+                self._workdoc_manager.sync_workdoc(task, step, project_dir, summary, attempt, read_workdoc_pair=read_pair)
+                self._workdoc_manager.clear_sync_diagnostics(task)
+                return
+            except ValueError:
+                pass
+
+        # Layer 3: graceful degradation — store summary in metadata and continue.
+        logger.warning(
+            "Workdoc sync failed for step '%s' on task %s after repair attempt; "
+            "storing summary in metadata and continuing pipeline",
+            step, task.id,
         )
+        if summary and summary.strip() and isinstance(task.metadata, dict):
+            orphaned = task.metadata.setdefault("orphaned_step_summaries", {})
+            if isinstance(orphaned, dict):
+                orphaned[step] = summary.strip()
+        self._workdoc_manager.clear_sync_diagnostics(task)
 
     def _refresh_workdoc_with_diagnostics(self, task: Task, project_dir: Path) -> None:
         """Refresh workdoc and surface invalid/unreadable file diagnostics as ValueError.

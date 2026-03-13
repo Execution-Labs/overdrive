@@ -593,6 +593,10 @@ _Pending: will be populated by the implement step._
 ## Verification Results
 
 _Pending: will be populated by the verify step._
+
+## Fix Log
+
+_Pending: will be populated as needed._
 """
 
     _SPIKE_WORKDOC_TEMPLATE = """\
@@ -1301,6 +1305,47 @@ _Pending: will be populated by the report step._
             insert_pos = newline_after + 1 + next_heading.start()
             return canonical_text[:insert_pos] + trimmed + "\n\n" + canonical_text[insert_pos:]
         return canonical_text.rstrip() + "\n\n" + trimmed + "\n"
+
+    def repair_missing_section(self, task: Task, step: str) -> bool:
+        """Re-inject a missing workdoc section from the pipeline template.
+
+        Returns True if the canonical workdoc was repaired, False otherwise.
+        """
+        canonical = self.workdoc_canonical_path(task.id)
+        if not canonical.exists():
+            return False
+        section = self.workdoc_section_for_step(task, step)
+        if not section:
+            return False
+        heading, placeholder_step = section
+        try:
+            canonical_text = canonical.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        # Already present — nothing to repair.
+        if heading in canonical_text:
+            return False
+        # Build the section block with sentinels.
+        section_id = self._WORKDOC_SENTINEL_ID_MAP.get(step)
+        if placeholder_step:
+            placeholder = f"_Pending: will be populated by the {placeholder_step} step._"
+        else:
+            placeholder = "_Pending: will be populated as needed._"
+        if section_id:
+            start_marker = f"<!-- WORKDOC:SECTION {section_id} START -->"
+            end_marker = f"<!-- WORKDOC:SECTION {section_id} END -->"
+            block = f"{heading}\n\n{start_marker}\n{placeholder}\n{end_marker}\n"
+        else:
+            block = f"{heading}\n\n{placeholder}\n"
+        repaired = canonical_text.rstrip() + "\n\n" + block
+        canonical.write_text(repaired, encoding="utf-8")
+        # Update worktree copy if the task has a worktree dir.
+        worktree_dir = (task.metadata or {}).get("worktree_dir")
+        if worktree_dir:
+            worktree_copy = self.workdoc_worktree_path(Path(worktree_dir))
+            if worktree_copy.parent.exists():
+                worktree_copy.write_text(repaired, encoding="utf-8")
+        return True
 
     @classmethod
     def clear_sync_diagnostics(cls, task: Task) -> None:

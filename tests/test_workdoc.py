@@ -380,7 +380,7 @@ def test_init_chore_uses_chore_template(service: OrchestratorService, project_di
     assert "## Verification Results" in content
     assert "## Plan" not in content
     assert "## Review Findings" not in content
-    assert "## Fix Log" not in content
+    assert "## Fix Log" in content
     assert "## Final Report" not in content
 
 
@@ -1329,11 +1329,12 @@ def test_run_non_review_step_blocks_when_workdoc_invalid_encoding(
     assert updated_run.status == "blocked"
 
 
-def test_run_non_review_step_blocks_when_worktree_workdoc_missing_during_sync(
+def test_run_non_review_step_degrades_when_worktree_workdoc_missing_during_sync(
     service: OrchestratorService,
     task: Task,
     project_dir: Path,
 ) -> None:
+    """Graceful degradation: missing worktree workdoc stores orphaned summary."""
     service._init_workdoc(task, project_dir)
     worktree = service._workdoc_worktree_path(project_dir)
     run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso(), branch=None)
@@ -1346,27 +1347,27 @@ def test_run_non_review_step_blocks_when_worktree_workdoc_missing_during_sync(
 
     ok = service._run_non_review_step(task, run, "plan", attempt=1)
 
-    assert ok == "blocked"
+    assert ok == "ok"
     updated_task = service.container.tasks.get(task.id)
     assert updated_task is not None
-    assert updated_task.status == "blocked"
-    assert updated_task.error and "Missing worktree workdoc during sync" in updated_task.error
+    assert updated_task.status != "blocked"
+    orphaned = updated_task.metadata.get("orphaned_step_summaries")
+    assert isinstance(orphaned, dict)
+    assert orphaned.get("plan") == "step summary"
 
 
-def test_run_non_review_step_persists_sync_diagnostics_on_block(
+def test_run_non_review_step_degrades_on_mismatched_sentinels(
     service: OrchestratorService,
     task: Task,
     project_dir: Path,
 ) -> None:
+    """Graceful degradation: mismatched sentinels don't block the pipeline."""
     service._init_workdoc(task, project_dir)
     canonical = service._workdoc_canonical_path(task.id)
     worktree = service._workdoc_worktree_path(project_dir)
     run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso(), branch=None)
 
-    canonical_text = canonical.read_text(encoding="utf-8").replace(
-        "## Plan\n<!-- WORKDOC:SECTION plan START -->\n_Pending: will be populated by the plan step._\n<!-- WORKDOC:SECTION plan END -->\n",
-        "## Plan\n<!-- WORKDOC:SECTION plan START -->\n_Pending: will be populated by the plan step._\n<!-- WORKDOC:SECTION plan END -->\n",
-    )
+    canonical_text = canonical.read_text(encoding="utf-8")
     canonical.write_text(canonical_text, encoding="utf-8")
 
     def run_step_with_empty_summary(*, task: Task, step: str, attempt: int) -> StepResult:
@@ -1385,11 +1386,54 @@ def test_run_non_review_step_persists_sync_diagnostics_on_block(
 
     ok = service._run_non_review_step(task, run, "plan", attempt=2)
 
-    assert ok == "blocked"
+    assert ok == "ok"
     updated_task = service.container.tasks.get(task.id)
     assert updated_task is not None
-    assert updated_task.status == "blocked"
-    assert updated_task.metadata.get("workdoc_sync_error_type") == "section_id_mismatch"
-    assert updated_task.metadata.get("workdoc_sync_mode") == "blocked_invalid_structure"
-    assert updated_task.metadata.get("workdoc_sync_step") == "plan"
-    assert updated_task.metadata.get("workdoc_sync_attempt") == 2
+    assert updated_task.status != "blocked"
+    # Sync diagnostics should be cleared after graceful degradation.
+    assert updated_task.metadata.get("workdoc_sync_error_type") is None
+
+
+def test_run_non_review_step_repairs_missing_section_then_syncs(
+    service: OrchestratorService,
+    project_dir: Path,
+) -> None:
+    """Layer 2 recovery: missing section is repaired from template, sync retried."""
+    chore_task = Task(
+        title="Cleanup configs",
+        description="Remove stale config files",
+        task_type="chore",
+        priority="P3",
+    )
+    service._init_workdoc(chore_task, project_dir)
+    canonical = service._workdoc_canonical_path(chore_task.id)
+
+    # Simulate a template that's missing the Fix Log section by removing it.
+    text = canonical.read_text(encoding="utf-8")
+    # Remove the Fix Log section (heading + sentinels + content).
+    text = re.sub(
+        r"## Fix Log\n.*?<!-- WORKDOC:SECTION fix_log END -->\n",
+        "",
+        text,
+        flags=re.DOTALL,
+    )
+    canonical.write_text(text, encoding="utf-8")
+    worktree = service._workdoc_worktree_path(project_dir)
+    worktree.write_text(text, encoding="utf-8")
+
+    run = RunRecord(task_id=chore_task.id, status="in_progress", started_at=now_iso(), branch=None)
+
+    def run_step_ok(*, task: Task, step: str, attempt: int) -> StepResult:
+        return StepResult(status="ok", summary="Fix applied successfully")
+
+    service.worker_adapter.run_step = run_step_ok  # type: ignore[method-assign]
+
+    ok = service._run_non_review_step(chore_task, run, "implement_fix", attempt=1)
+
+    assert ok == "ok"
+    updated_task = service.container.tasks.get(chore_task.id)
+    assert updated_task is not None
+    assert updated_task.status != "blocked"
+    # The canonical workdoc should now contain the repaired section.
+    repaired_text = canonical.read_text(encoding="utf-8")
+    assert "## Fix Log" in repaired_text

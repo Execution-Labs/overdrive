@@ -781,6 +781,32 @@ def _inject_required_verify_commands(
     return merged
 
 
+_NPM_PRIMARY_COMMAND_RE = re.compile(r"^\s*npm\s+(?:run\s+)?(\w[\w-]*)")
+
+
+def _filter_npm_commands_by_scripts(
+    commands: dict[str, str],
+    project_dir: Path,
+) -> dict[str, str]:
+    """Remove commands whose primary npm script is absent from package.json.
+
+    Only filters when ``npm`` is the first command in the string.  Compound
+    commands where ``npm`` appears as a fallback (e.g. after ``||``) are kept
+    because the primary command works independently.
+    """
+    pkg_path = project_dir / "package.json"
+    scripts = _load_package_scripts(pkg_path)
+    filtered: dict[str, str] = {}
+    for key, cmd in commands.items():
+        match = _NPM_PRIMARY_COMMAND_RE.match(cmd)
+        if match:
+            script_name = match.group(1)
+            if script_name not in scripts:
+                continue
+        filtered[key] = cmd
+    return filtered
+
+
 def _has_prisma_schema(project_dir: Path) -> bool:
     """Return whether this task worktree contains a Prisma schema."""
     return (project_dir / "prisma" / "schema.prisma").exists()
@@ -1804,7 +1830,11 @@ class LiveWorkerAdapter:
                 if lang not in project_commands:
                     defaults = _DEFAULT_PROJECT_COMMANDS.get(lang)
                     if defaults:
-                        project_commands[lang] = dict(defaults)
+                        cmds = dict(defaults)
+                        if lang in ("javascript", "typescript"):
+                            cmds = _filter_npm_commands_by_scripts(cmds, project_dir)
+                        if cmds:
+                            project_commands[lang] = cmds
             if not project_commands:
                 project_commands = None
         # Resolve relative executable paths against the *original* project dir
