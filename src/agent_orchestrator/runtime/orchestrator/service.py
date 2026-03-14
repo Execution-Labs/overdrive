@@ -181,6 +181,10 @@ class OrchestratorService:
     )
     _ENVIRONMENT_RETRY_BASE_SECONDS = 15
     _ENVIRONMENT_RETRY_MAX_SECONDS = 300
+    _HEARTBEAT_STALL_SUMMARY_PATTERN = re.compile(r"worker stalled", re.IGNORECASE)
+    _HEARTBEAT_STALL_MAX_RETRIES = 2
+    _HEARTBEAT_STALL_RETRY_BASE_SECONDS = 30
+    _HEARTBEAT_STALL_RETRY_MAX_SECONDS = 300
 
     def __init__(
         self,
@@ -3359,6 +3363,13 @@ class OrchestratorService:
                 summary=result.summary,
             ):
                 return "auto_requeued"
+            if step not in _VERIFY_STEPS and self._handle_recoverable_heartbeat_stall(
+                task,
+                run,
+                step=step,
+                summary=result.summary,
+            ):
+                return "auto_requeued"
             if step in _VERIFY_STEPS:
                 task.status = "in_progress"
                 task.error = result.summary or f"{step} failed"
@@ -3381,6 +3392,7 @@ class OrchestratorService:
             return "blocked"
 
         self._clear_environment_recovery_tracking(task, step=step)
+        self._clear_heartbeat_stall_recovery_tracking(task, step=step)
         task.metadata.pop("human_blocking_issues", None)
         self._clear_wait_state(task)
 
@@ -3481,6 +3493,143 @@ class OrchestratorService:
                 wait_step = str(task.wait_state.get("step") or "").strip()
                 if not wait_step or wait_step == step:
                     self._clear_wait_state(task)
+
+    def _clear_heartbeat_stall_recovery_tracking(self, task: Task, *, step: str) -> None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        task.metadata.pop("heartbeat_stall_auto_requeue_pending", None)
+        task.metadata.pop("heartbeat_stall_next_retry_at", None)
+        task.metadata.pop("heartbeat_stall_recovery_backoff_seconds", None)
+        attempts_raw = task.metadata.get("heartbeat_stall_recovery_attempts_by_step")
+        if isinstance(attempts_raw, dict):
+            attempts = dict(attempts_raw)
+            attempts.pop(step, None)
+            if attempts:
+                task.metadata["heartbeat_stall_recovery_attempts_by_step"] = attempts
+            else:
+                task.metadata.pop("heartbeat_stall_recovery_attempts_by_step", None)
+        if isinstance(task.wait_state, dict):
+            if str(task.wait_state.get("kind") or "").strip() == self._WAIT_KIND_AUTO_RECOVERY:
+                reason = str(task.wait_state.get("reason_code") or "").strip()
+                wait_step = str(task.wait_state.get("step") or "").strip()
+                if reason == "heartbeat_stall" and (not wait_step or wait_step == step):
+                    self._clear_wait_state(task)
+
+    def _is_heartbeat_stall(self, summary: str | None) -> bool:
+        if not summary:
+            return False
+        return bool(self._HEARTBEAT_STALL_SUMMARY_PATTERN.search(summary))
+
+    def _heartbeat_stall_max_retries(self) -> int:
+        cfg = self.container.config.load()
+        workers_cfg = cfg.get("workers") if isinstance(cfg, dict) else {}
+        workers_cfg = workers_cfg if isinstance(workers_cfg, dict) else {}
+        env_cfg = workers_cfg.get("environment", {})
+        env_cfg = env_cfg if isinstance(env_cfg, dict) else {}
+        max_retries = int(env_cfg.get("max_heartbeat_stall_retries", self._HEARTBEAT_STALL_MAX_RETRIES) or 0)
+        if max_retries < 0:
+            max_retries = 0
+        return max_retries
+
+    def _handle_recoverable_heartbeat_stall(
+        self,
+        task: Task,
+        run: RunRecord,
+        *,
+        step: str,
+        summary: str | None,
+    ) -> bool:
+        if not self._is_heartbeat_stall(summary):
+            return False
+
+        max_retries = self._heartbeat_stall_max_retries()
+        if max_retries == 0:
+            return False
+
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        attempts_map_raw = task.metadata.get("heartbeat_stall_recovery_attempts_by_step")
+        attempts_map = dict(attempts_map_raw) if isinstance(attempts_map_raw, dict) else {}
+        current_attempts = int(attempts_map.get(step) or 0)
+
+        if current_attempts >= max_retries:
+            self._clear_heartbeat_stall_recovery_tracking(task, step=step)
+            escalation_summary = str(
+                summary or f"Heartbeat stall retry limit reached for step '{step}'."
+            ).strip()
+            self._block_for_human_issues(
+                task,
+                run,
+                step,
+                escalation_summary,
+                [{"summary": f"Heartbeat stall retry limit reached for step '{step}' "
+                  f"after {max_retries} retries."}],
+            )
+            return True
+
+        attempts_map[step] = current_attempts + 1
+        attempt_number = attempts_map[step]
+        backoff_seconds = min(
+            self._HEARTBEAT_STALL_RETRY_MAX_SECONDS,
+            self._HEARTBEAT_STALL_RETRY_BASE_SECONDS * (2 ** max(0, attempt_number - 1)),
+        )
+        next_retry_at = (datetime.now(timezone.utc) + timedelta(seconds=backoff_seconds)).isoformat()
+        task.metadata["heartbeat_stall_recovery_attempts_by_step"] = attempts_map
+        task.metadata["heartbeat_stall_auto_requeue_pending"] = True
+        task.metadata["heartbeat_stall_next_retry_at"] = next_retry_at
+        task.metadata["heartbeat_stall_recovery_backoff_seconds"] = backoff_seconds
+        task.metadata["heartbeat_stall_last_auto_recovery"] = {
+            "step": step,
+            "attempt": attempt_number,
+            "max_retries": max_retries,
+            "backoff_seconds": backoff_seconds,
+            "next_retry_at": next_retry_at,
+            "summary": str(summary or "").strip(),
+            "ts": now_iso(),
+        }
+        task.pending_gate = None
+        self._set_wait_state(
+            task,
+            kind=self._WAIT_KIND_AUTO_RECOVERY,
+            step=step,
+            reason_code="heartbeat_stall",
+            recoverable=True,
+            attempt=attempt_number,
+            max_attempts=max_retries,
+            next_retry_at=next_retry_at,
+        )
+        task.current_step = step
+        task.error = str(summary or f"Worker stalled during {step}. Auto-requeue scheduled.")
+        task.status = "queued"
+        task.current_agent_id = None
+        self.container.tasks.upsert(task)
+
+        run.status = "error"
+        run.finished_at = now_iso()
+        run.summary = f"Auto-requeue: heartbeat stall during {step}"
+        self.container.runs.upsert(run)
+
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.auto_recovering",
+            entity_id=task.id,
+            payload={
+                "step": step,
+                "recovery_type": "heartbeat_stall",
+                "attempt": attempt_number,
+                "max_retries": max_retries,
+                "backoff_seconds": backoff_seconds,
+                "next_retry_at": next_retry_at,
+                "error": task.error,
+            },
+        )
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.queued",
+            entity_id=task.id,
+            payload={"reason": "heartbeat_stall_auto_recovery", "step": step},
+        )
+        return True
 
     def _environment_recovery_settings(self) -> tuple[int, bool]:
         cfg = self.container.config.load()

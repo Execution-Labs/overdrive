@@ -65,6 +65,11 @@ _STEP_TIMEOUT_ALIASES = {"implement_fix": "implement"}
 _DEFAULT_STEP_TIMEOUT_SECONDS = 0  # 0 = no timeout
 _DEFAULT_HEARTBEAT_SECONDS = 60
 _DEFAULT_HEARTBEAT_GRACE_SECONDS = 240
+_DEFAULT_HEARTBEAT_GRACE_BY_STEP: dict[str, int] = {
+    "implement": 600,
+    "implement_fix": 600,
+}
+_HEARTBEAT_STALL_RETRY_GRACE_MULTIPLIER = 1.5
 
 # ---------------------------------------------------------------------------
 # Prompt layers
@@ -1752,15 +1757,35 @@ class LiveWorkerAdapter:
         return default_timeout
 
     @staticmethod
-    def _heartbeat_settings(cfg: dict[str, Any]) -> tuple[int, int]:
+    def _heartbeat_settings(
+        cfg: dict[str, Any],
+        *,
+        step: str = "",
+        is_heartbeat_stall_retry: bool = False,
+    ) -> tuple[int, int]:
         workers_cfg = cfg.get("workers") if isinstance(cfg, dict) else {}
         workers_cfg = workers_cfg if isinstance(workers_cfg, dict) else {}
         heartbeat_seconds = LiveWorkerAdapter._coerce_timeout(
             workers_cfg.get("heartbeat_seconds"), _DEFAULT_HEARTBEAT_SECONDS
         )
-        heartbeat_grace_seconds = LiveWorkerAdapter._coerce_timeout(
-            workers_cfg.get("heartbeat_grace_seconds"), _DEFAULT_HEARTBEAT_GRACE_SECONDS
-        )
+        # Resolve grace: per-step config → global config → built-in per-step default → 240s
+        grace_by_step = workers_cfg.get("heartbeat_grace_by_step")
+        grace_by_step = grace_by_step if isinstance(grace_by_step, dict) else {}
+        global_grace_raw = workers_cfg.get("heartbeat_grace_seconds")
+        if step and step in grace_by_step:
+            heartbeat_grace_seconds = LiveWorkerAdapter._coerce_timeout(
+                grace_by_step[step], _DEFAULT_HEARTBEAT_GRACE_SECONDS
+            )
+        elif global_grace_raw is not None:
+            heartbeat_grace_seconds = LiveWorkerAdapter._coerce_timeout(
+                global_grace_raw, _DEFAULT_HEARTBEAT_GRACE_SECONDS
+            )
+        elif step and step in _DEFAULT_HEARTBEAT_GRACE_BY_STEP:
+            heartbeat_grace_seconds = _DEFAULT_HEARTBEAT_GRACE_BY_STEP[step]
+        else:
+            heartbeat_grace_seconds = _DEFAULT_HEARTBEAT_GRACE_SECONDS
+        if is_heartbeat_stall_retry:
+            heartbeat_grace_seconds = int(heartbeat_grace_seconds * _HEARTBEAT_STALL_RETRY_GRACE_MULTIPLIER)
         if heartbeat_grace_seconds < heartbeat_seconds:
             heartbeat_grace_seconds = heartbeat_seconds
         return heartbeat_seconds, heartbeat_grace_seconds
@@ -1973,7 +1998,13 @@ class LiveWorkerAdapter:
         stdout_path = run_dir / "stdout.log"
         stderr_path = run_dir / "stderr.log"
         timeout_seconds = self._timeout_for_step(task, step)
-        heartbeat_seconds, heartbeat_grace_seconds = self._heartbeat_settings(cfg)
+        is_stall_retry = bool(
+            isinstance(task.metadata, dict)
+            and task.metadata.get("heartbeat_stall_recovery_attempts_by_step", {}).get(step)
+        )
+        heartbeat_seconds, heartbeat_grace_seconds = self._heartbeat_settings(
+            cfg, step=step, is_heartbeat_stall_retry=is_stall_retry,
+        )
         if not isinstance(task.metadata, dict):
             task.metadata = {}
         log_meta = {

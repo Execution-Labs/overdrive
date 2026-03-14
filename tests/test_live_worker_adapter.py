@@ -496,7 +496,8 @@ def test_heartbeat_defaults_are_forwarded(adapter: LiveWorkerAdapter) -> None:
 
     assert result.status == "ok"
     assert run_worker_mock.call_args.kwargs["heartbeat_seconds"] == 60
-    assert run_worker_mock.call_args.kwargs["heartbeat_grace_seconds"] == 240
+    # No global config set, so implement step uses built-in per-step default of 600s
+    assert run_worker_mock.call_args.kwargs["heartbeat_grace_seconds"] == 600
 
 
 def test_heartbeat_settings_from_workers_config(container: Container, adapter: LiveWorkerAdapter) -> None:
@@ -522,7 +523,8 @@ def test_heartbeat_settings_from_workers_config(container: Container, adapter: L
             return_value=run_result,
         ) as run_worker_mock,
     ):
-        result = adapter.run_step(task=_make_task(), step="implement", attempt=1)
+        # Use "plan" step which has no per-step default, so global config applies
+        result = adapter.run_step(task=_make_task(), step="plan", attempt=1)
 
     assert result.status == "ok"
     assert run_worker_mock.call_args.kwargs["heartbeat_seconds"] == 75
