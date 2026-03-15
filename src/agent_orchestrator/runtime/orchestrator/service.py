@@ -2392,6 +2392,21 @@ class OrchestratorService:
                     context["initial_head_sha"] = head_result.stdout.strip()
             except Exception:
                 pass
+        # Capture base branch HEAD so we can detect divergence at merge time.
+        if worktree_dir is not None and not context.get("base_branch_sha"):
+            try:
+                base_result = subprocess.run(
+                    ["git", "rev-parse", "--verify", "HEAD"],
+                    cwd=self.container.project_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                if base_result.returncode == 0 and base_result.stdout.strip():
+                    context["base_branch_sha"] = base_result.stdout.strip()
+            except Exception:
+                pass
         context["retained"] = False
         context["retained_reason"] = None
         context["retained_at"] = None

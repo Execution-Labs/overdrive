@@ -132,13 +132,14 @@ class IntegrationHealthChecker:
             return self._merge_count_since_check >= interval
         return False
 
-    def run_check(self, trigger_task_id: str) -> HealthCheckResult | None:
+    def run_check(self, trigger_task_id: str, *, force: bool = False) -> HealthCheckResult | None:
         """Run verification commands on the base branch and update health state.
 
         Returns ``None`` when the check is skipped (mode is off or periodic
-        interval not yet reached).
+        interval not yet reached).  Pass ``force=True`` to bypass the
+        mode/periodic gate (used by the post-merge hard gate).
         """
-        if not self.should_run():
+        if not force and not self.should_run():
             return None
 
         svc = self._service
