@@ -8,7 +8,8 @@ import remarkGfm from 'remark-gfm'
 import { humanizeLabel } from './ui/labels'
 import './styles/orchestrator.css'
 
-type RouteKey = 'board' | 'execution' | 'agents' | 'settings'
+type RouteKey = 'board' | 'execution' | 'settings'
+type SettingsTab = 'providers' | 'execution' | 'advanced'
 type CreateTab = 'task' | 'import'
 type TaskDetailTab = 'overview' | 'plan' | 'workdoc' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
 type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate' | 'review_commit'
@@ -448,8 +449,13 @@ function createEmptyLogAccum(taskId = ''): LogAccumState {
 const ROUTES: Array<{ key: RouteKey; label: string }> = [
   { key: 'board', label: 'Board' },
   { key: 'execution', label: 'Execution' },
-  { key: 'agents', label: 'Workers' },
   { key: 'settings', label: 'Settings' },
+]
+
+const SETTINGS_TABS: Array<{ key: SettingsTab; label: string }> = [
+  { key: 'providers', label: 'Providers' },
+  { key: 'execution', label: 'Execution' },
+  { key: 'advanced', label: 'Advanced' },
 ]
 
 const TASK_TYPE_OPTIONS = [
@@ -1726,6 +1732,7 @@ function formatProgressEntries(progress?: Record<string, unknown>): Array<{ key:
 
 export default function App() {
   const [route, setRoute] = useState<RouteKey>(() => routeFromHash(window.location.hash || localStorage.getItem(STORAGE_ROUTE) || '#/board'))
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('providers')
   const [projectDir, setProjectDir] = useState<string>(() => localStorage.getItem(STORAGE_PROJECT) || '')
   const [board, setBoard] = useState<BoardResponse>({ columns: {} })
   const [orchestrator, setOrchestrator] = useState<OrchestratorStatus | null>(null)
@@ -1956,7 +1963,6 @@ export default function App() {
 
   const [manualPinPath, setManualPinPath] = useState('')
   const [allowNonGit, setAllowNonGit] = useState(false)
-  const [projectSearch, setProjectSearch] = useState('')
   const [browseOpen, setBrowseOpen] = useState(false)
   const [browsePath, setBrowsePath] = useState('')
   const [browseParentPath, setBrowseParentPath] = useState<string | null>(null)
@@ -1971,6 +1977,12 @@ export default function App() {
   const [settingsSaving, setSettingsSaving] = useState(false)
   const [settingsError, setSettingsError] = useState('')
   const [settingsSuccess, setSettingsSuccess] = useState('')
+  const [providerConfigDirty, setProviderConfigDirty] = useState(false)
+  const [qualityGateDirty, setQualityGateDirty] = useState(false)
+  const [executionFormDirty, setExecutionFormDirty] = useState(false)
+  const [advancedRoutingDirty, setAdvancedRoutingDirty] = useState(false)
+  const [projectCommandsDirty, setProjectCommandsDirty] = useState(false)
+  const [advancedFormDirty, setAdvancedFormDirty] = useState(false)
   useEffect(() => {
     if (!settingsSuccess) return
     const timer = window.setTimeout(() => setSettingsSuccess(''), 4000)
@@ -2303,7 +2315,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (route !== 'settings' && route !== 'agents') return
+    if (route !== 'settings') return
     void loadSettings()
   }, [route, projectDir])
 
@@ -4144,7 +4156,7 @@ export default function App() {
     return providers
   }
 
-  async function saveSettings(event: FormEvent): Promise<void> {
+  async function saveSettings(event: { preventDefault(): void }): Promise<void> {
     event.preventDefault()
     setSettingsSaving(true)
     setSettingsError('')
@@ -4256,6 +4268,12 @@ export default function App() {
       })
       applySettings(normalizeSettings(updated))
       setSettingsSuccess('Settings saved.')
+      setProviderConfigDirty(false)
+      setQualityGateDirty(false)
+      setExecutionFormDirty(false)
+      setAdvancedRoutingDirty(false)
+      setProjectCommandsDirty(false)
+      setAdvancedFormDirty(false)
       await reloadAll()
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'unknown error'
@@ -4297,6 +4315,23 @@ export default function App() {
     }
   }
 
+  async function patchSettings(partial: Record<string, unknown>): Promise<void> {
+    try {
+      await requestJson<Partial<SystemSettings>>(buildApiUrl('/api/settings', projectDir), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(partial),
+      })
+    } catch {
+      void loadSettings()
+    }
+  }
+
+  async function setDefaultProvider(name: string): Promise<void> {
+    setSettingsWorkerDefault(name)
+    void patchSettings({ workers: { default: name } })
+  }
+
   async function handleRecheckProviders(): Promise<void> {
     setWorkerHealthRefreshing(true)
     try {
@@ -4317,8 +4352,15 @@ export default function App() {
       } else {
         next[normalizedStep] = provider.trim()
       }
-      setSettingsWorkerRouting(Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '')
+      const nextJson = Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : ''
+      setSettingsWorkerRouting(nextJson)
       setSettingsError('')
+      // Auto-save routing change
+      void requestJson<Partial<SystemSettings>>(buildApiUrl('/api/settings', projectDir), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workers: { routing: next } }),
+      }).catch(() => void loadSettings())
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'invalid routing JSON'
       setSettingsError(detail)
@@ -5916,11 +5958,50 @@ export default function App() {
             </p>
           </div>
         </div>
+        {(() => {
+          const routingByStep = new Map(workerRoutingRows.map((row) => [row.step, row]))
+          const resolvedProvider = (task: TaskRecord): string => {
+            const step = String(task.current_step || '').trim() || (isPlanningTaskType(task.task_type) ? 'plan' : 'implement')
+            return routingByStep.get(step)?.provider || workerDefaultProvider
+          }
+          return (
+            <div className="list-stack">
+              <p className="field-label section-heading">Worker Snapshot</p>
+              {inProgressTasks.map((task) => (
+                <div className="row-card" key={task.id}>
+                  <div>
+                    <p className="task-title">{task.title}</p>
+                    <p className="task-meta">
+                      {task.id} · step: {task.current_step || 'implement'}
+                    </p>
+                  </div>
+                  <div className="inline-actions">
+                    <span className="status-pill status-running">{resolvedProvider(task)}</span>
+                  </div>
+                </div>
+              ))}
+              {inProgressTasks.length === 0 ? <p className="empty">No tasks currently in progress.</p> : null}
+            </div>
+          )
+        })()}
       </section>
     )
   }
 
-  function renderAgents(): JSX.Element {
+  function renderSettings(): JSX.Element {
+    const promptSteps = Array.from(
+      new Set([
+        ...Object.keys(settingsPromptDefaults),
+        ...Object.keys(settingsPromptOverrides),
+        ...Object.keys(settingsLegacyPromptInjections),
+      ])
+    ).sort()
+    const activePromptStep = promptSteps.includes(settingsPromptStep)
+      ? settingsPromptStep
+      : (promptSteps[0] || '')
+    const defaultPromptText = activePromptStep ? (settingsPromptDefaults[activePromptStep] || '') : ''
+    const overridePromptText = activePromptStep ? (settingsPromptOverrides[activePromptStep] || '') : ''
+
     const healthOrder = ['codex', 'claude', 'ollama']
     const providerHealth = [...workerHealth].sort((a, b) => {
       const aIndex = healthOrder.indexOf(a.name)
@@ -5930,8 +6011,6 @@ export default function App() {
       if (aRank !== bRank) return aRank - bRank
       return a.name.localeCompare(b.name)
     })
-    const inProgressTasks = board.columns?.in_progress || []
-    const routingByStep = new Map(workerRoutingRows.map((row) => [row.step, row]))
     let editableRoutingMap: Record<string, string> = {}
     try {
       editableRoutingMap = parseStringMap(settingsWorkerRouting, 'Worker routing map')
@@ -5946,77 +6025,228 @@ export default function App() {
           .concat(workerDefaultProvider || 'codex')
       )
     ).sort((a, b) => a.localeCompare(b))
-
     const statusClass = (status: WorkerHealthRecord['status']): string => {
       if (status === 'connected') return 'status-pill status-running'
       if (status === 'not_configured') return 'status-pill status-paused'
       return 'status-pill status-failed'
     }
-
-    const resolvedProviderForTask = (task: TaskRecord): string => {
-      const step = String(task.current_step || '').trim() || (isPlanningTaskType(task.task_type) ? 'plan' : 'implement')
-      return routingByStep.get(step)?.provider || workerDefaultProvider
-    }
-
     const stepLabel = (step: string): string => {
       const normalized = String(step || '').trim().toLowerCase()
       if (normalized === 'plan') return 'Task Planning'
-
       return humanizeLabel(normalized)
     }
 
     return (
       <section className="panel">
         <header className="panel-head">
-          <h2>Workers</h2>
+          <h2>Settings</h2>
         </header>
-        <div className="agents-layout">
-          <article className="settings-card agents-active-card">
-            <h3>Provider Status</h3>
-            <p className="field-label">Availability of configured worker providers.</p>
-            <div className="inline-actions workers-recheck-actions">
-              <button
-                className={`button ${workerHealthRefreshing ? 'is-loading' : ''}`}
-                onClick={() => void handleRecheckProviders()}
-                disabled={workerHealthRefreshing}
-                aria-busy={workerHealthRefreshing}
-              >
-                {workerHealthRefreshing ? 'Rechecking...' : 'Recheck providers'}
-              </button>
-            </div>
-            <div className="list-stack">
-              {providerHealth.map((provider) => (
-                <div className="row-card" key={provider.name}>
-                  <div>
-                    <p className="task-title">{humanizeLabel(provider.name)}</p>
-                    <p className="task-meta">
-                      type: {provider.type}
-                      {provider.model ? ` · model: ${provider.model}` : ''}
-                    </p>
-                    {provider.command ? <p className="task-meta">command: {provider.command}</p> : null}
-                    {provider.endpoint ? <p className="task-meta">endpoint: {provider.endpoint}</p> : null}
-                    <p className="task-meta">{provider.detail || 'No diagnostics message.'}</p>
+
+        <div className="tab-row" role="tablist" aria-label="Settings tabs">
+          {SETTINGS_TABS.map((tab) => (
+            <button
+              key={tab.key}
+              role="tab"
+              aria-selected={settingsTab === tab.key}
+              className={`tab ${settingsTab === tab.key ? 'is-active' : ''}`}
+              onClick={() => setSettingsTab(tab.key)}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {settingsTab === 'providers' ? (
+          <div className="settings-tab-content">
+            <article className="settings-card">
+              <div className="settings-card-head">
+                <h3>Default Provider</h3>
+                <button
+                  className={`button button-icon ${workerHealthRefreshing ? 'is-loading' : ''}`}
+                  onClick={() => void handleRecheckProviders()}
+                  disabled={workerHealthRefreshing}
+                  aria-busy={workerHealthRefreshing}
+                  aria-label="Recheck providers"
+                  title="Recheck providers"
+                >
+                  &#x21bb;
+                </button>
+              </div>
+              <div className="list-stack">
+                {providerHealth.map((provider) => (
+                  <div
+                    className={`row-card row-card-clickable${settingsWorkerDefault === provider.name ? ' row-card-default' : ''}`}
+                    key={provider.name}
+                    onClick={() => { if (provider.configured && settingsWorkerDefault !== provider.name) void setDefaultProvider(provider.name) }}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(event) => { if ((event.key === 'Enter' || event.key === ' ') && provider.configured && settingsWorkerDefault !== provider.name) void setDefaultProvider(provider.name) }}
+                  >
+                    <div>
+                      <p className="task-title">
+                        {humanizeLabel(provider.name)}
+                        <span className="task-meta" style={{ fontWeight: 'normal', marginLeft: '0.5em' }}>
+                          {[provider.model, provider.command, provider.endpoint].filter(Boolean).join(' · ')}
+                        </span>
+                      </p>
+                      <p className="task-meta">{provider.detail || 'No diagnostics message.'}</p>
+                    </div>
+                    <div className="inline-actions">
+                      {settingsWorkerDefault === provider.name ? (
+                        <span className="status-pill status-pill-default">Default</span>
+                      ) : null}
+                      <span className={statusClass(provider.status)}>{humanizeLabel(provider.status)}</span>
+                    </div>
                   </div>
-                  <div className="inline-actions">
-                    <span className={statusClass(provider.status)}>{humanizeLabel(provider.status)}</span>
+                ))}
+                {providerHealth.length === 0 ? <p className="empty">No providers detected.</p> : null}
+              </div>
+            </article>
+
+            <form className="form-stack" onSubmit={(event) => void saveSettings(event)}>
+              <article className="settings-card">
+                <h3>Provider Configuration</h3>
+                <div className="form-stack">
+                  <select
+                    id="settings-provider-view"
+                    aria-label="Configure provider"
+                    value={settingsProviderView}
+                    onChange={(event) => setSettingsProviderView(event.target.value as 'codex' | 'ollama' | 'claude')}
+                  >
+                    <option value="codex">codex</option>
+                    <option value="ollama">ollama</option>
+                    <option value="claude">claude</option>
+                  </select>
+                  <div className="provider-grid">
+                    {settingsProviderView === 'codex' ? (
+                      <div className="provider-card">
+
+                      <label className="field-label" htmlFor="settings-codex-command">Codex command</label>
+                      <input
+                        id="settings-codex-command"
+                        value={settingsCodexCommand}
+                        onChange={(event) => { setSettingsCodexCommand(event.target.value); setProviderConfigDirty(true) }}
+                        placeholder="codex exec"
+                      />
+                      <label className="field-label" htmlFor="settings-codex-model">Codex model (optional)</label>
+                      <input
+                        id="settings-codex-model"
+                        value={settingsCodexModel}
+                        onChange={(event) => { setSettingsCodexModel(event.target.value); setProviderConfigDirty(true) }}
+                        placeholder="gpt-5.3-codex"
+                      />
+                      <label className="field-label" htmlFor="settings-codex-execution-mode">Codex execution mode</label>
+                      <select
+                        id="settings-codex-execution-mode"
+                        value={settingsCodexExecutionMode}
+                        onChange={(event) => { setSettingsCodexExecutionMode(event.target.value as 'sandboxed' | 'host_access'); setProviderConfigDirty(true) }}
+                      >
+                        <option value="sandboxed">sandboxed</option>
+                        <option value="host_access">host_access</option>
+                      </select>
+                      <label className="field-label" htmlFor="settings-codex-effort">Codex effort (optional)</label>
+                      <select
+                        id="settings-codex-effort"
+                        value={settingsCodexEffort}
+                        onChange={(event) => { setSettingsCodexEffort(event.target.value); setProviderConfigDirty(true) }}
+                      >
+                        <option value="">(none)</option>
+                        <option value="low">low</option>
+                        <option value="medium">medium</option>
+                        <option value="high">high</option>
+                      </select>
+                      </div>
+                    ) : null}
+                    {settingsProviderView === 'ollama' ? (
+                      <div className="provider-card">
+
+                      <label className="field-label" htmlFor="settings-ollama-endpoint">Ollama endpoint</label>
+                      <input
+                        id="settings-ollama-endpoint"
+                        value={settingsOllamaEndpoint}
+                        onChange={(event) => { setSettingsOllamaEndpoint(event.target.value); setProviderConfigDirty(true) }}
+                        placeholder="http://localhost:11434"
+                      />
+                      <label className="field-label" htmlFor="settings-ollama-model">Ollama model</label>
+                      <input
+                        id="settings-ollama-model"
+                        value={settingsOllamaModel}
+                        onChange={(event) => { setSettingsOllamaModel(event.target.value); setProviderConfigDirty(true) }}
+                        placeholder="llama3.1:8b"
+                      />
+                      <div className="inline-actions">
+                        <input
+                          aria-label="Ollama temperature"
+                          value={settingsOllamaTemperature}
+                          onChange={(event) => { setSettingsOllamaTemperature(event.target.value); setProviderConfigDirty(true) }}
+                          placeholder="temperature"
+                        />
+                        <input
+                          aria-label="Ollama num ctx"
+                          value={settingsOllamaNumCtx}
+                          onChange={(event) => { setSettingsOllamaNumCtx(event.target.value); setProviderConfigDirty(true) }}
+                          placeholder="num_ctx"
+                        />
+                      </div>
+                      </div>
+                    ) : null}
+                    {settingsProviderView === 'claude' ? (
+                      <div className="provider-card">
+
+                      <label className="field-label" htmlFor="settings-claude-command">Claude command</label>
+                      <input
+                        id="settings-claude-command"
+                        value={settingsClaudeCommand}
+                        onChange={(event) => { setSettingsClaudeCommand(event.target.value); setProviderConfigDirty(true) }}
+                        placeholder="claude -p"
+                      />
+                      <label className="field-label" htmlFor="settings-claude-model">Claude model (optional)</label>
+                      <input
+                        id="settings-claude-model"
+                        value={settingsClaudeModel}
+                        onChange={(event) => { setSettingsClaudeModel(event.target.value); setProviderConfigDirty(true) }}
+                        placeholder="sonnet"
+                      />
+                      <label className="field-label" htmlFor="settings-claude-execution-mode">Claude execution mode</label>
+                      <select
+                        id="settings-claude-execution-mode"
+                        value={settingsClaudeExecutionMode}
+                        onChange={(event) => { setSettingsClaudeExecutionMode(event.target.value as 'sandboxed' | 'host_access'); setProviderConfigDirty(true) }}
+                      >
+                        <option value="host_access">host_access</option>
+                        <option value="sandboxed">sandboxed</option>
+                      </select>
+                      <label className="field-label" htmlFor="settings-claude-effort">Claude effort (optional)</label>
+                      <select
+                        id="settings-claude-effort"
+                        value={settingsClaudeEffort}
+                        onChange={(event) => { setSettingsClaudeEffort(event.target.value); setProviderConfigDirty(true) }}
+                      >
+                        <option value="">(none)</option>
+                        <option value="low">low</option>
+                        <option value="medium">medium</option>
+                        <option value="high">high</option>
+                      </select>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
-              ))}
-              {providerHealth.length === 0 ? <p className="empty">No providers detected.</p> : null}
-            </div>
-          </article>
+                <div className="inline-actions" style={{ marginTop: '0.5rem' }}>
+                  <button className="button button-primary button-sm" type="submit" disabled={settingsSaving || !providerConfigDirty}>
+                    {settingsSaving ? 'Saving...' : 'Save'}
+                  </button>
+                  {settingsError ? <span className="error-banner">{settingsError}</span> : null}
+                  {settingsSuccess ? <span className="field-label">{settingsSuccess}</span> : null}
+                </div>
+              </article>
+            </form>
 
-          <article className="settings-card agents-presence-card">
-            <h3>Routing Table</h3>
-            <p className="field-label">Default provider: {workerDefaultProvider}</p>
-            <div className="list-stack">
-              {workerRoutingRows.map((row) => (
-                <div className="row-card" key={row.step}>
-                  <div>
-                    <p className="task-title">{stepLabel(row.step)}</p>
-                    <p className="task-meta">{row.source === 'explicit' ? 'Explicit route' : 'Default route'}</p>
-                  </div>
-                  <div className="inline-actions">
+            <article className="settings-card">
+              <h3>Step Routing</h3>
+              <div className="routing-table">
+                {workerRoutingRows.map((row) => (
+                  <div className="routing-row" key={row.step}>
+                    <span className="routing-step">{stepLabel(row.step)}</span>
                     <select
                       aria-label={`Route ${row.step} provider`}
                       value={editableRoutingMap[row.step] ?? ''}
@@ -6030,673 +6260,500 @@ export default function App() {
                       ))}
                     </select>
                   </div>
-                </div>
-              ))}
-              {workerRoutingRows.length === 0 ? <p className="empty">No routing rules configured; default applies to all steps.</p> : null}
-            </div>
-            <details className="advanced-fields workers-advanced">
-              <summary>Advanced</summary>
-              <form className="advanced-fields-body form-stack" onSubmit={(event) => void saveWorkerMaps(event)}>
-                <label className="field-label" htmlFor="settings-worker-routing">Worker routing map (JSON object: step {'->'} provider)</label>
-                <div className="json-editor-group">
-                  <textarea
-                    id="settings-worker-routing"
-                    className="json-editor-textarea"
-                    rows={4}
-                    value={settingsWorkerRouting}
-                    onChange={(event) => setSettingsWorkerRouting(event.target.value)}
-                    placeholder={WORKER_ROUTING_EXAMPLE}
-                  />
-                  <div className="inline-actions json-editor-actions">
-                    <button
-                      className="button"
-                      type="button"
-                      onClick={() => handleFormatJsonField('Worker routing map', settingsWorkerRouting, setSettingsWorkerRouting)}
-                    >
-                      Format
-                    </button>
-                    <button className="button" type="button" onClick={() => setSettingsWorkerRouting('')}>
-                      Clear
-                    </button>
+                ))}
+                {workerRoutingRows.length === 0 ? <p className="empty">No routing rules configured; default applies to all steps.</p> : null}
+              </div>
+              <details className="advanced-fields workers-advanced">
+                <summary>Advanced</summary>
+                <form className="advanced-fields-body form-stack" onSubmit={(event) => void saveWorkerMaps(event)}>
+                  <label className="field-label" htmlFor="settings-worker-routing">Worker routing map (JSON object: step {'->'} provider)</label>
+                  <div className="json-editor-group">
+                    <textarea
+                      id="settings-worker-routing"
+                      className="json-editor-textarea"
+                      rows={4}
+                      value={settingsWorkerRouting}
+                      onChange={(event) => setSettingsWorkerRouting(event.target.value)}
+                      placeholder={WORKER_ROUTING_EXAMPLE}
+                    />
+                    <div className="inline-actions json-editor-actions">
+                      <button
+                        className="button"
+                        type="button"
+                        onClick={() => handleFormatJsonField('Worker routing map', settingsWorkerRouting, setSettingsWorkerRouting)}
+                      >
+                        Format
+                      </button>
+                      <button className="button" type="button" onClick={() => setSettingsWorkerRouting('')}>
+                        Clear
+                      </button>
+                    </div>
                   </div>
-                </div>
-                <label
-                  className="field-label"
-                  htmlFor="settings-worker-providers"
-                  title="Configure reasoning effort in your CLI setup first (Codex/Claude profile or config). Agent Orchestrator only passes flags supported by your installed CLI version."
-                >
-                  Worker providers (JSON object, optional advanced overrides)
-                </label>
-                <div className="json-editor-group">
-                  <textarea
-                    id="settings-worker-providers"
-                    className="json-editor-textarea"
-                    rows={8}
-                    value={settingsWorkerProviders}
-                    onChange={(event) => setSettingsWorkerProviders(event.target.value)}
-                    placeholder={WORKER_PROVIDERS_EXAMPLE}
-                  />
-                  <div className="inline-actions json-editor-actions">
-                    <button
-                      className="button"
-                      type="button"
-                      onClick={() => handleFormatJsonField('Worker providers', settingsWorkerProviders, setSettingsWorkerProviders)}
-                    >
-                      Format
-                    </button>
-                    <button className="button" type="button" onClick={() => setSettingsWorkerProviders('')}>
-                      Clear
-                    </button>
-                  </div>
-                </div>
-                <div className="inline-actions">
-                  <button className="button button-primary" type="submit" disabled={settingsSaving}>
-                    {settingsSaving ? 'Saving...' : 'Save worker routing'}
-                  </button>
-                  <button className="button" type="button" onClick={() => void loadSettings()} disabled={settingsLoading}>
-                    {settingsLoading ? 'Loading...' : 'Reload'}
-                  </button>
-                </div>
-                {settingsError ? <p className="error-banner">{settingsError}</p> : null}
-                {settingsSuccess ? <p className="field-label">{settingsSuccess}</p> : null}
-              </form>
-            </details>
-          </article>
-
-          <article className="settings-card agents-catalog-card">
-            <h3>Execution Snapshot</h3>
-            <p className="field-label">
-              Queue depth: {orchestrator?.queue_depth ?? 0} · In progress: {orchestrator?.in_progress ?? inProgressTasks.length}
-            </p>
-            <div className="list-stack">
-              {inProgressTasks.map((task) => (
-                <div className="row-card" key={task.id}>
-                  <div>
-                    <p className="task-title">{task.title}</p>
-                    <p className="task-meta">
-                      {task.id} · step: {task.current_step || 'implement'}
-                    </p>
+                  <label
+                    className="field-label"
+                    htmlFor="settings-worker-providers"
+                    title="Configure reasoning effort in your CLI setup first (Codex/Claude profile or config). Agent Orchestrator only passes flags supported by your installed CLI version."
+                  >
+                    Worker providers (JSON object, optional advanced overrides)
+                  </label>
+                  <div className="json-editor-group">
+                    <textarea
+                      id="settings-worker-providers"
+                      className="json-editor-textarea"
+                      rows={8}
+                      value={settingsWorkerProviders}
+                      onChange={(event) => { setSettingsWorkerProviders(event.target.value); setAdvancedRoutingDirty(true) }}
+                      placeholder={WORKER_PROVIDERS_EXAMPLE}
+                    />
+                    <div className="inline-actions json-editor-actions">
+                      <button
+                        className="button"
+                        type="button"
+                        onClick={() => handleFormatJsonField('Worker providers', settingsWorkerProviders, setSettingsWorkerProviders)}
+                      >
+                        Format
+                      </button>
+                      <button className="button" type="button" onClick={() => setSettingsWorkerProviders('')}>
+                        Clear
+                      </button>
+                    </div>
                   </div>
                   <div className="inline-actions">
-                    <span className="status-pill status-running">{resolvedProviderForTask(task)}</span>
+                    <button className="button button-primary" type="submit" disabled={settingsSaving || !advancedRoutingDirty}>
+                      {settingsSaving ? 'Saving...' : 'Save'}
+                    </button>
+                    <button className="button" type="button" onClick={() => void loadSettings()} disabled={settingsLoading}>
+                      {settingsLoading ? 'Loading...' : 'Reload'}
+                    </button>
                   </div>
-                </div>
-              ))}
-              {inProgressTasks.length === 0 ? <p className="empty">No tasks currently in progress.</p> : null}
-              <p className="task-meta">Worker labels are derived from settings routing and default provider.</p>
-            </div>
-          </article>
-        </div>
-      </section>
-    )
-  }
-
-  function renderSettings(): JSX.Element {
-    const filteredProjects = projects.filter((project) => project.path.toLowerCase().includes(projectSearch.toLowerCase()))
-    const promptSteps = Array.from(
-      new Set([
-        ...Object.keys(settingsPromptDefaults),
-        ...Object.keys(settingsPromptOverrides),
-        ...Object.keys(settingsLegacyPromptInjections),
-      ])
-    ).sort()
-    const activePromptStep = promptSteps.includes(settingsPromptStep)
-      ? settingsPromptStep
-      : (promptSteps[0] || '')
-    const defaultPromptText = activePromptStep ? (settingsPromptDefaults[activePromptStep] || '') : ''
-    const overridePromptText = activePromptStep ? (settingsPromptOverrides[activePromptStep] || '') : ''
-    return (
-      <section className="panel">
-        <header className="panel-head">
-          <h2>Settings</h2>
-        </header>
-
-        <div className="settings-grid">
-          <article className="settings-card settings-card-projects">
-            <h3>Projects</h3>
-            <label className="field-label" htmlFor="project-selector">Active project</label>
-            <input
-              id="project-search"
-              value={projectSearch}
-              onChange={(event) => setProjectSearch(event.target.value)}
-              placeholder="Search discovered/pinned projects"
-            />
-            <select
-              id="project-selector"
-              value={projectDir}
-              onChange={(event) => setProjectDir(event.target.value)}
-            >
-              <option value="">Current workspace</option>
-              {filteredProjects.map((project) => (
-                <option key={`${project.id}-${project.path}`} value={project.path}>
-                  {project.path} ({humanizeLabel(project.source)})
-                </option>
-              ))}
-            </select>
-
-            <form className="form-stack" onSubmit={(event) => void pinManualProject(event)}>
-              <label className="field-label" htmlFor="manual-project-path">Pin project by absolute path</label>
-              <input
-                id="manual-project-path"
-                value={manualPinPath}
-                onChange={(event) => setManualPinPath(event.target.value)}
-                placeholder="/absolute/path/to/repo"
-                required
-              />
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={allowNonGit}
-                  onChange={(event) => setAllowNonGit(event.target.checked)}
-                />
-                Allow non-git directory
-              </label>
-              <button className="button button-primary" type="submit">Pin project</button>
-            </form>
-            <div className="list-stack">
-              <p className="field-label">Pinned projects</p>
-              {pinnedProjects.map((project) => (
-                <div className="row-card" key={project.id}>
-                  <div>
-                    <p className="task-title">{project.id}</p>
-                    <p className="task-meta">{project.path}</p>
-                  </div>
-                  <button className="button button-danger" onClick={() => void unpinProject(project.id)}>Unpin</button>
-                </div>
-              ))}
-              {pinnedProjects.length === 0 ? <p className="empty">No pinned projects.</p> : null}
-            </div>
-          </article>
-
-          <article className="settings-card settings-card-diagnostics">
-            <h3>Diagnostics</h3>
-            <p>Schema version: 3</p>
-            <p>Selected route: {humanizeLabel(route)}</p>
-            <p>Project dir: {projectDir || 'current workspace'}</p>
-          </article>
-
-          <article className="settings-card settings-card-routing">
-            <h3>Execution & Routing</h3>
-            <form id="settings-main-form" className="form-stack" onSubmit={(event) => void saveSettings(event)}>
-              <p className="settings-subheading">Task Defaults</p>
-              <p className="field-label">
-                Applied to newly created tasks. You can still override these per task.
-              </p>
-              <p className="field-label">Default HITL mode</p>
-              <div className="toggle-group" role="group" aria-label="Default HITL mode">
-                {(['autopilot', 'supervised', 'review_only'] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    className={`toggle-button ${settingsDefaultHitlMode === mode ? 'is-active' : ''}`}
-                    aria-pressed={settingsDefaultHitlMode === mode}
-                    onClick={() => setSettingsDefaultHitlMode(mode)}
-                  >
-                    {humanizeLabel(mode)}
-                  </button>
-                ))}
-              </div>
-
-              <p className="field-label">
-                Controls whether workers may install new dependencies.
-              </p>
-              <div className="toggle-group" role="group" aria-label="Default dependency policy">
-                {(['permissive', 'prudent', 'strict'] as const).map((level) => (
-                  <button
-                    key={level}
-                    type="button"
-                    className={`toggle-button ${settingsDependencyPolicy === level ? 'is-active' : ''}`}
-                    aria-pressed={settingsDependencyPolicy === level}
-                    onClick={() => setSettingsDependencyPolicy(level)}
-                  >
-                    {humanizeLabel(level)}
-                  </button>
-                ))}
-              </div>
-              <p className="field-label">
-                {settingsDependencyPolicy === 'permissive' && 'Workers will prefer well-maintained libraries over manual implementation and install what they need.'}
-                {settingsDependencyPolicy === 'prudent' && 'Workers will prefer existing dependencies but may install new ones when manual implementation would be unreliable or disproportionately complex.'}
-                {settingsDependencyPolicy === 'strict' && 'Workers must not install any new dependencies. All solutions must use only what is already in the project.'}
-              </p>
-
-              <label className="field-label" htmlFor="settings-step-timeout-seconds">Default task timeout (seconds, 0 = no timeout)</label>
-              <input
-                id="settings-step-timeout-seconds"
-                value={settingsStepTimeoutSeconds}
-                onChange={(event) => setSettingsStepTimeoutSeconds(event.target.value)}
-                inputMode="numeric"
-              />
-
-              <p className="field-label">
-                Quality gate thresholds: unresolved findings allowed before a task can pass quality checks.
-              </p>
-              <div className="quality-gate-grid">
-                <div className="quality-gate-row">
-                  <div>
-                    <p className="quality-gate-label">
-                      <span className="quality-severity-badge severity-critical">Critical</span>
-                    </p>
-                    <p className="field-label">Release-blocking or security-critical issues.</p>
-                  </div>
-                  <div className="quality-gate-input-wrap">
-                    <label className="field-label" htmlFor="quality-gate-critical-input">Allowed unresolved</label>
-                    <input
-                      id="quality-gate-critical-input"
-                      aria-label="Quality gate critical"
-                      value={settingsGateCritical}
-                      onChange={(event) => setSettingsGateCritical(event.target.value)}
-                      inputMode="numeric"
-                    />
-                  </div>
-                </div>
-                <div className="quality-gate-row">
-                  <div>
-                    <p className="quality-gate-label">
-                      <span className="quality-severity-badge severity-high">High</span>
-                    </p>
-                    <p className="field-label">Major correctness or reliability problems.</p>
-                  </div>
-                  <div className="quality-gate-input-wrap">
-                    <label className="field-label" htmlFor="quality-gate-high-input">Allowed unresolved</label>
-                    <input
-                      id="quality-gate-high-input"
-                      aria-label="Quality gate high"
-                      value={settingsGateHigh}
-                      onChange={(event) => setSettingsGateHigh(event.target.value)}
-                      inputMode="numeric"
-                    />
-                  </div>
-                </div>
-                <div className="quality-gate-row">
-                  <div>
-                    <p className="quality-gate-label">
-                      <span className="quality-severity-badge severity-medium">Medium</span>
-                    </p>
-                    <p className="field-label">Important issues that should be addressed soon.</p>
-                  </div>
-                  <div className="quality-gate-input-wrap">
-                    <label className="field-label" htmlFor="quality-gate-medium-input">Allowed unresolved</label>
-                    <input
-                      id="quality-gate-medium-input"
-                      aria-label="Quality gate medium"
-                      value={settingsGateMedium}
-                      onChange={(event) => setSettingsGateMedium(event.target.value)}
-                      inputMode="numeric"
-                    />
-                  </div>
-                </div>
-                <div className="quality-gate-row">
-                  <div>
-                    <p className="quality-gate-label">
-                      <span className="quality-severity-badge severity-low">Low</span>
-                    </p>
-                    <p className="field-label">Minor issues, cleanup, and polish improvements.</p>
-                  </div>
-                  <div className="quality-gate-input-wrap">
-                    <label className="field-label" htmlFor="quality-gate-low-input">Allowed unresolved</label>
-                    <input
-                      id="quality-gate-low-input"
-                      aria-label="Quality gate low"
-                      value={settingsGateLow}
-                      onChange={(event) => setSettingsGateLow(event.target.value)}
-                      inputMode="numeric"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <p className="settings-subheading">Execution Controls</p>
-              <label className="field-label" htmlFor="settings-review-attempts">Max review attempts</label>
-              <input
-                id="settings-review-attempts"
-                value={settingsMaxReviewAttempts}
-                onChange={(event) => setSettingsMaxReviewAttempts(event.target.value)}
-                inputMode="numeric"
-              />
-              <label className="field-label" htmlFor="settings-merge-conflict-attempts">Max merge conflict attempts</label>
-              <input
-                id="settings-merge-conflict-attempts"
-                value={settingsMaxMergeConflictAttempts}
-                onChange={(event) => setSettingsMaxMergeConflictAttempts(event.target.value)}
-                inputMode="numeric"
-              />
-              <label className="field-label" htmlFor="settings-concurrency">Orchestrator concurrency</label>
-              <input
-                id="settings-concurrency"
-                value={settingsConcurrency}
-                onChange={(event) => setSettingsConcurrency(event.target.value)}
-                inputMode="numeric"
-              />
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={settingsAutoDeps}
-                  onChange={(event) => setSettingsAutoDeps(event.target.checked)}
-                />
-                Auto dependency analysis
-              </label>
-
-              <p className="settings-subheading">Worker Selection</p>
-              <label className="field-label" htmlFor="settings-worker-default">Default worker provider</label>
-              <select
-                id="settings-worker-default"
-                value={settingsWorkerDefault}
-                onChange={(event) => setSettingsWorkerDefault(event.target.value)}
-              >
-                <option value="codex">codex</option>
-                <option value="ollama">ollama</option>
-                <option value="claude">claude</option>
-              </select>
-              <p className="settings-subheading">Provider Configuration</p>
-              <label className="field-label" htmlFor="settings-provider-view">Configure provider</label>
-              <select
-                id="settings-provider-view"
-                value={settingsProviderView}
-                onChange={(event) => setSettingsProviderView(event.target.value as 'codex' | 'ollama' | 'claude')}
-              >
-                <option value="codex">codex</option>
-                <option value="ollama">ollama</option>
-                <option value="claude">claude</option>
-              </select>
-              <div className="provider-grid">
-                {settingsProviderView === 'codex' ? (
-                  <div className="provider-card">
-                  <p className="field-label">Codex provider</p>
-                  <label className="field-label" htmlFor="settings-codex-command">Codex command</label>
-                  <input
-                    id="settings-codex-command"
-                    value={settingsCodexCommand}
-                    onChange={(event) => setSettingsCodexCommand(event.target.value)}
-                    placeholder="codex exec"
-                  />
-                  <label className="field-label" htmlFor="settings-codex-model">Codex model (optional)</label>
-                  <input
-                    id="settings-codex-model"
-                    value={settingsCodexModel}
-                    onChange={(event) => setSettingsCodexModel(event.target.value)}
-                    placeholder="gpt-5.3-codex"
-                  />
-                  <label className="field-label" htmlFor="settings-codex-execution-mode">Codex execution mode</label>
-                  <select
-                    id="settings-codex-execution-mode"
-                    value={settingsCodexExecutionMode}
-                    onChange={(event) => setSettingsCodexExecutionMode(event.target.value as 'sandboxed' | 'host_access')}
-                  >
-                    <option value="sandboxed">sandboxed</option>
-                    <option value="host_access">host_access</option>
-                  </select>
-                  <label className="field-label" htmlFor="settings-codex-effort">Codex effort (optional)</label>
-                  <select
-                    id="settings-codex-effort"
-                    value={settingsCodexEffort}
-                    onChange={(event) => setSettingsCodexEffort(event.target.value)}
-                  >
-                    <option value="">(none)</option>
-                    <option value="low">low</option>
-                    <option value="medium">medium</option>
-                    <option value="high">high</option>
-                  </select>
-                  </div>
-                ) : null}
-                {settingsProviderView === 'ollama' ? (
-                  <div className="provider-card">
-                  <p className="field-label">Ollama provider</p>
-                  <label className="field-label" htmlFor="settings-ollama-endpoint">Ollama endpoint</label>
-                  <input
-                    id="settings-ollama-endpoint"
-                    value={settingsOllamaEndpoint}
-                    onChange={(event) => setSettingsOllamaEndpoint(event.target.value)}
-                    placeholder="http://localhost:11434"
-                  />
-                  <label className="field-label" htmlFor="settings-ollama-model">Ollama model</label>
-                  <input
-                    id="settings-ollama-model"
-                    value={settingsOllamaModel}
-                    onChange={(event) => setSettingsOllamaModel(event.target.value)}
-                    placeholder="llama3.1:8b"
-                  />
-                  <div className="inline-actions">
-                    <input
-                      aria-label="Ollama temperature"
-                      value={settingsOllamaTemperature}
-                      onChange={(event) => setSettingsOllamaTemperature(event.target.value)}
-                      placeholder="temperature"
-                    />
-                    <input
-                      aria-label="Ollama num ctx"
-                      value={settingsOllamaNumCtx}
-                      onChange={(event) => setSettingsOllamaNumCtx(event.target.value)}
-                      placeholder="num_ctx"
-                    />
-                  </div>
-                  </div>
-                ) : null}
-                {settingsProviderView === 'claude' ? (
-                  <div className="provider-card">
-                  <p className="field-label">Claude provider</p>
-                  <label className="field-label" htmlFor="settings-claude-command">Claude command</label>
-                  <input
-                    id="settings-claude-command"
-                    value={settingsClaudeCommand}
-                    onChange={(event) => setSettingsClaudeCommand(event.target.value)}
-                    placeholder="claude -p"
-                  />
-                  <label className="field-label" htmlFor="settings-claude-model">Claude model (optional)</label>
-                  <input
-                    id="settings-claude-model"
-                    value={settingsClaudeModel}
-                    onChange={(event) => setSettingsClaudeModel(event.target.value)}
-                    placeholder="sonnet"
-                  />
-                  <label className="field-label" htmlFor="settings-claude-execution-mode">Claude execution mode</label>
-                  <select
-                    id="settings-claude-execution-mode"
-                    value={settingsClaudeExecutionMode}
-                    onChange={(event) => setSettingsClaudeExecutionMode(event.target.value as 'sandboxed' | 'host_access')}
-                  >
-                    <option value="host_access">host_access</option>
-                    <option value="sandboxed">sandboxed</option>
-                  </select>
-                  <label className="field-label" htmlFor="settings-claude-effort">Claude effort (optional)</label>
-                  <select
-                    id="settings-claude-effort"
-                    value={settingsClaudeEffort}
-                    onChange={(event) => setSettingsClaudeEffort(event.target.value)}
-                  >
-                    <option value="">(none)</option>
-                    <option value="low">low</option>
-                    <option value="medium">medium</option>
-                    <option value="high">high</option>
-                  </select>
-                  </div>
-                ) : null}
-              </div>
-
-              <p className="settings-subheading">Project Commands</p>
-              <label className="field-label" htmlFor="settings-project-commands">Project commands by language (YAML format)</label>
-              <p className="field-label">
-                Used by workers during implement/review steps. Keys are language names (`python`, `typescript`, `go`) and each language supports `test`, `lint`, `typecheck`, `format`.
-              </p>
-              <div className="json-editor-group">
-                <textarea
-                  id="settings-project-commands"
-                  className="json-editor-textarea"
-                  rows={8}
-                  value={settingsProjectCommands}
-                  onChange={(event) => setSettingsProjectCommands(event.target.value)}
-                  placeholder={PROJECT_COMMANDS_EXAMPLE}
-                />
-                <div className="inline-actions json-editor-actions">
-                  <button
-                    className="button"
-                    type="button"
-                    onClick={() => {
-                      try {
-                        setSettingsProjectCommands(formatProjectCommandsField(settingsProjectCommands))
-                        setSettingsError('')
-                      } catch (err) {
-                        setSettingsError(err instanceof Error ? err.message : 'Invalid project commands')
-                      }
-                    }}
-                  >
-                    Format
-                  </button>
-                  <button className="button" type="button" onClick={() => setSettingsProjectCommands('')}>
-                    Clear
-                  </button>
-                </div>
-              </div>
-
-              <p className="settings-subheading">Advanced Prompting</p>
-              <p className="field-label">
-                Review per-step built-in instructions and optionally define an override.
-              </p>
-              <label className="field-label" htmlFor="settings-step-prompt-step">Pipeline step</label>
-              <select
-                id="settings-step-prompt-step"
-                value={activePromptStep}
-                onChange={(event) => setSettingsPromptStep(event.target.value)}
-                disabled={promptSteps.length === 0}
-              >
-                {promptSteps.length === 0 ? <option value="">No configurable steps</option> : null}
-                {promptSteps.map((step) => (
-                  <option key={step} value={step}>{step}</option>
-                ))}
-              </select>
-              <label className="field-label" htmlFor="settings-step-prompt-default">Default prompt</label>
-              <textarea
-                id="settings-step-prompt-default"
-                className="settings-prompt-textarea"
-                rows={10}
-                value={defaultPromptText}
-                readOnly
-                placeholder="No default prompt available for this step."
-              />
-              <label className="field-label" htmlFor="settings-step-prompt-override">Override prompt (optional)</label>
-              <div className="json-editor-group">
-                <textarea
-                  id="settings-step-prompt-override"
-                  className="json-editor-textarea settings-prompt-textarea"
-                  rows={10}
-                  value={overridePromptText}
-                  onChange={(event) => {
-                    const nextValue = event.target.value
-                    setSettingsPromptOverrides((prev) => {
-                      if (!activePromptStep) return prev
-                      const next = { ...prev }
-                      if (nextValue.trim()) {
-                        next[activePromptStep] = nextValue
-                      } else {
-                        delete next[activePromptStep]
-                      }
-                      return next
-                    })
-                    if (!activePromptStep) return
-                    setSettingsPromptOverrideClears((prev) => {
-                      const next = { ...prev }
-                      if (nextValue.trim()) {
-                        delete next[activePromptStep]
-                      } else {
-                        next[activePromptStep] = true
-                      }
-                      return next
-                    })
-                  }}
-                  placeholder="Leave blank to use default prompt."
-                />
-                <div className="inline-actions json-editor-actions">
-                  <button
-                    className="button"
-                    type="button"
-                    onClick={() => {
-                      if (!activePromptStep) return
-                      setSettingsPromptOverrides((prev) => {
-                        const next = { ...prev }
-                        delete next[activePromptStep]
-                        return next
-                      })
-                      setSettingsPromptOverrideClears((prev) => ({ ...prev, [activePromptStep]: true }))
-                    }}
-                    disabled={!activePromptStep || !overridePromptText}
-                  >
-                    Clear override
-                  </button>
-                </div>
-              </div>
-
-              <p className="settings-subheading">Advanced Role Routing</p>
-              <label className="field-label" htmlFor="settings-default-role">Default role</label>
-              <input
-                id="settings-default-role"
-                value={settingsDefaultRole}
-                onChange={(event) => setSettingsDefaultRole(event.target.value)}
-                placeholder="general"
-              />
-              <label className="field-label" htmlFor="settings-task-type-roles">Task type role map (JSON object)</label>
-              <p className="field-label">Maps <code>task_type</code> {'->'} <code>role</code>. Unmapped task types use Default role.</p>
-              <div className="json-editor-group">
-                <textarea
-                  id="settings-task-type-roles"
-                  className="json-editor-textarea"
-                  rows={4}
-                  value={settingsTaskTypeRoles}
-                  onChange={(event) => setSettingsTaskTypeRoles(event.target.value)}
-                  placeholder={TASK_TYPE_ROLE_MAP_EXAMPLE}
-                />
-                <div className="inline-actions json-editor-actions">
-                  <button
-                    className="button"
-                    type="button"
-                    onClick={() => {
-                      handleFormatJsonField('Task type role map', settingsTaskTypeRoles, setSettingsTaskTypeRoles)
-                    }}
-                  >
-                    Format
-                  </button>
-                  <button className="button" type="button" onClick={() => setSettingsTaskTypeRoles('')}>
-                    Clear
-                  </button>
-                </div>
-              </div>
-              <label className="field-label" htmlFor="settings-role-overrides">Role provider overrides (JSON object)</label>
-              <p className="field-label">Maps <code>role</code> {'->'} <code>provider</code> when that role executes.</p>
-              <div className="json-editor-group">
-                <textarea
-                  id="settings-role-overrides"
-                  className="json-editor-textarea"
-                  rows={4}
-                  value={settingsRoleProviderOverrides}
-                  onChange={(event) => setSettingsRoleProviderOverrides(event.target.value)}
-                  placeholder={ROLE_PROVIDER_OVERRIDES_EXAMPLE}
-                />
-                <div className="inline-actions json-editor-actions">
-                  <button
-                    className="button"
-                    type="button"
-                    onClick={() => handleFormatJsonField('Role provider overrides', settingsRoleProviderOverrides, setSettingsRoleProviderOverrides)}
-                  >
-                    Format
-                  </button>
-                  <button className="button" type="button" onClick={() => setSettingsRoleProviderOverrides('')}>
-                    Clear
-                  </button>
-                </div>
-              </div>
-            </form>
-          </article>
-        </div>
-        <div className="settings-sticky-footer">
-          <div className="inline-actions">
-            <button className="button button-primary" type="submit" form="settings-main-form" disabled={settingsSaving}>
-              {settingsSaving ? 'Saving...' : 'Save settings'}
-            </button>
-            <button className="button" type="button" onClick={() => void loadSettings()} disabled={settingsLoading}>
-              {settingsLoading ? 'Loading...' : 'Reload settings'}
-            </button>
+                  {settingsError ? <p className="error-banner">{settingsError}</p> : null}
+                  {settingsSuccess ? <p className="field-label">{settingsSuccess}</p> : null}
+                </form>
+              </details>
+            </article>
           </div>
-          {settingsError ? <p className="error-banner">{settingsError}</p> : null}
-          {settingsSuccess ? <p className="field-label">{settingsSuccess}</p> : null}
-        </div>
+        ) : null}
+
+        {settingsTab === 'execution' ? (
+          <div className="settings-tab-content">
+              <article className="settings-card">
+                <h3>Task Defaults</h3>
+                <p className="field-label" style={{ marginBottom: '0.3rem' }}>
+                  Applied to newly created tasks. You can still override these per task.
+                </p>
+                <div className="settings-field-group">
+                  <p className="field-label">Default HITL mode</p>
+                  <HITLModeSelector
+                    currentMode={settingsDefaultHitlMode}
+                    onModeChange={(mode) => { setSettingsDefaultHitlMode(mode as 'autopilot' | 'supervised' | 'review_only'); void patchSettings({ defaults: { hitl_mode: mode } }) }}
+                    projectDir={projectDir}
+                    compact
+                  />
+                </div>
+                <div className="settings-field-group">
+                  <p className="field-label">Dependency policy</p>
+                  <div className="toggle-group" role="group" aria-label="Default dependency policy">
+                    {(['permissive', 'prudent', 'strict'] as const).map((level) => (
+                      <button
+                        key={level}
+                        type="button"
+                        className={`toggle-button ${settingsDependencyPolicy === level ? 'is-active' : ''}`}
+                        aria-pressed={settingsDependencyPolicy === level}
+                        onClick={() => { setSettingsDependencyPolicy(level); void patchSettings({ defaults: { dependency_policy: level } }) }}
+                      >
+                        {humanizeLabel(level)}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="field-label">
+                    {settingsDependencyPolicy === 'permissive' && 'Workers will prefer well-maintained libraries over manual implementation and install what they need.'}
+                    {settingsDependencyPolicy === 'prudent' && 'Workers will prefer existing dependencies but may install new ones when manual implementation would be unreliable or disproportionately complex.'}
+                    {settingsDependencyPolicy === 'strict' && 'Workers must not install any new dependencies. All solutions must use only what is already in the project.'}
+                  </p>
+                </div>
+              </article>
+
+            <form className="form-stack" onSubmit={(event) => void saveSettings(event)}>
+              <article className="settings-card">
+                <h3>Project Commands</h3>
+                <div className="form-stack">
+                  <label className="field-label" htmlFor="settings-project-commands">Project commands by language (YAML format)</label>
+                  <p className="field-label">
+                    Used by workers during implement/review steps. Keys are language names (`python`, `typescript`, `go`) and each language supports `test`, `lint`, `typecheck`, `format`.
+                  </p>
+                  <div className="json-editor-group">
+                    <textarea
+                      id="settings-project-commands"
+                      className="json-editor-textarea"
+                      rows={8}
+                      value={settingsProjectCommands}
+                      onChange={(event) => { setSettingsProjectCommands(event.target.value); setProjectCommandsDirty(true) }}
+                      placeholder={PROJECT_COMMANDS_EXAMPLE}
+                    />
+                    <div className="inline-actions json-editor-actions">
+                      <button
+                        className="button"
+                        type="button"
+                        onClick={() => {
+                          try {
+                            setSettingsProjectCommands(formatProjectCommandsField(settingsProjectCommands))
+                            setSettingsError('')
+                          } catch (err) {
+                            setSettingsError(err instanceof Error ? err.message : 'Invalid project commands')
+                          }
+                        }}
+                      >
+                        Format
+                      </button>
+                      <button className="button" type="button" onClick={() => setSettingsProjectCommands('')}>
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div className="inline-actions" style={{ marginTop: '0.5rem' }}>
+                  <button className="button button-primary button-sm" type="submit" disabled={settingsSaving || !projectCommandsDirty}>
+                    {settingsSaving ? 'Saving...' : 'Save'}
+                  </button>
+                  {settingsError ? <span className="error-banner">{settingsError}</span> : null}
+                  {settingsSuccess ? <span className="field-label">{settingsSuccess}</span> : null}
+                </div>
+              </article>
+            </form>
+
+            <form className="form-stack" onSubmit={(event) => void saveSettings(event)}>
+              <article className="settings-card">
+                <h3>Quality Gate Thresholds</h3>
+                <div className="form-stack">
+                  <p className="field-label">
+                    Unresolved findings allowed before a task can pass quality checks.
+                  </p>
+                  <div className="quality-gate-grid">
+                    <div className="quality-gate-row">
+                      <div>
+                        <p className="quality-gate-label">
+                          <span className="quality-severity-badge severity-critical">Critical</span>
+                        </p>
+                        <p className="field-label">Release-blocking or security-critical issues.</p>
+                      </div>
+                      <div className="quality-gate-input-wrap">
+                        <label className="field-label" htmlFor="quality-gate-critical-input">Allowed unresolved</label>
+                        <input
+                          id="quality-gate-critical-input"
+                          aria-label="Quality gate critical"
+                          value={settingsGateCritical}
+                          onChange={(event) => { setSettingsGateCritical(event.target.value); setQualityGateDirty(true) }}
+                          inputMode="numeric"
+                        />
+                      </div>
+                    </div>
+                    <div className="quality-gate-row">
+                      <div>
+                        <p className="quality-gate-label">
+                          <span className="quality-severity-badge severity-high">High</span>
+                        </p>
+                        <p className="field-label">Major correctness or reliability problems.</p>
+                      </div>
+                      <div className="quality-gate-input-wrap">
+                        <label className="field-label" htmlFor="quality-gate-high-input">Allowed unresolved</label>
+                        <input
+                          id="quality-gate-high-input"
+                          aria-label="Quality gate high"
+                          value={settingsGateHigh}
+                          onChange={(event) => { setSettingsGateHigh(event.target.value); setQualityGateDirty(true) }}
+                          inputMode="numeric"
+                        />
+                      </div>
+                    </div>
+                    <div className="quality-gate-row">
+                      <div>
+                        <p className="quality-gate-label">
+                          <span className="quality-severity-badge severity-medium">Medium</span>
+                        </p>
+                        <p className="field-label">Important issues that should be addressed soon.</p>
+                      </div>
+                      <div className="quality-gate-input-wrap">
+                        <label className="field-label" htmlFor="quality-gate-medium-input">Allowed unresolved</label>
+                        <input
+                          id="quality-gate-medium-input"
+                          aria-label="Quality gate medium"
+                          value={settingsGateMedium}
+                          onChange={(event) => { setSettingsGateMedium(event.target.value); setQualityGateDirty(true) }}
+                          inputMode="numeric"
+                        />
+                      </div>
+                    </div>
+                    <div className="quality-gate-row">
+                      <div>
+                        <p className="quality-gate-label">
+                          <span className="quality-severity-badge severity-low">Low</span>
+                        </p>
+                        <p className="field-label">Minor issues, cleanup, and polish improvements.</p>
+                      </div>
+                      <div className="quality-gate-input-wrap">
+                        <label className="field-label" htmlFor="quality-gate-low-input">Allowed unresolved</label>
+                        <input
+                          id="quality-gate-low-input"
+                          aria-label="Quality gate low"
+                          value={settingsGateLow}
+                          onChange={(event) => { setSettingsGateLow(event.target.value); setQualityGateDirty(true) }}
+                          inputMode="numeric"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="inline-actions" style={{ marginTop: '0.5rem' }}>
+                  <button className="button button-primary button-sm" type="submit" disabled={settingsSaving || !qualityGateDirty}>
+                    {settingsSaving ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
+              </article>
+            </form>
+
+            <form className="form-stack" onSubmit={(event) => void saveSettings(event)}>
+              <article className="settings-card">
+                <h3>Execution Controls</h3>
+                <div className="form-stack">
+                  <label className="field-label" htmlFor="settings-step-timeout-seconds">Default task timeout (seconds, 0 = no timeout)</label>
+                  <input
+                    id="settings-step-timeout-seconds"
+                    value={settingsStepTimeoutSeconds}
+                    onChange={(event) => { setSettingsStepTimeoutSeconds(event.target.value); setExecutionFormDirty(true) }}
+                    inputMode="numeric"
+                  />
+                  <label className="field-label" htmlFor="settings-review-attempts">Max review attempts</label>
+                  <input
+                    id="settings-review-attempts"
+                    value={settingsMaxReviewAttempts}
+                    onChange={(event) => { setSettingsMaxReviewAttempts(event.target.value); setExecutionFormDirty(true) }}
+                    inputMode="numeric"
+                  />
+                  <label className="field-label" htmlFor="settings-merge-conflict-attempts">Max merge conflict attempts</label>
+                  <input
+                    id="settings-merge-conflict-attempts"
+                    value={settingsMaxMergeConflictAttempts}
+                    onChange={(event) => { setSettingsMaxMergeConflictAttempts(event.target.value); setExecutionFormDirty(true) }}
+                    inputMode="numeric"
+                  />
+                  <label className="field-label" htmlFor="settings-concurrency">Orchestrator concurrency</label>
+                  <input
+                    id="settings-concurrency"
+                    value={settingsConcurrency}
+                    onChange={(event) => { setSettingsConcurrency(event.target.value); setExecutionFormDirty(true) }}
+                    inputMode="numeric"
+                  />
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={settingsAutoDeps}
+                      onChange={(event) => { setSettingsAutoDeps(event.target.checked); setExecutionFormDirty(true) }}
+                    />
+                    Auto dependency analysis
+                  </label>
+                </div>
+                <div className="inline-actions" style={{ marginTop: '0.5rem' }}>
+                  <button className="button button-primary button-sm" type="submit" disabled={settingsSaving || !executionFormDirty}>
+                    {settingsSaving ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
+              </article>
+            </form>
+          </div>
+        ) : null}
+
+        {settingsTab === 'advanced' ? (
+          <div className="settings-tab-content">
+            <form className="form-stack" onSubmit={(event) => void saveSettings(event)}>
+              <article className="settings-card">
+                <h3>Advanced Prompting</h3>
+                <div className="form-stack">
+                  <p className="field-label">
+                    Review per-step built-in instructions and optionally define an override.
+                  </p>
+                  <label className="field-label" htmlFor="settings-step-prompt-step">Pipeline step</label>
+                  <select
+                    id="settings-step-prompt-step"
+                    value={activePromptStep}
+                    onChange={(event) => { setSettingsPromptStep(event.target.value); setAdvancedFormDirty(true) }}
+                    disabled={promptSteps.length === 0}
+                  >
+                    {promptSteps.length === 0 ? <option value="">No configurable steps</option> : null}
+                    {promptSteps.map((step) => (
+                      <option key={step} value={step}>{step}</option>
+                    ))}
+                  </select>
+                  <label className="field-label" htmlFor="settings-step-prompt-default">Default prompt</label>
+                  <textarea
+                    id="settings-step-prompt-default"
+                    className="settings-prompt-textarea"
+                    rows={10}
+                    value={defaultPromptText}
+                    readOnly
+                    placeholder="No default prompt available for this step."
+                  />
+                  <label className="field-label" htmlFor="settings-step-prompt-override">Override prompt (optional)</label>
+                  <div className="json-editor-group">
+                    <textarea
+                      id="settings-step-prompt-override"
+                      className="json-editor-textarea settings-prompt-textarea"
+                      rows={10}
+                      value={overridePromptText}
+                      onChange={(event) => {
+                        const nextValue = event.target.value
+                        setSettingsPromptOverrides((prev) => {
+                          if (!activePromptStep) return prev
+                          const next = { ...prev }
+                          if (nextValue.trim()) {
+                            next[activePromptStep] = nextValue
+                          } else {
+                            delete next[activePromptStep]
+                          }
+                          return next
+                        })
+                        if (!activePromptStep) return
+                        setSettingsPromptOverrideClears((prev) => {
+                          const next = { ...prev }
+                          if (nextValue.trim()) {
+                            delete next[activePromptStep]
+                          } else {
+                            next[activePromptStep] = true
+                          }
+                          return next
+                        })
+                        setAdvancedFormDirty(true)
+                      }}
+                      placeholder="Leave blank to use default prompt."
+                    />
+                    <div className="inline-actions json-editor-actions">
+                      <button
+                        className="button"
+                        type="button"
+                        onClick={() => {
+                          if (!activePromptStep) return
+                          setSettingsPromptOverrides((prev) => {
+                            const next = { ...prev }
+                            delete next[activePromptStep]
+                            return next
+                          })
+                          setSettingsPromptOverrideClears((prev) => ({ ...prev, [activePromptStep]: true }))
+                        }}
+                        disabled={!activePromptStep || !overridePromptText}
+                      >
+                        Clear override
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </article>
+
+              <article className="settings-card">
+                <h3>Advanced Role Routing</h3>
+                <div className="form-stack">
+                  <label className="field-label" htmlFor="settings-default-role">Default role</label>
+                  <input
+                    id="settings-default-role"
+                    value={settingsDefaultRole}
+                    onChange={(event) => { setSettingsDefaultRole(event.target.value); setAdvancedFormDirty(true) }}
+                    placeholder="general"
+                  />
+                  <label className="field-label" htmlFor="settings-task-type-roles">Task type role map (JSON object)</label>
+                  <p className="field-label">Maps <code>task_type</code> {'->'} <code>role</code>. Unmapped task types use Default role.</p>
+                  <div className="json-editor-group">
+                    <textarea
+                      id="settings-task-type-roles"
+                      className="json-editor-textarea"
+                      rows={4}
+                      value={settingsTaskTypeRoles}
+                      onChange={(event) => { setSettingsTaskTypeRoles(event.target.value); setAdvancedFormDirty(true) }}
+                      placeholder={TASK_TYPE_ROLE_MAP_EXAMPLE}
+                    />
+                    <div className="inline-actions json-editor-actions">
+                      <button
+                        className="button"
+                        type="button"
+                        onClick={() => {
+                          handleFormatJsonField('Task type role map', settingsTaskTypeRoles, setSettingsTaskTypeRoles)
+                        }}
+                      >
+                        Format
+                      </button>
+                      <button className="button" type="button" onClick={() => setSettingsTaskTypeRoles('')}>
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                  <label className="field-label" htmlFor="settings-role-overrides">Role provider overrides (JSON object)</label>
+                  <p className="field-label">Maps <code>role</code> {'->'} <code>provider</code> when that role executes.</p>
+                  <div className="json-editor-group">
+                    <textarea
+                      id="settings-role-overrides"
+                      className="json-editor-textarea"
+                      rows={4}
+                      value={settingsRoleProviderOverrides}
+                      onChange={(event) => { setSettingsRoleProviderOverrides(event.target.value); setAdvancedFormDirty(true) }}
+                      placeholder={ROLE_PROVIDER_OVERRIDES_EXAMPLE}
+                    />
+                    <div className="inline-actions json-editor-actions">
+                      <button
+                        className="button"
+                        type="button"
+                        onClick={() => handleFormatJsonField('Role provider overrides', settingsRoleProviderOverrides, setSettingsRoleProviderOverrides)}
+                      >
+                        Format
+                      </button>
+                      <button className="button" type="button" onClick={() => setSettingsRoleProviderOverrides('')}>
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div className="inline-actions" style={{ marginTop: '0.5rem' }}>
+                  <button className="button button-primary button-sm" type="submit" disabled={settingsSaving || !advancedFormDirty}>
+                    {settingsSaving ? 'Saving...' : 'Save'}
+                  </button>
+                  {settingsError ? <span className="error-banner">{settingsError}</span> : null}
+                  {settingsSuccess ? <span className="field-label">{settingsSuccess}</span> : null}
+                </div>
+              </article>
+            </form>
+
+            <article className="settings-card">
+              <h3>Pinned Projects</h3>
+              <div className="settings-field-group">
+                <form className="pin-project-row" onSubmit={(event) => void pinManualProject(event)}>
+                  <input
+                    id="manual-project-path"
+                    value={manualPinPath}
+                    onChange={(event) => setManualPinPath(event.target.value)}
+                    placeholder="/absolute/path/to/repo"
+                    required
+                    style={{ flex: 1 }}
+                  />
+                  <label className="checkbox-row" style={{ whiteSpace: 'nowrap', fontSize: '0.8rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={allowNonGit}
+                      onChange={(event) => setAllowNonGit(event.target.checked)}
+                    />
+                    Non-git
+                  </label>
+                  <button className="button button-primary button-sm" type="submit">Pin</button>
+                </form>
+              </div>
+              {pinnedProjects.length > 0 ? (
+                <div className="settings-field-group">
+                  {pinnedProjects.map((project) => (
+                    <div className="pinned-project-row" key={project.id}>
+                      <span className="pinned-project-path" title={project.path}>{project.path}</span>
+                      <button className="button-icon button-icon-danger" type="button" onClick={() => void unpinProject(project.id)} aria-label="Unpin" title="Unpin">&times;</button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </article>
+          </div>
+        ) : null}
       </section>
     )
   }
@@ -6722,7 +6779,6 @@ export default function App() {
 
   function renderRoute(): JSX.Element {
     if (route === 'execution') return renderExecution()
-    if (route === 'agents') return renderAgents()
     if (route === 'settings') return renderSettings()
     return renderBoard()
   }
