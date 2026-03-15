@@ -3903,9 +3903,16 @@ class OrchestratorService:
         if task.run_ids:
             run = self.container.runs.get(task.run_ids[-1])
             if run and run.status == "in_progress" and not run.finished_at:
+                self._run_summarize_step(task, run, gate_context=gate_name)
                 run.status = "waiting_gate"
                 run.finished_at = task.updated_at
-                run.summary = f"Paused at gate: {gate_name}"
+                # Use LLM-generated summary if available, fall back to static string
+                gate_summary = None
+                if run.steps:
+                    last = run.steps[-1]
+                    if isinstance(last, dict) and last.get("step") == "summary":
+                        gate_summary = last.get("summary")
+                run.summary = gate_summary or f"Paused at gate: {gate_name}"
                 self.container.runs.upsert(run)
         self.bus.emit(
             channel="tasks",
@@ -3915,18 +3922,31 @@ class OrchestratorService:
         )
         return False
 
-    def _run_summarize_step(self, task: Task, run: RunRecord) -> None:
-        """Auto-inject a summarize step using a lightweight LLM call."""
+    def _run_summarize_step(self, task: Task, run: RunRecord, gate_context: str | None = None) -> None:
+        """Auto-inject a summarize step using a lightweight LLM call.
+
+        Args:
+            task: Task that owns the run.
+            run: Run record to append the summary step to.
+            gate_context: If set, generates a gate-aware summary. If ``None``
+                (run-end call), skips generation when the last step is already
+                a summary (no new work since the gate).
+        """
         fn = getattr(self.worker_adapter, "generate_run_summary", None)
         if fn is None:
             return
+        # Skip redundant run-end summary when a gate summary is already current
+        if gate_context is None and run.steps:
+            last = run.steps[-1]
+            if isinstance(last, dict) and last.get("step") == "summary":
+                return
         try:
             worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
             project_dir = Path(worktree_path) if worktree_path else self.container.project_dir
             if not project_dir.is_dir():
                 project_dir = self.container.project_dir
             summary_started = now_iso()
-            summary_text = fn(task=task, run=run, project_dir=project_dir)
+            summary_text = fn(task=task, run=run, project_dir=project_dir, gate_context=gate_context)
             if isinstance(summary_text, str) and summary_text.strip():
                 run.steps.append({
                     "step": "summary",

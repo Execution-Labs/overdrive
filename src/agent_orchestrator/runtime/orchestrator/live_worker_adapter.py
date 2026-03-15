@@ -2531,6 +2531,7 @@ class LiveWorkerAdapter:
         task: Task,
         run: RunRecord,
         project_dir: Path,
+        gate_context: str | None = None,
     ) -> str:
         """Use a short LLM call to produce a human-readable execution summary."""
         # Build step log section
@@ -2571,7 +2572,17 @@ class LiveWorkerAdapter:
         workdoc_snapshot = _load_workdoc_snapshot(task, project_dir)
         run_status = str(run.status or "unknown")
 
+        if gate_context:
+            role_framing = (
+                f"You are writing a progress summary. The pipeline is paused at "
+                f"a human approval gate ({gate_context}). Focus on what has been "
+                f"accomplished so far and what decision the human needs to make to proceed."
+            )
+        else:
+            role_framing = "You are a run-end summary writer."
+
         prompt = load_prompt("formatters/summarize.md").format(
+            role_framing=role_framing,
             task_title=task.title,
             description_section=description_section,
             task_type=task.task_type,
@@ -2611,13 +2622,15 @@ class LiveWorkerAdapter:
         raw = (fmt_result.response_text or "").strip()
         return raw[:2000] if raw else "Summary generation failed"
 
-    def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path) -> str:
+    def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path, gate_context: str | None = None) -> str:
         """Produce a worker-generated summary for a completed run.
 
         Args:
             task (Task): Task that owns the completed run.
             run (RunRecord): Completed run record to summarize.
             project_dir (Path): Project root used to resolve workdoc context.
+            gate_context (str | None): Gate name when generating a gate-pause
+                summary, or ``None`` for a run-end summary.
 
         Returns:
             str: Worker-produced summary text, or an empty string when summary
@@ -2640,6 +2653,7 @@ class LiveWorkerAdapter:
             task=task,
             run=run,
             project_dir=project_dir,
+            gate_context=gate_context,
         )
 
     def generate_recommended_action(

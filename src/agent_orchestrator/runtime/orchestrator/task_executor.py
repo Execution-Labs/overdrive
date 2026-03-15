@@ -924,6 +924,7 @@ class TaskExecutor:
                     worktree_dir = None
                     task.metadata.pop("worktree_dir", None)
                     task.metadata.pop("task_context", None)
+                    svc._run_summarize_step(task, run, gate_context="pre_commit")
                     task.status = "in_review"
                     task.current_step = "review"
                     task.metadata["pipeline_phase"] = "review"
@@ -931,7 +932,13 @@ class TaskExecutor:
                     task.metadata["review_stage"] = "pre_commit"
                     svc.container.tasks.upsert(task)
                     run.status = "in_review"
-                    run.summary = "Awaiting pre-commit approval"
+                    # Use LLM-generated summary if available, fall back to static string
+                    precommit_summary = None
+                    if run.steps:
+                        last = run.steps[-1]
+                        if isinstance(last, dict) and last.get("step") == "summary":
+                            precommit_summary = last.get("summary")
+                    run.summary = precommit_summary or "Awaiting pre-commit approval"
                     svc.container.runs.upsert(run)
                     svc.bus.emit(
                         channel="review",

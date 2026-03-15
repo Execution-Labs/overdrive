@@ -565,6 +565,8 @@ def _select_summary_run(task: Task, container: "Container") -> Any:
         "blocked": {"blocked", "interrupted", "cancelled", "error"},
         "in_review": {"in_review"},
     }.get(task.status, set())
+    if not preferred_statuses and task.pending_gate:
+        preferred_statuses = {"waiting_gate", "in_progress"}
     for run in runs:
         run_status = getattr(run, "status", None)
         run_finished_at = getattr(run, "finished_at", None)
@@ -579,6 +581,8 @@ def _reconcile_summary_run_status(task: Task, run: Any) -> str:
     stale_run_status = {"in_progress", "running"}
     run_status = str(getattr(run, "status", "") or "")
     run_finished_at = getattr(run, "finished_at", None)
+    if run_status == "waiting_gate":
+        return run_status
     if task.status in terminal_task_status and run_status in stale_run_status and not run_finished_at:
         return task.status
     return run_status
@@ -650,7 +654,8 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
     skipping internal-only entries such as skipped steps.
     """
     if task.status not in ("in_review", "blocked", "done"):
-        return None
+        if not (task.status == "in_progress" and task.pending_gate):
+            return None
     if not task.run_ids:
         return None
     run = _select_summary_run(task, container)
@@ -689,6 +694,7 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
         "interrupted": "Interrupted",
         "cancelled": "Cancelled",
         "running": "Running",
+        "waiting_gate": "Awaiting approval",
     }
     run_summary = status_labels.get(run_status) or status_labels.get(task.status) or run_status
     run_duration = _iso_delta_seconds(run.started_at, run.finished_at) if run.started_at and run.finished_at else None

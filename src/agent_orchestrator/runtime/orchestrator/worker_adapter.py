@@ -146,13 +146,15 @@ class DefaultWorkerAdapter:
         """
         return self.run_step(task=task, step=step, attempt=attempt)
 
-    def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path) -> str:
+    def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path, gate_context: str | None = None) -> str:
         """Generate a human-readable summary for a completed run.
 
         Args:
             task (Task): Task associated with the completed run.
             run (RunRecord): Run record containing outcome metadata.
             project_dir (Path): Repository directory where the run executed.
+            gate_context (str | None): Gate name when generating a gate-pause
+                summary, or ``None`` for a run-end summary.
 
         Returns:
             str: Markdown-ready summary text for the run report.
