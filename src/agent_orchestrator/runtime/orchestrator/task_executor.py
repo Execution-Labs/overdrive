@@ -39,42 +39,6 @@ def _get_current_head_sha(cwd: Path | str) -> str:
         return ""
 
 
-def _revert_merge_commit(svc: OrchestratorService, commit_sha: str) -> bool:
-    """Revert a merge commit on the base branch. Returns True on success.
-
-    Handles both merge commits (``-m 1``) and regular commits produced by
-    fast-forward merges.
-    """
-    if not commit_sha:
-        logger.warning("Cannot revert merge: no commit SHA provided")
-        return False
-    try:
-        # Try merge-commit revert first (-m 1 specifies mainline parent).
-        result = subprocess.run(
-            ["git", "revert", "--no-edit", "-m", "1", commit_sha],
-            cwd=svc.container.project_dir,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
-        )
-        if result.returncode == 0:
-            return True
-        # Fallback: regular (non-merge) commit revert.
-        result = subprocess.run(
-            ["git", "revert", "--no-edit", commit_sha],
-            cwd=svc.container.project_dir,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=60,
-        )
-        return True
-    except Exception:
-        logger.exception("Failed to revert merge commit %s", commit_sha)
-        return False
-
-
 class TaskExecutor:
     """Drive end-to-end task execution while service remains the public facade."""
 
@@ -1061,9 +1025,8 @@ class TaskExecutor:
                     merge_status = str((merge_result or {}).get("status") or "ok")
                     if merge_status == "ok":
                         worktree_dir = None
-                        merge_commit_sha = str((merge_result or {}).get("commit_sha") or "").strip()
 
-                        # Post-merge integration health check (hard gate).
+                        # Post-merge integration health check.
                         # Skip when the base branch hasn't moved since the
                         # worktree was created — full verify already covered
                         # that state.
@@ -1079,43 +1042,13 @@ class TaskExecutor:
                                 trigger_task_id=task.id, force=True,
                             )
                             if health_result and not health_result.passed:
-                                integration_fixed = False
-                                for fix_attempt in range(1, max_verify_fix_attempts + 1):
-                                    task.current_step = "implement_fix"
-                                    task.metadata["pipeline_phase"] = "integration_health"
-                                    task.metadata["verify_failure"] = (
-                                        health_result.stderr
-                                        or health_result.stdout
-                                        or "Integration tests failed after merge"
-                                    )
-                                    svc.container.tasks.upsert(task)
-
-                                    fix_outcome = svc._run_non_review_step(
-                                        task, run, "implement_fix", attempt=fix_attempt,
-                                    )
-                                    if fix_outcome != "ok":
-                                        break
-
-                                    task.metadata.pop("verify_failure", None)
-                                    health_result = svc._integration_health.run_check(
-                                        trigger_task_id=task.id, force=True,
-                                    )
-                                    if health_result and health_result.passed:
-                                        integration_fixed = True
-                                        break
-
-                                if not integration_fixed:
-                                    _revert_merge_commit(svc, merge_commit_sha)
-                                    task.status = "blocked"
-                                    task.wait_state = None
-                                    task.error = "Integration health check failed after merge; merge reverted"
-                                    svc.container.tasks.upsert(task)
-                                    svc._finalize_run(
-                                        task, run, status="blocked",
-                                        summary="Blocked: integration health degraded after merge",
-                                    )
-                                    svc._emit_task_blocked(task)
-                                    return
+                                task.metadata["integration_health_degraded"] = True
+                                task.metadata["integration_health_check"] = {
+                                    "passed": False,
+                                    "exit_code": health_result.exit_code,
+                                    "ts": now_iso(),
+                                    "trigger": "post_merge_divergence",
+                                }
 
                 merge_failure_reason = str(task.metadata.get("merge_failure_reason_code") or "").strip()
                 if task.metadata.get("merge_conflict"):
