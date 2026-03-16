@@ -28,7 +28,7 @@ test('creates a task from the create-work modal', async ({ page }) => {
 
 test('saves settings through the real API', async ({ page }) => {
   await page.getByRole('button', { name: 'Settings' }).click()
-  await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
+  await expect(page.getByRole('tab', { name: 'Providers' })).toBeVisible()
 
   await page.getByRole('tab', { name: 'Execution' }).click()
   const executionCard = page.locator('article', { has: page.getByRole('heading', { name: 'Execution Controls' }) })

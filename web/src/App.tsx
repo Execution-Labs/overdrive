@@ -8,6 +8,7 @@ import remarkGfm from 'remark-gfm'
 import { humanizeLabel } from './ui/labels'
 import './styles/orchestrator.css'
 
+type ThemeMode = 'light' | 'dark' | 'system'
 type RouteKey = 'board' | 'execution' | 'settings'
 type SettingsTab = 'providers' | 'execution' | 'advanced'
 type CreateTab = 'task' | 'import'
@@ -1733,10 +1734,11 @@ function formatProgressEntries(progress?: Record<string, unknown>): Array<{ key:
 export default function App() {
   const [route, setRoute] = useState<RouteKey>(() => routeFromHash(window.location.hash || localStorage.getItem(STORAGE_ROUTE) || '#/board'))
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('providers')
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => (localStorage.getItem('ao-theme') as ThemeMode) || 'system')
   const [projectDir, setProjectDir] = useState<string>(() => localStorage.getItem(STORAGE_PROJECT) || '')
   const [board, setBoard] = useState<BoardResponse>({ columns: {} })
   const [orchestrator, setOrchestrator] = useState<OrchestratorStatus | null>(null)
-  const [agents, setAgents] = useState<AgentRecord[]>([])
+  const [_agents, setAgents] = useState<AgentRecord[]>([])
   const [workerHealth, setWorkerHealth] = useState<WorkerHealthRecord[]>([])
   const [workerRoutingRows, setWorkerRoutingRows] = useState<WorkerRoutingRow[]>([])
   const [workerDefaultProvider, setWorkerDefaultProvider] = useState('codex')
@@ -1807,6 +1809,11 @@ export default function App() {
   const [boardCompact, setBoardCompact] = useState(false)
   const [expandedSummarySteps, setExpandedSummarySteps] = useState<Set<string>>(new Set())
   const [pipelineHighlightStatus, setPipelineHighlightStatus] = useState('')
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', themeMode)
+    localStorage.setItem('ao-theme', themeMode)
+  }, [themeMode])
+
   useEffect(() => {
     if (!pipelineHighlightStatus) return
     const timer = window.setTimeout(() => setPipelineHighlightStatus(''), 2500)
@@ -5712,23 +5719,32 @@ export default function App() {
     )
 
   function renderBoard(): JSX.Element {
-    const inProgressTasks = board.columns.in_progress || []
-    const waitingApprovalCount = inProgressTasks.filter((task) => taskWaitingGateKind(task) === 'approval_wait').length
-    const waitingInterventionCount = inProgressTasks.filter((task) => taskWaitingGateKind(task) === 'intervention_wait').length
-    const runningNowCount = inProgressTasks.length - waitingApprovalCount - waitingInterventionCount
     return (
       <section className="panel">
-        <header className="panel-head">
-          <h2>Board</h2>
-          <div className="inline-actions">
-            <label className="switch-label"><input type="checkbox" role="switch" checked={boardCompact} onChange={() => setBoardCompact((v) => !v)} /> Compact</label>
-            <button className="button button-danger" onClick={() => void clearAllTasks()} disabled={taskActionPending === 'clear'}>
-              {taskActionPending === 'clear' ? 'Clearing...' : 'Clear All Tasks'}
-            </button>
-          </div>
-        </header>
         {taskActionMessage ? <p className="field-label">{taskActionMessage}</p> : null}
         {taskActionError ? <p className="error-banner">{taskActionError}</p> : null}
+        <div className="board-toolbar">
+          <label className="board-compact-toggle" title="Compact view">
+            <input type="checkbox" checked={boardCompact} onChange={() => setBoardCompact((v) => !v)} />
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><line x1="2" y1="4" x2="14" y2="4" /><line x1="2" y1="8" x2="14" y2="8" /><line x1="2" y1="12" x2="14" y2="12" /></svg>
+          </label>
+          <div className="board-toolbar-spacer" />
+          <details className="board-more-menu">
+            <summary className="board-more-btn" title="More actions">···</summary>
+            <div className="board-more-dropdown">
+              <button
+                className="board-more-item board-more-item-danger"
+                onClick={() => void clearAllTasks()}
+                disabled={taskActionPending === 'clear'}
+              >
+                {taskActionPending === 'clear' ? 'Clearing...' : 'Clear All Tasks'}
+              </button>
+            </div>
+          </details>
+          <button className="board-icon-btn board-icon-btn-primary" onClick={() => openCreateWorkModal()} title="Create Work" aria-label="Create Work">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="8" y1="2" x2="8" y2="14" /><line x1="2" y1="8" x2="14" y2="8" /></svg>
+          </button>
+        </div>
         <div className="board-grid">
           {boardColumns.map((column) => (
             <article className="board-col" key={column}>
@@ -5768,13 +5784,8 @@ export default function App() {
             </article>
           ))}
         </div>
+        {(dispatchBlockedReasonLabel(orchestrator?.dispatch_blocked_reason) || orchestrator?.integration_health?.status === 'degraded') ? (
         <div className="board-summary">
-          <span className="field-label">Queue: {orchestrator?.queue_depth ?? 0}</span>
-          <span className="field-label">In progress: {orchestrator?.in_progress ?? 0}</span>
-          <span className="field-label">Running now: {runningNowCount}</span>
-          <span className="field-label">Waiting approval: {waitingApprovalCount}</span>
-          <span className="field-label">Needs intervention: {waitingInterventionCount}</span>
-          <span className="field-label">Workers: {agents.length}</span>
           {dispatchBlockedReasonLabel(orchestrator?.dispatch_blocked_reason) ? (
             <span className="field-label">Dispatch: {dispatchBlockedReasonLabel(orchestrator?.dispatch_blocked_reason)}</span>
           ) : null}
@@ -5804,6 +5815,7 @@ export default function App() {
             )
           })()}
         </div>
+        ) : null}
       </section>
     )
   }
@@ -5822,13 +5834,13 @@ export default function App() {
     const runningNowCount = inProgressTasks.length - waitingApprovalCount - waitingInterventionCount
     return (
       <section className="panel">
-        <header className="panel-head">
-          <h2>Execution <span className={`status-pill status-pill-inline ${orchestrator?.status === 'running' ? (orchestrator?.draining ? 'status-blocked' : 'status-running') : orchestrator?.status === 'paused' ? 'status-paused' : 'status-failed'}`} style={{ verticalAlign: 'middle' }}>{humanizeLabel(orchestrator?.status === 'running' && orchestrator?.draining ? 'draining' : orchestrator?.status ?? 'unknown')}</span></h2>
-          <div className="inline-actions">
-            {orchestrator?.status === 'running' ? <button className="button" onClick={() => void controlOrchestrator('pause')}>Pause Queue</button> : null}
-            {orchestrator?.status === 'paused' || orchestrator?.status === 'stopped' ? <button className="button" onClick={() => void controlOrchestrator('resume')}>Start Queue</button> : null}
-            {orchestrator?.status === 'running' && !orchestrator?.draining ? <button className="button" onClick={() => void controlOrchestrator('drain')}>Finish &amp; Stop</button> : null}
-            {orchestrator?.status !== 'stopped' ? <button className="button button-danger" onClick={() => void controlOrchestrator('stop')}>Stop Queue</button> : null}
+        <header className="execution-header">
+          <span className={`status-pill status-pill-prominent ${orchestrator?.status === 'running' ? (orchestrator?.draining ? 'status-blocked' : 'status-running') : orchestrator?.status === 'paused' ? 'status-paused' : 'status-failed'}`}>{humanizeLabel(orchestrator?.status === 'running' && orchestrator?.draining ? 'draining' : orchestrator?.status ?? 'unknown')}</span>
+          <div className="execution-actions">
+            {orchestrator?.status === 'running' ? <button className="button" onClick={() => void controlOrchestrator('pause')}>Pause</button> : null}
+            {orchestrator?.status === 'paused' || orchestrator?.status === 'stopped' ? <button className="button" onClick={() => void controlOrchestrator('resume')}>Start</button> : null}
+            {orchestrator?.status === 'running' && !orchestrator?.draining ? <button className="button" onClick={() => void controlOrchestrator('drain')}>Drain</button> : null}
+            {orchestrator?.status !== 'stopped' ? <button className="button button-danger" onClick={() => void controlOrchestrator('stop')}>Stop</button> : null}
           </div>
         </header>
         <div className="status-grid">
@@ -6038,10 +6050,6 @@ export default function App() {
 
     return (
       <section className="panel">
-        <header className="panel-head">
-          <h2>Settings</h2>
-        </header>
-
         <div className="tab-row" role="tablist" aria-label="Settings tabs">
           {SETTINGS_TABS.map((tab) => (
             <button
@@ -6062,14 +6070,14 @@ export default function App() {
               <div className="settings-card-head">
                 <h3>Default Provider</h3>
                 <button
-                  className={`button button-icon ${workerHealthRefreshing ? 'is-loading' : ''}`}
+                  className={`topbar-icon-btn ${workerHealthRefreshing ? 'is-loading' : ''}`}
                   onClick={() => void handleRecheckProviders()}
                   disabled={workerHealthRefreshing}
                   aria-busy={workerHealthRefreshing}
                   aria-label="Recheck providers"
                   title="Recheck providers"
                 >
-                  &#x21bb;
+                  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M1.5 2v4.5H6" /><path d="M1.8 6.5A6.5 6.5 0 1 1 2.5 10" /></svg>
                 </button>
               </div>
               <div className="list-stack">
@@ -6788,7 +6796,6 @@ export default function App() {
       <div className="bg-layer" aria-hidden="true" />
       <header className="topbar">
         <div>
-          <p className="kicker">agent-led execution</p>
           <h1>Agent Orchestrator</h1>
         </div>
         <div className="topbar-actions">
@@ -6811,8 +6818,19 @@ export default function App() {
             ))}
             <option value={ADD_REPO_VALUE}>Add repo...</option>
           </select>
-          <button className="button" onClick={() => void refreshWithSchedulerRepair()} disabled={loading}>Refresh</button>
-          <button className="button button-primary" onClick={() => openCreateWorkModal()}>Create Work</button>
+          <button className="topbar-icon-btn" onClick={() => void refreshWithSchedulerRepair()} disabled={loading} title="Refresh" aria-label="Refresh">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M1.5 2v4.5H6" /><path d="M1.8 6.5A6.5 6.5 0 1 1 2.5 10" /></svg>
+          </button>
+          <button
+            className="topbar-icon-btn"
+            onClick={() => setThemeMode((m) => m === 'light' ? 'dark' : m === 'dark' ? 'system' : 'light')}
+            title={`Theme: ${themeMode}`}
+            aria-label={`Theme: ${themeMode}`}
+          >
+            {themeMode === 'light' && <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="8" cy="8" r="3" /><path d="M8 1.5v1M8 13.5v1M1.5 8h1M13.5 8h1M3.4 3.4l.7.7M11.9 11.9l.7.7M3.4 12.6l.7-.7M11.9 4.1l.7-.7" /></svg>}
+            {themeMode === 'dark' && <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M13.5 8.5a5.5 5.5 0 1 1-6-6 4.5 4.5 0 0 0 6 6z" /></svg>}
+            {themeMode === 'system' && <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="12" height="8" rx="1" /><path d="M5 14h6M8 11v3" /></svg>}
+          </button>
         </div>
       </header>
 

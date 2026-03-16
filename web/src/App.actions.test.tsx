@@ -515,9 +515,9 @@ describe('App action coverage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Execution/i }))
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /Execution/i })).toBeInTheDocument()
+      expect(document.querySelector('.status-grid')).toBeInTheDocument()
     })
-    fireEvent.click(screen.getByRole('button', { name: /^Pause Queue$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^Pause$/i }))
 
     await waitFor(() => {
       expect(
@@ -553,7 +553,7 @@ describe('App action coverage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /^Settings$/i })).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /Providers/i })).toBeInTheDocument()
     })
     await waitFor(() => {
       expect(
@@ -577,7 +577,7 @@ describe('App action coverage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /Settings/i })).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /Providers/i })).toBeInTheDocument()
     })
 
     // Providers tab (default) — click Claude row to set as default
@@ -693,7 +693,7 @@ describe('App action coverage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /Settings/i })).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /Providers/i })).toBeInTheDocument()
     })
     fireEvent.click(screen.getByRole('tab', { name: /Advanced/i }))
     await waitFor(() => {
@@ -721,7 +721,7 @@ describe('App action coverage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /Settings/i })).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /Providers/i })).toBeInTheDocument()
     })
     fireEvent.click(screen.getByRole('tab', { name: /Advanced/i }))
     await waitFor(() => {
@@ -749,7 +749,7 @@ describe('App action coverage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /Settings/i })).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /Providers/i })).toBeInTheDocument()
     })
     fireEvent.click(screen.getByRole('tab', { name: /Advanced/i }))
     await waitFor(() => {
