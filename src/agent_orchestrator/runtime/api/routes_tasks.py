@@ -265,6 +265,11 @@ def _request_changes_step_for_gate(task: Task, gate: str | None) -> str | None:
     if normalized == "before_generate_tasks":
         return _previous_step(steps, "generate_tasks")
     if normalized == "before_done":
+        # For early-completed tasks, retry from the step that triggered
+        # early completion (stored in task.current_step by the executor).
+        # For non-early-completed tasks, retry from the last pipeline step.
+        if isinstance(task.metadata, dict) and task.metadata.get("early_complete"):
+            return task.current_step or (steps[0] if steps else None)
         return steps[-1] if steps else task.current_step
     if normalized == "before_commit":
         return _previous_step(steps, "commit") or "implement"

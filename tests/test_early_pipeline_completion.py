@@ -103,15 +103,15 @@ def test_no_action_needed_detection_none_summary() -> None:
     assert _is_no_action_needed("commit_review", None) is False
 
 
-def test_no_action_needed_detection_non_commit_review_step() -> None:
-    """Other steps should never trigger no_action_needed, even if text matches."""
+def test_no_action_needed_detection_non_early_complete_step() -> None:
+    """Steps not in _EARLY_COMPLETE_STEPS should never trigger no_action_needed."""
     from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
         _is_no_action_needed,
     )
 
     assert _is_no_action_needed("implement", "No issues found") is False
     assert _is_no_action_needed("review", "No issues found") is False
-    assert _is_no_action_needed("diagnose", "No issues found") is False
+    assert _is_no_action_needed("scan_deps", "No issues found") is False
 
 
 # ---------------------------------------------------------------------------
@@ -273,3 +273,189 @@ def test_early_complete_run_log(tmp_path: Path) -> None:
     # All subsequent steps are skipped
     for step, status in step_statuses[1:]:
         assert status == "skipped", f"Expected {step} to be skipped, got {status}"
+
+
+# ---------------------------------------------------------------------------
+# Expanded _is_no_action_needed: diagnose, scan_code, profile
+# ---------------------------------------------------------------------------
+
+
+def test_no_action_needed_diagnose_no_issues() -> None:
+    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    assert _is_no_action_needed("diagnose", "No issues found — behavior is expected.") is True
+
+
+def test_no_action_needed_diagnose_no_bug_found() -> None:
+    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    assert _is_no_action_needed("diagnose", "No bug found after investigation.") is True
+
+
+def test_no_action_needed_diagnose_no_bug_identified() -> None:
+    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    assert _is_no_action_needed("diagnose", "No bug identified in the codebase.") is True
+
+
+def test_no_action_needed_diagnose_with_root_cause() -> None:
+    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    assert _is_no_action_needed("diagnose", "Root cause: null pointer in parser.py") is False
+
+
+def test_no_action_needed_diagnose_none_summary() -> None:
+    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    assert _is_no_action_needed("diagnose", None) is False
+
+
+def test_no_action_needed_diagnose_empty_summary() -> None:
+    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    assert _is_no_action_needed("diagnose", "") is False
+
+
+def test_no_action_needed_scan_code_no_issues() -> None:
+    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    assert _is_no_action_needed("scan_code", "No issues found — codebase is clean.") is True
+
+
+def test_no_action_needed_scan_code_with_issues() -> None:
+    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    assert _is_no_action_needed("scan_code", "Found 3 vulnerabilities") is False
+
+
+def test_no_action_needed_scan_deps_excluded() -> None:
+    """scan_deps is intentionally NOT in _EARLY_COMPLETE_STEPS."""
+    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    assert _is_no_action_needed("scan_deps", "No issues found") is False
+
+
+def test_no_action_needed_profile_no_issues() -> None:
+    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    assert _is_no_action_needed("profile", "No performance issues detected.") is True
+
+
+def test_no_action_needed_profile_generic_no_issues() -> None:
+    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    assert _is_no_action_needed("profile", "No issues found — within acceptable thresholds.") is True
+
+
+def test_no_action_needed_profile_with_bottleneck() -> None:
+    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    assert _is_no_action_needed("profile", "Bottleneck: database query in get_users") is False
+
+
+def test_early_complete_steps_membership() -> None:
+    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _EARLY_COMPLETE_STEPS
+    assert _EARLY_COMPLETE_STEPS == {
+        "commit_review", "pr_review", "mr_review",
+        "diagnose", "scan_code", "profile",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Integration: bug_fix pipeline early completion
+# ---------------------------------------------------------------------------
+
+
+def test_bug_fix_no_issues_autopilot(tmp_path: Path) -> None:
+    """Bug_fix pipeline: diagnose finds no bug → task done, remaining steps skipped."""
+    _git_init(tmp_path)
+    container, service, _ = _service(tmp_path)
+    task = Task(
+        title="Fix reported bug",
+        task_type="bug",
+        status="queued",
+        hitl_mode="autopilot",
+        metadata={
+            "scripted_steps": {
+                "diagnose": {
+                    "status": "ok",
+                    "summary": "No issues found — the reported behavior is expected.",
+                    "no_action_needed": True,
+                },
+            },
+        },
+    )
+    container.tasks.upsert(task)
+    result = service.run_task(task.id)
+    assert result.status == "done"
+    step_statuses = _step_statuses(container, task.id)
+    assert step_statuses[0] == ("diagnose", "ok")
+    skipped = [s for s, st in step_statuses if st == "skipped"]
+    assert "implement" in skipped
+    assert "verify" in skipped
+    assert "review" in skipped
+    assert "commit" in skipped
+
+
+def test_bug_fix_no_issues_supervised(tmp_path: Path) -> None:
+    """Bug_fix pipeline in supervised mode: diagnose finds no bug → pauses at before_done gate."""
+    _git_init(tmp_path)
+    container, service, _ = _service(tmp_path)
+    task = Task(
+        title="Fix reported bug supervised",
+        task_type="bug",
+        status="queued",
+        hitl_mode="supervised",
+        metadata={
+            "scripted_steps": {
+                "diagnose": {
+                    "status": "ok",
+                    "summary": "No issues found — behavior is expected.",
+                    "no_action_needed": True,
+                },
+            },
+        },
+    )
+    container.tasks.upsert(task)
+    result = service.run_task(task.id)
+    assert result.status != "done"
+    assert result.metadata.get("early_complete") is True
+
+
+# ---------------------------------------------------------------------------
+# _request_changes_step_for_gate fix for early-completed tasks
+# ---------------------------------------------------------------------------
+
+
+def test_request_changes_before_done_early_complete() -> None:
+    """When requesting changes at before_done for an early-completed task,
+    retry from the triggering step (current_step), not steps[-1]."""
+    from agent_orchestrator.runtime.api.routes_tasks import _request_changes_step_for_gate
+    task = Task(
+        title="test",
+        task_type="bug",
+        status="in_progress",
+        metadata={"early_complete": True},
+        pipeline_template=["diagnose", "implement", "verify", "review", "commit"],
+    )
+    task.current_step = "diagnose"
+    result = _request_changes_step_for_gate(task, "before_done")
+    assert result == "diagnose"
+
+
+def test_request_changes_before_done_non_early_complete() -> None:
+    """When requesting changes at before_done for a non-early-completed task,
+    behavior unchanged: returns steps[-1]."""
+    from agent_orchestrator.runtime.api.routes_tasks import _request_changes_step_for_gate
+    task = Task(
+        title="test",
+        task_type="review",
+        status="in_progress",
+        metadata={},
+        pipeline_template=["analyze", "review"],
+    )
+    result = _request_changes_step_for_gate(task, "before_done")
+    assert result == "review"
+
+
+def test_request_changes_before_done_existing_commit_review_early_complete() -> None:
+    """Regression: commit_review early-complete + request changes → retry from commit_review."""
+    from agent_orchestrator.runtime.api.routes_tasks import _request_changes_step_for_gate
+    task = Task(
+        title="test",
+        task_type="commit_review",
+        status="in_progress",
+        metadata={"early_complete": True},
+        pipeline_template=["commit_review", "implement", "verify", "review", "commit"],
+    )
+    task.current_step = "commit_review"
+    result = _request_changes_step_for_gate(task, "before_done")
+    assert result == "commit_review"

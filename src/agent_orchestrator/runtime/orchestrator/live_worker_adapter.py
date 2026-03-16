@@ -491,16 +491,20 @@ def _step_category(step: str) -> str:
 
 
 # Steps that support early pipeline completion when no action is needed.
-_EARLY_COMPLETE_STEPS = {"commit_review", "pr_review", "mr_review"}
+_EARLY_COMPLETE_STEPS = {
+    "commit_review", "pr_review", "mr_review",  # review pipelines
+    "diagnose",                                   # bug_fix: no bug found
+    "scan_code",                                  # security_audit: both scans clean
+    "profile",                                    # performance: no bottlenecks
+}
 
 
 def _is_no_action_needed(step: str, summary: str | None) -> bool:
     """Detect whether a step's output indicates no further action is required.
 
-    Applies to review steps listed in ``_EARLY_COMPLETE_STEPS``
-    (``commit_review``, ``pr_review``, ``mr_review``).  The review prompts
-    instruct the worker to output "No issues found" when the changeset is
-    clean.
+    Applies to steps listed in ``_EARLY_COMPLETE_STEPS``.  The step prompts
+    instruct the worker to output "No issues found" when the analysis
+    determines no downstream work is needed.
 
     Args:
         step: Pipeline step name that produced the output.
@@ -513,7 +517,14 @@ def _is_no_action_needed(step: str, summary: str | None) -> bool:
         return False
     if not summary:
         return False
-    return "no issues found" in summary.lower()
+    lower = summary.lower()
+    if "no issues found" in lower:
+        return True
+    if step == "diagnose" and ("no bug found" in lower or "no bug identified" in lower):
+        return True
+    if step == "profile" and "no performance issues" in lower:
+        return True
+    return False
 
 
 _WORKDOC_STEP_INSTRUCTIONS: dict[str, str] = {

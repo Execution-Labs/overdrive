@@ -48,3 +48,9 @@ Quality bar:
 - Return only the profiling output body.
 - No conversational preface, no implementation plan, no code changes.
 - Be concise, quantitative, and evidence-driven.
+
+## No-issue case
+If profiling reveals no significant performance bottlenecks or regressions:
+- Write "No issues found" as the first line of your response.
+- Follow with a brief summary of what was profiled and baseline metrics.
+- The pipeline will skip optimization steps and complete the task.
