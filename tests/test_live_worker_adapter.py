@@ -2542,9 +2542,9 @@ class TestWorkdocPromptInstructions:
             metadata={"classification_allowed_pipelines": ["feature", "docs"]},
         )
         prompt = build_step_prompt(task=task, step="pipeline_classify", attempt=1)
-        assert "Allowed pipeline IDs" in prompt
-        assert "- feature" in prompt
-        assert "- docs" in prompt
+        assert "Allowed pipelines" in prompt
+        assert "`feature`" in prompt
+        assert "`docs`" in prompt
 
     def test_prompt_no_workdoc_for_plan_refine(self) -> None:
         """plan_refine doesn't go through _run_non_review_step so should not get workdoc instructions."""
