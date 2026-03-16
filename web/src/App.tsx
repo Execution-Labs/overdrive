@@ -2053,6 +2053,12 @@ export default function App() {
   const [settingsGateLow, setSettingsGateLow] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.low))
   const [settingsDependencyPolicy, setSettingsDependencyPolicy] = useState(DEFAULT_SETTINGS.defaults.dependency_policy)
   const [settingsDefaultHitlMode, setSettingsDefaultHitlMode] = useState<SystemSettings['defaults']['hitl_mode']>(DEFAULT_SETTINGS.defaults.hitl_mode)
+  const [autoDetectedDefaults, setAutoDetectedDefaults] = useState<{
+    languages: string[]
+    commands: Record<string, Record<string, string>>
+    venv: { path: string; source: string } | null
+  } | null>(null)
+  const [resolvedEnvVars, setResolvedEnvVars] = useState<{ key: string; source: string; has_value: boolean }[]>([])
   const settingsLoadedRef = useRef(false)
   const shouldPrefillTaskProjectCommandsRef = useRef(false)
 
@@ -2328,8 +2334,30 @@ export default function App() {
     setSettingsError('')
     setSettingsSuccess('')
     try {
-      const payload = await requestJson<Partial<SystemSettings>>(buildApiUrl('/api/settings', projectDir))
+      const payload = await requestJson<Partial<SystemSettings> & { auto_detected_defaults?: unknown; resolved_env_vars?: unknown }>(buildApiUrl('/api/settings', projectDir))
       applySettings(normalizeSettings(payload))
+      // Capture auto-detected defaults and resolved env vars
+      const rawDefaults = payload.auto_detected_defaults
+      if (rawDefaults && typeof rawDefaults === 'object' && !Array.isArray(rawDefaults)) {
+        const d = rawDefaults as Record<string, unknown>
+        setAutoDetectedDefaults({
+          languages: Array.isArray(d.languages) ? d.languages.map(String) : [],
+          commands: (d.commands && typeof d.commands === 'object' && !Array.isArray(d.commands))
+            ? d.commands as Record<string, Record<string, string>> : {},
+          venv: (d.venv && typeof d.venv === 'object') ? d.venv as { path: string; source: string } : null,
+        })
+      } else {
+        setAutoDetectedDefaults(null)
+      }
+      const rawEnvVars = payload.resolved_env_vars
+      if (Array.isArray(rawEnvVars)) {
+        setResolvedEnvVars(rawEnvVars.filter(
+          (v): v is { key: string; source: string; has_value: boolean } =>
+            !!v && typeof v === 'object' && typeof (v as Record<string, unknown>).key === 'string'
+        ))
+      } else {
+        setResolvedEnvVars([])
+      }
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'unknown error'
       setSettingsError(`Failed to load settings (${detail})`)
@@ -6489,6 +6517,75 @@ export default function App() {
                 </div>
               </article>
             </form>
+
+            {autoDetectedDefaults && (
+              <article className="settings-card">
+                <h3>Auto-detected Defaults</h3>
+                <p className="field-label" style={{ marginBottom: '0.75rem' }}>
+                  What workers will use when no overrides are configured. Override by editing Project Commands above.
+                </p>
+
+                {autoDetectedDefaults.languages.length > 0 && (
+                  <div style={{ marginBottom: '0.75rem' }}>
+                    <span className="field-label" style={{ fontWeight: 600 }}>Languages: </span>
+                    {autoDetectedDefaults.languages.map((lang) => (
+                      <span key={lang} className="pr-review-badge" style={{ marginRight: '0.25rem' }}>{lang}</span>
+                    ))}
+                  </div>
+                )}
+
+                {autoDetectedDefaults.venv && (
+                  <div style={{ marginBottom: '0.75rem' }}>
+                    <span className="field-label" style={{ fontWeight: 600 }}>Python venv: </span>
+                    <code style={{ fontSize: '0.85em' }}>{autoDetectedDefaults.venv.path}</code>
+                    <span className="field-label"> ({autoDetectedDefaults.venv.source})</span>
+                  </div>
+                )}
+
+                {Object.keys(autoDetectedDefaults.commands).length > 0 && (
+                  <div style={{ marginBottom: '0.75rem' }}>
+                    <span className="field-label" style={{ fontWeight: 600, display: 'block', marginBottom: '0.25rem' }}>Project commands:</span>
+                    <div className="auto-detected-commands">
+                      {Object.entries(autoDetectedDefaults.commands).map(([lang, cmds]) => (
+                        <div key={lang} style={{ marginBottom: '0.5rem' }}>
+                          <span style={{ fontSize: '0.85em', fontWeight: 600 }}>{lang}</span>
+                          <table className="auto-detected-table">
+                            <tbody>
+                              {Object.entries(cmds).map(([step, cmd]) => (
+                                <tr key={step}>
+                                  <td className="auto-detected-step">{step}</td>
+                                  <td><code style={{ fontSize: '0.85em' }}>{cmd}</code></td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {resolvedEnvVars.length > 0 && (
+                  <div>
+                    <span className="field-label" style={{ fontWeight: 600, display: 'block', marginBottom: '0.25rem' }}>Environment variables:</span>
+                    <table className="auto-detected-table">
+                      <tbody>
+                        {resolvedEnvVars.map((v) => (
+                          <tr key={v.key}>
+                            <td className="auto-detected-step"><code style={{ fontSize: '0.85em' }}>{v.key}</code></td>
+                            <td className="field-label">{v.source}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {autoDetectedDefaults.languages.length === 0 && Object.keys(autoDetectedDefaults.commands).length === 0 && !autoDetectedDefaults.venv && resolvedEnvVars.length === 0 && (
+                  <p className="field-label">No languages or commands detected for this project.</p>
+                )}
+              </article>
+            )}
 
             <form className="form-stack" onSubmit={(event) => void saveSettings(event)}>
               <article className="settings-card">

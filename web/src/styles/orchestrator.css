@@ -1622,6 +1622,29 @@ textarea {
   white-space: nowrap;
 }
 
+.auto-detected-commands {
+  margin-left: 0.25rem;
+}
+
+.auto-detected-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+  margin-top: 0.125rem;
+}
+
+.auto-detected-table td {
+  padding: 0.2rem 0.5rem 0.2rem 0;
+  vertical-align: top;
+  border: none;
+}
+
+.auto-detected-step {
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+  width: 7rem;
+}
+
 .pr-review-setup {
   border: 1px solid var(--color-border-default);
   border-radius: var(--radius-md);

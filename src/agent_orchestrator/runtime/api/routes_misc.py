@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ...collaboration.modes import normalize_hitl_mode
 from ..orchestrator.env_resolver import resolved_env_vars_view
+from ..orchestrator.live_worker_adapter import get_auto_detected_defaults
 from ..orchestrator.venv_detector import detect_python_venv
 from ..orchestrator.human_guidance import (
     clear_active_human_guidance,
@@ -485,6 +486,12 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             )
         except Exception:
             payload["detected_python_venv"] = None
+        try:
+            payload["auto_detected_defaults"] = get_auto_detected_defaults(
+                container.project_dir,
+            )
+        except Exception:
+            payload["auto_detected_defaults"] = None
         return payload
 
     @router.get("/workers/health")
