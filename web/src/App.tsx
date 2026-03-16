@@ -7186,7 +7186,7 @@ export default function App() {
             <div className="modal-sticky-top">
               <header className="panel-head">
                 <h2>Create Work</h2>
-                <button className="button" onClick={() => setWorkOpen(false)}>Close</button>
+                <button className="topbar-icon-btn" onClick={() => setWorkOpen(false)} title="Close" aria-label="Close">&times;</button>
               </header>
 
               <div className="tab-row">
@@ -7474,26 +7474,27 @@ export default function App() {
           <div className="modal-card">
             <header className="panel-head">
               <h2>Browse Repositories</h2>
-              <button className="button" onClick={() => setBrowseOpen(false)}>Close</button>
+              <button className="topbar-icon-btn" onClick={() => setBrowseOpen(false)} title="Close" aria-label="Close">&times;</button>
             </header>
             <div className="browse-toolbar">
-              <button className="button" onClick={() => void loadBrowseDirectories(browseParentPath || undefined)} disabled={!browseParentPath || browseLoading}>
-                Up
+              <button className="topbar-icon-btn" onClick={() => void loadBrowseDirectories(browseParentPath || undefined)} disabled={!browseParentPath || browseLoading} title="Up" aria-label="Up">
+                &#x2191;
               </button>
-              <button className="button" onClick={() => void loadBrowseDirectories(browsePath || undefined)} disabled={browseLoading}>
-                Refresh
+              <button className="topbar-icon-btn" onClick={() => void loadBrowseDirectories(browsePath || undefined)} disabled={browseLoading} title="Refresh" aria-label="Refresh">
+                &#x21BB;
               </button>
               <div className="browse-path-wrap">
                 <input
                   className={`browse-path-input ${browseCurrentIsGit ? 'is-git' : ''}`}
                   value={browsePath}
                   onChange={(event) => setBrowsePath(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === 'Enter' && browsePath) void loadBrowseDirectories(browsePath) }}
                   aria-label="Browse path"
                 />
                 {browseCurrentIsGit ? <span className="git-chip">Git repo</span> : null}
               </div>
-              <button className="button" onClick={() => void loadBrowseDirectories(browsePath || undefined)} disabled={!browsePath || browseLoading}>
-                Go
+              <button className="topbar-icon-btn" onClick={() => void loadBrowseDirectories(browsePath || undefined)} disabled={!browsePath || browseLoading} title="Go" aria-label="Go">
+                &#x2192;
               </button>
             </div>
 
