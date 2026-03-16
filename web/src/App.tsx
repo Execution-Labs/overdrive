@@ -11,7 +11,17 @@ import './styles/orchestrator.css'
 type ThemeMode = 'light' | 'dark' | 'system'
 type RouteKey = 'board' | 'execution' | 'settings'
 type SettingsTab = 'providers' | 'execution' | 'advanced'
-type CreateTab = 'task' | 'import'
+type CreateTab = 'task' | 'import' | 'review'
+type PullRequestItem = {
+  number: number
+  title: string
+  author: string
+  head_ref: string
+  base_ref: string
+  url: string
+  has_review_task: boolean
+  review_task_id: string | null
+}
 type TaskDetailTab = 'overview' | 'plan' | 'workdoc' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
 type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate' | 'review_commit'
 type GeneratedTaskStatus = 'backlog' | 'queued'
@@ -837,8 +847,10 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
       // ignore parse failures for non-json bodies
     }
     const parsed = _extractApiErrorFields(payload)
-    const detailSuffix = parsed.detail ? `: ${parsed.detail}` : ''
-    const error = new Error(`${response.status} ${response.statusText} [${url}]${detailSuffix}`) as ApiRequestError
+    const displayMessage = parsed.detail
+      ? parsed.detail
+      : `${response.status} ${response.statusText}`
+    const error = new Error(displayMessage) as ApiRequestError
     error.status = response.status
     error.statusText = response.statusText
     error.url = url
@@ -1754,6 +1766,13 @@ export default function App() {
 
   const [workOpen, setWorkOpen] = useState(false)
   const [createTab, setCreateTab] = useState<CreateTab>('task')
+  const [prList, setPrList] = useState<PullRequestItem[]>([])
+  const [prListLoading, setPrListLoading] = useState(false)
+  const [prListError, setPrListError] = useState('')
+  const [prPlatform, setPrPlatform] = useState<string | null>(null)
+  const [selectedPrNumber, setSelectedPrNumber] = useState<number | null>(null)
+  const [prReviewGuidance, setPrReviewGuidance] = useState('')
+  const [isSubmittingReview, setIsSubmittingReview] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [selectedTaskId, setSelectedTaskId] = useState<string>('')
   const modalDismissedRef = useRef(false)
@@ -2415,8 +2434,8 @@ export default function App() {
         return
       }
       setSelectedTaskWorkdoc(null)
-      const detail = err instanceof Error ? err.message : ''
-      if (detail.includes('409 ')) {
+      const apiErr = err as ApiRequestError
+      if (apiErr.status === 409) {
         setSelectedTaskWorkdocError('Workdoc is missing for this task.')
       } else {
         setSelectedTaskWorkdocError(toErrorMessage('Failed to load workdoc', err))
@@ -3543,6 +3562,48 @@ export default function App() {
     } finally {
       setIsSubmittingTask(false)
       setSubmittingTaskTarget(null)
+    }
+  }
+
+  async function fetchPullRequests(): Promise<void> {
+    setPrListLoading(true)
+    setPrListError('')
+    try {
+      const data = await requestJson<{ platform: string | null; error: string | null; items: PullRequestItem[] }>(
+        buildApiUrl('/api/pull-requests', projectDir),
+      )
+      setPrPlatform(data.platform)
+      if (data.error) {
+        setPrListError(data.error)
+        setPrList([])
+      } else {
+        setPrList(data.items)
+      }
+    } catch (err) {
+      setPrListError(err instanceof Error ? err.message : 'Failed to load pull requests')
+      setPrList([])
+    } finally {
+      setPrListLoading(false)
+    }
+  }
+
+  async function submitPrReview(): Promise<void> {
+    if (selectedPrNumber === null) return
+    setIsSubmittingReview(true)
+    try {
+      await requestJson(buildApiUrl(`/api/pull-requests/${selectedPrNumber}/review`, projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ guidance: prReviewGuidance }),
+      })
+      setWorkOpen(false)
+      setSelectedPrNumber(null)
+      setPrReviewGuidance('')
+      void reloadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create review')
+    } finally {
+      setIsSubmittingReview(false)
     }
   }
 
@@ -5722,7 +5783,7 @@ export default function App() {
     return (
       <section className="panel">
         {taskActionMessage ? <p className="field-label">{taskActionMessage}</p> : null}
-        {taskActionError ? <p className="error-banner">{taskActionError}</p> : null}
+        {taskActionError ? <div className="error-banner"><span>{taskActionError}</span><button type="button" className="error-banner-dismiss" onClick={() => setTaskActionError('')} aria-label="Dismiss">&times;</button></div> : null}
         <div className="board-toolbar">
           <label className="board-compact-toggle" title="Compact view">
             <input type="checkbox" checked={boardCompact} onChange={() => setBoardCompact((v) => !v)} />
@@ -6085,10 +6146,10 @@ export default function App() {
                   <div
                     className={`row-card row-card-clickable${settingsWorkerDefault === provider.name ? ' row-card-default' : ''}`}
                     key={provider.name}
-                    onClick={() => { if (provider.configured && settingsWorkerDefault !== provider.name) void setDefaultProvider(provider.name) }}
+                    onClick={() => { if ((provider.configured || provider.healthy) && settingsWorkerDefault !== provider.name) void setDefaultProvider(provider.name) }}
                     role="button"
                     tabIndex={0}
-                    onKeyDown={(event) => { if ((event.key === 'Enter' || event.key === ' ') && provider.configured && settingsWorkerDefault !== provider.name) void setDefaultProvider(provider.name) }}
+                    onKeyDown={(event) => { if ((event.key === 'Enter' || event.key === ' ') && (provider.configured || provider.healthy) && settingsWorkerDefault !== provider.name) void setDefaultProvider(provider.name) }}
                   >
                     <div>
                       <p className="task-title">
@@ -6782,6 +6843,11 @@ export default function App() {
         void loadSettings()
       }
     }
+    if (tab === 'review') {
+      setSelectedPrNumber(null)
+      setPrReviewGuidance('')
+      void fetchPullRequests()
+    }
     setWorkOpen(true)
   }
 
@@ -6899,7 +6965,7 @@ export default function App() {
             </div>
             <footer className="task-detail-modal-foot">
               {taskActionMessage ? <p className="field-label">{taskActionMessage}</p> : null}
-              {taskActionError ? <p className="error-banner">{taskActionError}</p> : null}
+              {taskActionError ? <div className="error-banner"><span>{taskActionError}</span><button type="button" className="error-banner-dismiss" onClick={() => setTaskActionError('')} aria-label="Dismiss">&times;</button></div> : null}
               {taskStatus === 'blocked' ? (
                 <>
                   <div className="inline-actions blocked-retry-row">
@@ -6930,9 +6996,9 @@ export default function App() {
                       onChange={(event) => setRetryProvider(event.target.value)}
                       disabled={isTaskActionBusy || hasUnresolvedBlockers}
                     >
-                      <option value="">Default provider</option>
-                      {workerHealth.filter((p) => p.configured && p.healthy).map((p) => (
-                        <option key={p.name} value={p.name}>{p.name}</option>
+                      <option value="">{humanizeLabel(workerDefaultProvider)} (default)</option>
+                      {workerHealth.filter((p) => (p.configured || p.healthy) && p.name !== workerDefaultProvider).map((p) => (
+                        <option key={p.name} value={p.name}>{humanizeLabel(p.name)}</option>
                       ))}
                     </select>
                     <button
@@ -7027,7 +7093,7 @@ export default function App() {
         </div>
       ) : null}
 
-      {error ? <p className="error-banner">{error}</p> : null}
+      {error ? <div className="error-banner"><span>{error}</span><button type="button" className="error-banner-dismiss" onClick={() => setError('')} aria-label="Dismiss">&times;</button></div> : null}
 
       {workOpen ? (
         <div className="modal-scrim" role="dialog" aria-modal="true" aria-label="Create Work modal" onClick={(event) => { if (event.target === event.currentTarget) setWorkOpen(false) }} onKeyDown={(event) => { if (event.key === 'Escape') setWorkOpen(false) }}>
@@ -7041,6 +7107,7 @@ export default function App() {
               <div className="tab-row">
                 <button className={`tab ${createTab === 'task' ? 'is-active' : ''}`} onClick={() => setCreateTab('task')}>Create Task</button>
                 <button className={`tab ${createTab === 'import' ? 'is-active' : ''}`} onClick={() => setCreateTab('import')}>Import PRD</button>
+                <button className={`tab ${createTab === 'review' ? 'is-active' : ''}`} onClick={() => { setCreateTab('review'); void fetchPullRequests() }}>Review PR/MR</button>
               </div>
             </div>
 
@@ -7173,9 +7240,9 @@ export default function App() {
                         value={newTaskWorkerProvider}
                         onChange={(event) => setNewTaskWorkerProvider(event.target.value)}
                       >
-                        <option value="">Default provider</option>
-                        {workerHealth.filter((p) => p.configured && p.healthy).map((p) => (
-                          <option key={p.name} value={p.name}>{p.name}</option>
+                        <option value="">{humanizeLabel(workerDefaultProvider)} (default)</option>
+                        {workerHealth.filter((p) => (p.configured || p.healthy) && p.name !== workerDefaultProvider).map((p) => (
+                          <option key={p.name} value={p.name}>{humanizeLabel(p.name)}</option>
                         ))}
                       </select>
                       <label className="field-label" htmlFor="task-metadata">Metadata JSON object (optional)</label>
@@ -7215,11 +7282,102 @@ export default function App() {
                 </div>
               ) : null}
 
+              {createTab === 'review' ? (
+                <div className="form-stack">
+                  {prListLoading ? <p className="text-muted">Loading open pull requests…</p> : null}
+                  {prListError ? (
+                    <div className="pr-review-setup">
+                      <p className="pr-review-setup-error">{prListError}</p>
+                      {!prPlatform ? (
+                        <div className="pr-review-setup-help">
+                          <p>This project does not appear to have a GitHub or GitLab remote configured.</p>
+                          <p>Make sure your <code>origin</code> remote points to a GitHub or GitLab repository:</p>
+                          <pre>git remote -v</pre>
+                        </div>
+                      ) : prListError.toLowerCase().includes('not installed') ? (
+                        <div className="pr-review-setup-help">
+                          <p>To list and review {prPlatform === 'gitlab' ? 'merge requests' : 'pull requests'}, install the {prPlatform === 'gitlab' ? 'GitLab' : 'GitHub'} CLI:</p>
+                          {prPlatform === 'github' ? (
+                            <>
+                              <pre>brew install gh</pre>
+                              <p>Then authenticate:</p>
+                              <pre>gh auth login</pre>
+                            </>
+                          ) : (
+                            <>
+                              <pre>brew install glab</pre>
+                              <p>Then authenticate:</p>
+                              <pre>glab auth login</pre>
+                            </>
+                          )}
+                        </div>
+                      ) : prListError.toLowerCase().includes('auth') || prListError.toLowerCase().includes('login') || prListError.toLowerCase().includes('401') || prListError.toLowerCase().includes('403') ? (
+                        <div className="pr-review-setup-help">
+                          <p>The {prPlatform === 'gitlab' ? 'GitLab' : 'GitHub'} CLI does not appear to be authenticated. Run:</p>
+                          <pre>{prPlatform === 'github' ? 'gh auth login' : 'glab auth login'}</pre>
+                        </div>
+                      ) : (
+                        <div className="pr-review-setup-help">
+                          <p>Check that the {prPlatform === 'gitlab' ? 'GitLab' : 'GitHub'} CLI is authenticated and can access this repository:</p>
+                          <pre>{prPlatform === 'github' ? 'gh pr list' : 'glab mr list'}</pre>
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+                  {!prListLoading && !prListError && prList.length === 0 ? (
+                    <p className="text-muted">No open {prPlatform === 'gitlab' ? 'merge requests' : 'pull requests'} found.</p>
+                  ) : null}
+                  {!prListLoading && prList.length > 0 ? (
+                    <div className="pr-review-list" role="radiogroup" aria-label="Open pull requests">
+                      {prList.map((pr) => (
+                        <button
+                          key={pr.number}
+                          type="button"
+                          className={`pr-review-row ${selectedPrNumber === pr.number ? 'is-selected' : ''} ${pr.has_review_task ? 'is-reviewed' : ''}`}
+                          onClick={() => !pr.has_review_task && setSelectedPrNumber(pr.number)}
+                          disabled={pr.has_review_task}
+                          role="radio"
+                          aria-checked={selectedPrNumber === pr.number}
+                        >
+                          <span className="pr-review-number">{prPlatform === 'gitlab' ? '!' : '#'}{pr.number}</span>
+                          <span className="pr-review-title">{pr.title}</span>
+                          <span className="pr-review-meta">
+                            <span className="pr-review-author">{pr.author}</span>
+                            <span className="pr-review-branches">{pr.base_ref} ← {pr.head_ref}</span>
+                          </span>
+                          {pr.has_review_task ? <span className="pr-review-badge">Review exists</span> : null}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  <label className="field-label" htmlFor="pr-review-guidance">Review guidance (optional)</label>
+                  <textarea
+                    id="pr-review-guidance"
+                    rows={3}
+                    value={prReviewGuidance}
+                    onChange={(e) => setPrReviewGuidance(e.target.value)}
+                    placeholder="e.g. Focus on error handling in the auth module…"
+                  />
+                </div>
+              ) : null}
+
             </div>
             {createTab === 'task' ? (
               <div className="modal-footer">
                 <button className="button button-primary" type="submit" form="create-task-form" disabled={isSubmittingTask}>{submittingTaskTarget === 'queued' ? 'Creating…' : 'Create & Queue'}</button>
                 <button className="button" type="button" onClick={(event) => void submitTask(event, 'backlog')} disabled={isSubmittingTask}>{submittingTaskTarget === 'backlog' ? 'Creating…' : 'Add to Backlog'}</button>
+              </div>
+            ) : null}
+            {createTab === 'review' ? (
+              <div className="modal-footer">
+                <button
+                  className="button button-primary"
+                  type="button"
+                  disabled={selectedPrNumber === null || isSubmittingReview || prList.find((p) => p.number === selectedPrNumber)?.has_review_task === true}
+                  onClick={() => void submitPrReview()}
+                >
+                  {isSubmittingReview ? 'Creating…' : 'Create Review'}
+                </button>
               </div>
             ) : null}
           </div>

@@ -981,7 +981,7 @@ describe('App action coverage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /^Approve$/i }))
     await waitFor(() => {
-      expect(screen.getAllByText(/500 Internal Server Error/i).length).toBeGreaterThan(0)
+      expect(screen.getAllByText(/Approval service timeout/i).length).toBeGreaterThan(0)
     })
     expect(screen.getByRole('button', { name: /^Approve$/i })).toBeInTheDocument()
   })

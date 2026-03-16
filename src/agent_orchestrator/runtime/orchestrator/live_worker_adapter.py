@@ -1262,6 +1262,11 @@ def build_step_prompt(
             label = f"PR/MR diff ({base_label}...{ref_label})"
             parts.append(f"## {label}")
             parts.append(f"```diff\n{_pr_diff}\n```")
+        _pr_guidance = str(task.metadata.get("review_guidance") or "").strip()
+        if _pr_guidance:
+            parts.append("")
+            parts.append("## Review guidance from the user")
+            parts.append(_pr_guidance)
 
     # Inject outputs from prior pipeline steps.
     # For implement/implement_fix, rely on the workdoc as the single source of truth.

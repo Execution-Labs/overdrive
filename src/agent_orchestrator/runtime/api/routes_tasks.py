@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional, cast
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from ...collaboration.modes import normalize_hitl_mode
 from ...pipelines.registry import PipelineRegistry
@@ -62,6 +63,13 @@ _read_from_offset = impl._read_from_offset
 _read_tail = impl._read_tail
 _safe_state_path = impl._safe_state_path
 _task_payload = impl._task_payload
+
+
+class CreatePullRequestReviewRequest(BaseModel):
+    """Request body for creating a pull request review task."""
+
+    guidance: str = ""
+
 
 _CHANGES_TELEMETRY_RECENT: dict[tuple[str, str, str, str], float] = {}
 _CHANGES_TELEMETRY_TTL_SECONDS = 900.0
@@ -952,6 +960,150 @@ def _truncate_diff(diff_text: str) -> str:
         return diff_text
     truncated = diff_text[:_MAX_DIFF_CHARS].rsplit("\n", 1)[0]
     return truncated + "\n\n[DIFF TRUNCATED — exceeded 100K character limit. Consult the --stat summary above and use `git diff` to read remaining files individually.]"
+
+
+def _detect_git_platform(project_dir: Path) -> str | None:
+    """Detect whether the project uses GitHub or GitLab from the git remote URL."""
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=project_dir, capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        url = result.stdout.strip()
+        if "github.com" in url:
+            return "github"
+        if "gitlab" in url:
+            return "gitlab"
+        return None
+    except Exception:
+        return None
+
+
+def _fetch_github_pr_context(git_dir: Path, pr_number: int) -> dict[str, Any]:
+    """Fetch GitHub PR metadata, diff, and stat via the ``gh`` CLI.
+
+    Returns a dict with keys: title, body, head_ref, base_ref, url, diff, stat.
+
+    Raises:
+        HTTPException: If metadata fetch fails.
+    """
+    # Fetch PR metadata.
+    try:
+        meta_result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "title,body,headRefName,baseRefName,url"],
+            cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
+        )
+        pr_meta = json.loads(meta_result.stdout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch PR metadata: {exc}")
+
+    title = str(pr_meta.get("title") or "").strip()
+    body = str(pr_meta.get("body") or "").strip()
+    head_ref = str(pr_meta.get("headRefName") or "").strip()
+    base_ref = str(pr_meta.get("baseRefName") or "").strip()
+    url = str(pr_meta.get("url") or "").strip()
+
+    # Fetch PR diff.
+    try:
+        diff_result = subprocess.run(
+            ["gh", "pr", "diff", str(pr_number)],
+            cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
+        )
+        diff_text = _truncate_diff(diff_result.stdout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        diff_text = ""
+
+    # Fetch diff stat.
+    stat_text = ""
+    try:
+        stat_result = subprocess.run(
+            ["gh", "pr", "diff", str(pr_number), "--stat"],
+            cwd=git_dir, capture_output=True, text=True, timeout=15,
+        )
+        if stat_result.returncode == 0:
+            stat_text = stat_result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    if not stat_text and base_ref and head_ref:
+        try:
+            stat_result = subprocess.run(
+                ["git", "diff", "--stat", f"{base_ref}...{head_ref}"],
+                cwd=git_dir, capture_output=True, text=True, timeout=15,
+            )
+            if stat_result.returncode == 0:
+                stat_text = stat_result.stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    return {
+        "title": title,
+        "body": body,
+        "head_ref": head_ref,
+        "base_ref": base_ref,
+        "url": url,
+        "diff": diff_text,
+        "stat": stat_text,
+    }
+
+
+def _fetch_gitlab_mr_context(git_dir: Path, mr_number: int) -> dict[str, Any]:
+    """Fetch GitLab MR metadata, diff, and stat via the ``glab`` CLI.
+
+    Returns a dict with keys: title, body, head_ref, base_ref, url, diff, stat.
+
+    Raises:
+        HTTPException: If metadata fetch fails.
+    """
+    # Fetch MR metadata.
+    try:
+        meta_result = subprocess.run(
+            ["glab", "mr", "view", str(mr_number), "--output", "json"],
+            cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
+        )
+        mr_meta = json.loads(meta_result.stdout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch MR metadata: {exc}")
+
+    title = str(mr_meta.get("title") or "").strip()
+    body = str(mr_meta.get("description") or "").strip()
+    head_ref = str(mr_meta.get("source_branch") or "").strip()
+    base_ref = str(mr_meta.get("target_branch") or "").strip()
+    url = str(mr_meta.get("web_url") or "").strip()
+
+    # Fetch MR diff.
+    try:
+        diff_result = subprocess.run(
+            ["glab", "mr", "diff", str(mr_number)],
+            cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
+        )
+        diff_text = _truncate_diff(diff_result.stdout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        diff_text = ""
+
+    # Fetch diff stat via git.
+    stat_text = ""
+    if base_ref and head_ref:
+        try:
+            stat_result = subprocess.run(
+                ["git", "diff", "--stat", f"{base_ref}...{head_ref}"],
+                cwd=git_dir, capture_output=True, text=True, timeout=15,
+            )
+            if stat_result.returncode == 0:
+                stat_text = stat_result.stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    return {
+        "title": title,
+        "body": body,
+        "head_ref": head_ref,
+        "base_ref": base_ref,
+        "url": url,
+        "diff": diff_text,
+        "stat": stat_text,
+    }
 
 
 def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
@@ -2991,57 +3143,10 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 raise HTTPException(status_code=409, detail=f"A PR review task already exists: {existing.id}")
 
         git_dir = container.project_dir
-
-        # Fetch PR metadata.
-        try:
-            meta_result = subprocess.run(
-                ["gh", "pr", "view", str(pr_number), "--json", "title,body,headRefName,baseRefName,url"],
-                cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
-            )
-            pr_meta = json.loads(meta_result.stdout)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
-            raise HTTPException(status_code=400, detail=f"Failed to fetch PR metadata: {exc}")
-
-        pr_title = str(pr_meta.get("title") or "").strip()
-        pr_body = str(pr_meta.get("body") or "").strip()
-        head_ref = str(pr_meta.get("headRefName") or "").strip()
-        base_ref = str(pr_meta.get("baseRefName") or "").strip()
-        pr_url = str(pr_meta.get("url") or "").strip()
-
-        # Fetch PR diff.
-        try:
-            diff_result = subprocess.run(
-                ["gh", "pr", "diff", str(pr_number)],
-                cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
-            )
-            diff_text = _truncate_diff(diff_result.stdout)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-            diff_text = ""
-
-        # Fetch diff stat.
-        stat_text = ""
-        try:
-            stat_result = subprocess.run(
-                ["gh", "pr", "diff", str(pr_number), "--stat"],
-                cwd=git_dir, capture_output=True, text=True, timeout=15,
-            )
-            if stat_result.returncode == 0:
-                stat_text = stat_result.stdout.strip()
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-        if not stat_text and base_ref and head_ref:
-            try:
-                stat_result = subprocess.run(
-                    ["git", "diff", "--stat", f"{base_ref}...{head_ref}"],
-                    cwd=git_dir, capture_output=True, text=True, timeout=15,
-                )
-                if stat_result.returncode == 0:
-                    stat_text = stat_result.stdout.strip()
-            except (subprocess.TimeoutExpired, OSError):
-                pass
+        ctx = _fetch_github_pr_context(git_dir, pr_number)
 
         review_task = Task(
-            title=f"PR Review: #{pr_number} — {pr_title}" if pr_title else f"PR Review: #{pr_number}",
+            title=f"PR Review: #{pr_number} — {ctx['title']}" if ctx["title"] else f"PR Review: #{pr_number}",
             description=f"Review pull request #{pr_number}.",
             task_type="pr_review",
             status="queued",
@@ -3049,12 +3154,12 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             metadata={
                 "source_task_id": task_id,
                 "source_pr_number": pr_number,
-                "source_description": pr_body,
-                "source_diff": diff_text,
-                "source_stat": stat_text,
-                "source_url": pr_url,
-                "source_ref": head_ref,
-                "source_base_ref": base_ref,
+                "source_description": ctx["body"],
+                "source_diff": ctx["diff"],
+                "source_stat": ctx["stat"],
+                "source_url": ctx["url"],
+                "source_ref": ctx["head_ref"],
+                "source_base_ref": ctx["base_ref"],
             },
         )
         container.tasks.upsert(review_task)
@@ -3104,48 +3209,10 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 raise HTTPException(status_code=409, detail=f"An MR review task already exists: {existing.id}")
 
         git_dir = container.project_dir
-
-        # Fetch MR metadata.
-        try:
-            meta_result = subprocess.run(
-                ["glab", "mr", "view", str(mr_number), "--output", "json"],
-                cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
-            )
-            mr_meta = json.loads(meta_result.stdout)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
-            raise HTTPException(status_code=400, detail=f"Failed to fetch MR metadata: {exc}")
-
-        mr_title = str(mr_meta.get("title") or "").strip()
-        mr_body = str(mr_meta.get("description") or "").strip()
-        source_branch = str(mr_meta.get("source_branch") or "").strip()
-        target_branch = str(mr_meta.get("target_branch") or "").strip()
-        mr_url = str(mr_meta.get("web_url") or "").strip()
-
-        # Fetch MR diff.
-        try:
-            diff_result = subprocess.run(
-                ["glab", "mr", "diff", str(mr_number)],
-                cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
-            )
-            diff_text = _truncate_diff(diff_result.stdout)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-            diff_text = ""
-
-        # Fetch diff stat via git.
-        stat_text = ""
-        if target_branch and source_branch:
-            try:
-                stat_result = subprocess.run(
-                    ["git", "diff", "--stat", f"{target_branch}...{source_branch}"],
-                    cwd=git_dir, capture_output=True, text=True, timeout=15,
-                )
-                if stat_result.returncode == 0:
-                    stat_text = stat_result.stdout.strip()
-            except (subprocess.TimeoutExpired, OSError):
-                pass
+        ctx = _fetch_gitlab_mr_context(git_dir, mr_number)
 
         review_task = Task(
-            title=f"MR Review: !{mr_number} — {mr_title}" if mr_title else f"MR Review: !{mr_number}",
+            title=f"MR Review: !{mr_number} — {ctx['title']}" if ctx["title"] else f"MR Review: !{mr_number}",
             description=f"Review merge request !{mr_number}.",
             task_type="mr_review",
             status="queued",
@@ -3153,13 +3220,198 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             metadata={
                 "source_task_id": task_id,
                 "source_mr_number": mr_number,
-                "source_description": mr_body,
-                "source_diff": diff_text,
-                "source_stat": stat_text,
-                "source_url": mr_url,
-                "source_ref": source_branch,
-                "source_base_ref": target_branch,
+                "source_description": ctx["body"],
+                "source_diff": ctx["diff"],
+                "source_stat": ctx["stat"],
+                "source_url": ctx["url"],
+                "source_ref": ctx["head_ref"],
+                "source_base_ref": ctx["base_ref"],
             },
+        )
+        container.tasks.upsert(review_task)
+        bus.emit(channel="tasks", event_type="task.created", entity_id=review_task.id, payload={"status": review_task.status})
+        return {"task": _task_payload(review_task, orchestrator=orchestrator)}
+
+    # ------------------------------------------------------------------
+    # GET /pull-requests
+    # ------------------------------------------------------------------
+
+    @router.get("/pull-requests")
+    async def list_pull_requests(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """List open pull requests (GitHub) or merge requests (GitLab).
+
+        Detects the git platform from the remote URL, fetches open PRs/MRs
+        via the appropriate CLI, and annotates each with whether a review
+        task already exists.
+
+        Args:
+            project_dir: Optional project directory for runtime state resolution.
+
+        Returns:
+            A dict with platform, error (if any), and items list.
+        """
+        container, _bus, _orchestrator = deps.ctx(project_dir)
+        git_dir = container.project_dir
+        platform = _detect_git_platform(git_dir)
+
+        if platform is None:
+            return {"platform": None, "error": "Could not detect GitHub or GitLab remote", "items": []}
+
+        # Check CLI availability.
+        if platform == "github" and not shutil.which("gh"):
+            return {"platform": platform, "error": "GitHub CLI (gh) is not installed. Install it from https://cli.github.com/", "items": []}
+        if platform == "gitlab" and not shutil.which("glab"):
+            return {"platform": platform, "error": "GitLab CLI (glab) is not installed. Install it from https://gitlab.com/gitlab-org/cli", "items": []}
+
+        # Fetch open PRs/MRs.
+        items: list[dict[str, Any]] = []
+        try:
+            if platform == "github":
+                result = subprocess.run(
+                    ["gh", "pr", "list", "--json", "number,title,author,headRefName,baseRefName,url", "--state", "open", "--limit", "50"],
+                    cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
+                )
+                raw_items = json.loads(result.stdout)
+                for raw in raw_items:
+                    author_field = raw.get("author")
+                    if isinstance(author_field, dict):
+                        author = author_field.get("login", "")
+                    else:
+                        author = str(author_field or "")
+                    items.append({
+                        "number": raw.get("number"),
+                        "title": raw.get("title", ""),
+                        "author": author,
+                        "head_ref": raw.get("headRefName", ""),
+                        "base_ref": raw.get("baseRefName", ""),
+                        "url": raw.get("url", ""),
+                    })
+            else:
+                result = subprocess.run(
+                    ["glab", "mr", "list", "--output", "json", "--state", "opened"],
+                    cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
+                )
+                raw_items = json.loads(result.stdout)
+                for raw in raw_items:
+                    author_field = raw.get("author")
+                    if isinstance(author_field, dict):
+                        author = author_field.get("username", "")
+                    else:
+                        author = str(author_field or "")
+                    items.append({
+                        "number": raw.get("iid"),
+                        "title": raw.get("title", ""),
+                        "author": author,
+                        "head_ref": raw.get("source_branch", ""),
+                        "base_ref": raw.get("target_branch", ""),
+                        "url": raw.get("web_url", ""),
+                    })
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
+            return {"platform": platform, "error": f"Failed to list pull requests: {exc}", "items": []}
+
+        # Annotate with existing review tasks.
+        task_type_key = "pr_review" if platform == "github" else "mr_review"
+        meta_number_key = "source_pr_number" if platform == "github" else "source_mr_number"
+        all_tasks = container.tasks.list()
+        review_task_map: dict[int, str] = {}
+        for t in all_tasks:
+            if (
+                t.task_type == task_type_key
+                and isinstance(t.metadata, dict)
+                and t.status not in ("failed", "cancelled")
+            ):
+                src_num = t.metadata.get(meta_number_key)
+                if isinstance(src_num, int):
+                    review_task_map[src_num] = t.id
+
+        for item in items:
+            num = item.get("number")
+            existing_task_id = review_task_map.get(num) if isinstance(num, int) else None
+            item["has_review_task"] = existing_task_id is not None
+            item["review_task_id"] = existing_task_id
+
+        return {"platform": platform, "error": None, "items": items}
+
+    # ------------------------------------------------------------------
+    # POST /pull-requests/{number}/review
+    # ------------------------------------------------------------------
+
+    @router.post("/pull-requests/{number}/review")
+    async def create_pull_request_review(number: int, body: CreatePullRequestReviewRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Create a review task for a pull request or merge request.
+
+        Detects the git platform, fetches PR/MR context, and creates a
+        review task queued for execution.
+
+        Args:
+            number: Pull request or merge request number.
+            body: Optional review guidance.
+            project_dir: Optional project directory for runtime state resolution.
+
+        Returns:
+            A payload containing the newly created review task.
+
+        Raises:
+            HTTPException: 400 if platform detection or CLI check fails,
+                409 if a review task already exists for this PR/MR number.
+        """
+        container, bus, orchestrator = deps.ctx(project_dir)
+        git_dir = container.project_dir
+        platform = _detect_git_platform(git_dir)
+
+        if platform is None:
+            raise HTTPException(status_code=400, detail="Could not detect GitHub or GitLab remote")
+
+        if platform == "github" and not shutil.which("gh"):
+            raise HTTPException(status_code=400, detail="GitHub CLI (gh) is not installed. Install it from https://cli.github.com/")
+        if platform == "gitlab" and not shutil.which("glab"):
+            raise HTTPException(status_code=400, detail="GitLab CLI (glab) is not installed. Install it from https://gitlab.com/gitlab-org/cli")
+
+        # Duplicate check.
+        task_type_key = "pr_review" if platform == "github" else "mr_review"
+        meta_number_key = "source_pr_number" if platform == "github" else "source_mr_number"
+        for existing in container.tasks.list():
+            if (
+                existing.task_type == task_type_key
+                and isinstance(existing.metadata, dict)
+                and existing.metadata.get(meta_number_key) == number
+                and existing.status not in ("failed", "cancelled")
+            ):
+                raise HTTPException(status_code=409, detail=f"A review task already exists: {existing.id}")
+
+        # Fetch context.
+        if platform == "github":
+            ctx = _fetch_github_pr_context(git_dir, number)
+        else:
+            ctx = _fetch_gitlab_mr_context(git_dir, number)
+
+        # Build metadata.
+        metadata: dict[str, Any] = {
+            meta_number_key: number,
+            "source_description": ctx["body"],
+            "source_diff": ctx["diff"],
+            "source_stat": ctx["stat"],
+            "source_url": ctx["url"],
+            "source_ref": ctx["head_ref"],
+            "source_base_ref": ctx["base_ref"],
+        }
+        if body.guidance:
+            metadata["review_guidance"] = body.guidance
+
+        if platform == "github":
+            title = f"PR Review: #{number} — {ctx['title']}" if ctx["title"] else f"PR Review: #{number}"
+            description = f"Review pull request #{number}."
+        else:
+            title = f"MR Review: !{number} — {ctx['title']}" if ctx["title"] else f"MR Review: !{number}"
+            description = f"Review merge request !{number}."
+
+        review_task = Task(
+            title=title,
+            description=description,
+            task_type=task_type_key,
+            status="queued",
+            source=task_type_key,
+            metadata=metadata,
         )
         container.tasks.upsert(review_task)
         bus.emit(channel="tasks", event_type="task.created", entity_id=review_task.id, payload={"status": review_task.status})
