@@ -1558,9 +1558,9 @@ textarea {
 
 .pr-review-row {
   display: grid;
-  grid-template-columns: auto 1fr auto auto;
-  align-items: center;
-  gap: 0.5rem;
+  grid-template-columns: auto 1fr auto;
+  align-items: baseline;
+  gap: 0.15rem 0.5rem;
   padding: 0.5rem 0.75rem;
   background: var(--color-bg-primary);
   border: none;
@@ -1599,16 +1599,16 @@ textarea {
 .pr-review-title {
   font-size: var(--text-sm);
   font-weight: var(--font-medium);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .pr-review-meta {
+  grid-column: 2 / -1;
   display: flex;
   gap: 0.5rem;
   font-size: var(--text-xs);
   color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
