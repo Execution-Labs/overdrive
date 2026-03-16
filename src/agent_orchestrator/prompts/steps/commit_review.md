@@ -13,11 +13,9 @@ Your job is to analyze the diff for correctness, bugs, missing edge cases, test 
 
 ## Output
 
-Write your findings and remediation plan into the workdoc's **## Plan** section using this structure:
+Write your findings and remediation plan into the workdoc's **## Plan** section (which already exists — do not repeat the heading) using this structure:
 
 ```
-## Plan
-
 ### Findings
 
 1. **[severity: high/medium/low]** Brief title
@@ -42,4 +40,5 @@ Rules:
 - Prioritize findings by severity (high first).
 - Each finding must have a concrete fix action, not just a description of the problem.
 - Do not modify any code yourself — only write the plan.
+- When using tables, use standard markdown pipe tables. Never use Unicode box-drawing characters.
 - Return only the review body (no preamble, tool logs, or follow-up questions).

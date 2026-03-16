@@ -1780,7 +1780,7 @@ textarea {
 }
 
 .plan-content-field {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.82rem;
   line-height: 1.5;
   resize: vertical;
@@ -2509,10 +2509,18 @@ textarea {
   font-size: 0.78rem;
 }
 
-.plan-content-field.rendered-markdown h1 { font-size: 1.55em; }
-.plan-content-field.rendered-markdown h2 { font-size: 1.35em; }
-.plan-content-field.rendered-markdown h3 { font-size: 1.18em; }
-.plan-content-field.rendered-markdown h4 { font-size: 1.05em; }
+.plan-content-field.rendered-markdown h1,
+.plan-content-field.rendered-markdown h2,
+.plan-content-field.rendered-markdown h3,
+.plan-content-field.rendered-markdown h4,
+.plan-content-field.rendered-markdown h5,
+.plan-content-field.rendered-markdown h6 {
+  margin: 0.6rem 0 0.25rem;
+}
+.plan-content-field.rendered-markdown h1 { font-size: 1.15em; }
+.plan-content-field.rendered-markdown h2 { font-size: 1.08em; }
+.plan-content-field.rendered-markdown h3 { font-size: 1.02em; }
+.plan-content-field.rendered-markdown h4,
 .plan-content-field.rendered-markdown h5,
 .plan-content-field.rendered-markdown h6 { font-size: 1em; }
 

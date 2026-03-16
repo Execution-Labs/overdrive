@@ -2398,9 +2398,11 @@ export default function App() {
         hitl_mode: normalizeHitlMode(detail.task.hitl_mode),
       }
       setSelectedTaskDetail(task)
+      // Always reload plan + workdoc so the plan tab updates when a step completes
+      // (including quiet WebSocket-triggered refreshes).
+      void loadTaskPlan(taskId)
+      void loadTaskWorkdoc(taskId)
       if (!quiet) {
-        void loadTaskPlan(taskId)
-        void loadTaskWorkdoc(taskId)
         setEditTaskTitle(task.title || '')
         setEditTaskDescription(task.description || '')
         setEditTaskType(task.task_type || 'feature')
@@ -2443,7 +2445,8 @@ export default function App() {
         return
       }
       const root = (payload && typeof payload === 'object') ? payload as Record<string, unknown> : {}
-      const content = typeof root.content === 'string' ? root.content : ''
+      const rawContent = typeof root.content === 'string' ? root.content : ''
+      const content = rawContent.replace(/<!--[\s\S]*?-->/g, '').replace(/\n{3,}/g, '\n\n')
       setSelectedTaskWorkdoc({
         task_id: String(root.task_id || taskId),
         content,
