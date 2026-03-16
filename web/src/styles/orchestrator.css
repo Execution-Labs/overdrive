@@ -760,6 +760,10 @@ a:focus-visible {
 }
 
 
+.status-card {
+  text-align: left;
+}
+
 .status-card span {
   color: var(--color-text-secondary);
   display: block;
@@ -773,7 +777,6 @@ a:focus-visible {
 
 .status-card-clickable {
   cursor: pointer;
-  text-align: left;
   font: inherit;
   transition: border-color 0.15s, background 0.15s;
 }

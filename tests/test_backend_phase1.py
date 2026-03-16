@@ -886,7 +886,7 @@ def test_legacy_compat_endpoints_available(tmp_path: Path) -> None:
 
         metrics = client.get("/api/metrics")
         assert metrics.status_code == 200
-        assert "phases_total" in metrics.json()
+        assert "tasks_completed" in metrics.json()
 
         phases = client.get("/api/phases")
         assert phases.status_code == 200

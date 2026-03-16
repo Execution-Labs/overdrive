@@ -342,15 +342,10 @@ type SystemSettings = {
 
 type MetricsSnapshot = {
   tokens_used: number
-  api_calls: number
   estimated_cost_usd: number
   cost_available: boolean
-  wall_time_seconds: number
-  phases_completed: number
-  phases_total: number
-  files_changed: number
-  lines_added: number
-  lines_removed: number
+  worker_time_seconds: number
+  tasks_completed: number
   queue_depth: number
   in_progress: number
 }
@@ -1259,15 +1254,10 @@ function normalizeMetrics(payload: unknown): MetricsSnapshot | null {
   }
   return {
     tokens_used: toNumber(raw.tokens_used),
-    api_calls: toNumber(raw.api_calls),
     estimated_cost_usd: toNumber(raw.estimated_cost_usd),
     cost_available: raw.cost_available === true,
-    wall_time_seconds: toNumber(raw.wall_time_seconds),
-    phases_completed: toNumber(raw.phases_completed),
-    phases_total: toNumber(raw.phases_total),
-    files_changed: toNumber(raw.files_changed),
-    lines_added: toNumber(raw.lines_added),
-    lines_removed: toNumber(raw.lines_removed),
+    worker_time_seconds: toNumber(raw.worker_time_seconds),
+    tasks_completed: toNumber(raw.tasks_completed),
     queue_depth: toNumber(raw.queue_depth),
     in_progress: toNumber(raw.in_progress),
   }
@@ -2242,8 +2232,10 @@ export default function App() {
       Object.keys(roleProviderOverrides).length > 0 ? JSON.stringify(roleProviderOverrides, null, 2) : ''
     )
     const workerDefault = payload.workers.default || 'codex'
-    setSettingsWorkerDefault(workerDefault === 'ollama' || workerDefault === 'claude' ? workerDefault : 'codex')
-    setSettingsProviderView(workerDefault === 'ollama' || workerDefault === 'claude' ? workerDefault : 'codex')
+    setSettingsWorkerDefault(workerDefault)
+    const providerView: 'codex' | 'ollama' | 'claude' =
+      workerDefault === 'ollama' || workerDefault === 'claude' ? workerDefault : 'codex'
+    setSettingsProviderView(providerView)
     const workerRouting = payload.workers.routing || {}
     setSettingsWorkerRouting(Object.keys(workerRouting).length > 0 ? JSON.stringify(workerRouting, null, 2) : '')
     const providers = payload.workers.providers || {}
@@ -4346,7 +4338,7 @@ export default function App() {
           hitl_mode: settingsDefaultHitlMode,
         },
         workers: {
-          default: (settingsWorkerDefault === 'ollama' || settingsWorkerDefault === 'claude') ? settingsWorkerDefault : 'codex',
+          default: settingsWorkerDefault || 'codex',
           default_model: '',
           routing: workerRouting,
           providers: workerProviders,
@@ -4393,7 +4385,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           workers: {
-            default: (settingsWorkerDefault === 'ollama' || settingsWorkerDefault === 'claude') ? settingsWorkerDefault : 'codex',
+            default: settingsWorkerDefault || 'codex',
             default_model: '',
             routing: workerRouting,
             providers: workerProviders,
@@ -6048,14 +6040,10 @@ export default function App() {
           <p className="field-label section-heading">Runtime metrics</p>
           <div className="row-card">
             <p className="task-meta">
-              API calls: {metrics?.api_calls ?? 0} ·
-              wall time: {metrics?.wall_time_seconds ?? 0}s ·
-              steps: {metrics?.phases_completed ?? 0}/{metrics?.phases_total ?? 0}
-            </p>
-            <p className="task-meta">
-              tokens: {(metrics?.tokens_used ?? 0).toLocaleString()} ·
-              est cost: {metrics?.cost_available ? `$${(metrics.estimated_cost_usd ?? 0).toFixed(2)}` : 'N/A'} ·
-              files changed: {metrics?.files_changed ?? 0}
+              Tasks completed: {metrics?.tasks_completed ?? 0} ·
+              Worker time: {formatDuration(metrics?.worker_time_seconds ?? 0)} ·
+              Tokens: {(metrics?.tokens_used ?? 0).toLocaleString()} ·
+              Est. cost: {metrics?.cost_available ? `$${(metrics.estimated_cost_usd ?? 0).toFixed(2)}` : 'N/A'}
             </p>
           </div>
         </div>

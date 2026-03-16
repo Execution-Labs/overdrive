@@ -298,7 +298,7 @@ function installFetchMock(options?: {
     if (u.includes('/api/phases')) return jsonResponse([])
     if (u.includes('/api/collaboration/presence')) return jsonResponse({ users: [] })
     if (u.includes('/api/metrics')) {
-      return jsonResponse({ api_calls: 1, wall_time_seconds: 1, phases_completed: 0, phases_total: 0, tokens_used: 10, estimated_cost_usd: 0.01 })
+      return jsonResponse({ worker_time_seconds: 1, tasks_completed: 0, tokens_used: 10, estimated_cost_usd: 0.01 })
     }
     if (u.includes('/api/collaboration/timeline/task-1')) {
       return jsonResponse({
