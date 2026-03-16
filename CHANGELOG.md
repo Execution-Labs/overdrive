@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.2.2] - 2026-03-16
+
+### Added
+- Auto-detected defaults display in Settings (languages, venv, project commands, environment variables)
+- Review PR/MR tab in Create Work modal with selectable PR list and review guidance
+- Icon buttons for browse toolbar and modal close buttons
+
+### Changed
+- Plan/workdoc font switched from monospace to sans-serif for readability
+- Plan/workdoc heading sizes tamed and margins tightened
+- Markdown table formatting instructions added to plan and review prompts
+- Runtime metrics cleaned up: removed misleading api_calls, files_changed, steps counts
+- Error banners redesigned with boxed style and dismiss button
+- Acronyms (PR, MR, API, HITL, PRD) preserved in humanizeLabel
+- Homepage screenshot regenerated with current UI
+
+### Fixed
+- Default provider persistence: selecting claude or ollama no longer silently reverts to codex
+- Plan/workdoc tabs now update on WebSocket refreshes (previously stale for PR/MR reviews)
+- HTML comment markers stripped from workdoc display
+- Duplicate Plan heading eliminated from review prompt output
+- Status card alignment standardized to left-align
+- Detail tab-to-content gap reduced
+
 ## [0.2.1] - 2026-03-16
 
 ### Added
