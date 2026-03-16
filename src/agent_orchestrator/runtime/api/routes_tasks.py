@@ -1302,6 +1302,49 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             items.sort(key=lambda item: _board_item_sort_key(status, item))
         return {"columns": columns}
 
+    @router.post("/tasks/queue-backlog")
+    async def queue_backlog(
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        """Transition all backlog tasks to queued status.
+
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+
+        Returns:
+            A payload with the count of queued tasks and their IDs.
+        """
+        container, bus, _orchestrator = deps.ctx(project_dir)
+        tasks = container.tasks.list()
+        backlog_tasks = [t for t in tasks if t.status == "backlog"]
+
+        queued_ids: list[str] = []
+        for task in backlog_tasks:
+            task.status = "queued"
+            task.updated_at = now_iso()
+            container.tasks.upsert(task)
+            queued_ids.append(task.id)
+            bus.emit(
+                channel="tasks",
+                event_type="task.updated",
+                entity_id=task.id,
+                payload={"status": "queued"},
+            )
+
+        if queued_ids:
+            bus.emit(
+                channel="queue",
+                event_type="queue.changed",
+                entity_id="",
+                payload={"queued_count": len(queued_ids)},
+            )
+
+        return {
+            "queued_count": len(queued_ids),
+            "task_ids": queued_ids,
+            "message": f"Queued {len(queued_ids)} backlog task(s)." if queued_ids else "No backlog tasks to queue.",
+        }
+
     @router.post("/tasks/clear")
     async def clear_tasks(
         project_dir: Optional[str] = Query(None),

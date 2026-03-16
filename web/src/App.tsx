@@ -23,7 +23,7 @@ type PullRequestItem = {
   review_task_id: string | null
 }
 type TaskDetailTab = 'overview' | 'plan' | 'workdoc' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
-type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate' | 'review_commit'
+type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate' | 'review_commit' | 'queue-backlog'
 type GeneratedTaskStatus = 'backlog' | 'queued'
 type GeneratedTaskHitlSelection = 'inherit_parent' | 'autopilot' | 'supervised' | 'review_only'
 
@@ -3773,6 +3773,32 @@ export default function App() {
     )
   }
 
+  async function queueAllBacklog(): Promise<void> {
+    const backlogTasks = board.columns.backlog || []
+    if (backlogTasks.length === 0) {
+      setTaskActionMessage('No backlog tasks to queue.')
+      return
+    }
+    if (!window.confirm(`Queue all ${backlogTasks.length} backlog task(s)?`)) {
+      return
+    }
+    await runTaskMutation(
+      'queue-backlog',
+      async () => {
+        const result = await requestJson<{ queued_count: number; message?: string }>(
+          buildApiUrl('/api/tasks/queue-backlog', projectDir),
+          { method: 'POST' },
+        )
+        await reloadAll()
+        setTaskActionMessage(String(result.message || `Queued ${result.queued_count} task(s).`))
+      },
+      {
+        startMessage: 'Queuing backlog tasks...',
+        errorPrefix: 'Failed to queue backlog tasks',
+      },
+    )
+  }
+
   function switchLogStep(step: string): void {
     const effective = step || ''
     setLogViewStep(effective)
@@ -5816,6 +5842,13 @@ export default function App() {
           <details className="board-more-menu">
             <summary className="board-more-btn" title="More actions">···</summary>
             <div className="board-more-dropdown">
+              <button
+                className="board-more-item"
+                onClick={() => void queueAllBacklog()}
+                disabled={taskActionPending === 'queue-backlog'}
+              >
+                {taskActionPending === 'queue-backlog' ? 'Queuing...' : 'Queue All Backlog'}
+              </button>
               <button
                 className="board-more-item board-more-item-danger"
                 onClick={() => void clearAllTasks()}
