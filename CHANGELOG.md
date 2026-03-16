@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.1] - 2026-03-16
+
+### Added
+- Dark mode with three-way toggle (light / dark / system) and green-tinted dark neutrals
+- Flash prevention: theme applied before first paint via inline script
+
+### Changed
+- Navigation uses underline-style active tab indicator instead of filled pills
+- Moved Create Work button from topbar to board toolbar for clearer action grouping
+- Dependency policy selector converted to segmented toggle control
+- Execution control labels shortened for compact layout (Pause, Start, Drain, Stop)
+- Board summary streamlined: removed redundant queue/worker counts
+- Provider recheck button redesigned to match global icon button style
+- Responsive layout improvements for topbar, board summary, and execution controls
+
 ## [0.2.0] - 2026-03-16
 
 ### Added
