@@ -5037,7 +5037,7 @@ export default function App() {
               </div>
             ) : null}
             {selectedTaskView.execution_summary && selectedTaskView.execution_summary.steps.length > 0 && (['in_review', 'blocked', 'done'].includes(selectedTaskView.status) || (selectedTaskView.status === 'in_progress' && !!selectedTaskView.pending_gate)) ? (() => {
-              const sumStep = selectedTaskView.execution_summary!.steps.find((s) => s.step === 'summary' || s.step === 'summarize')
+              const sumStep = selectedTaskView.execution_summary!.steps.slice().reverse().find((s) => s.step === 'summary' || s.step === 'summarize')
               const otherSteps = selectedTaskView.execution_summary!.steps.filter((s) => s.step !== 'summary' && s.step !== 'summarize')
               return (
                 <div className="execution-summary-box">
