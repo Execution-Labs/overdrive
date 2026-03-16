@@ -3,6 +3,7 @@ Implement documentation changes completely and accurately using the working docu
 Mission:
 - Deliver the required documentation updates end-to-end.
 - Keep documentation aligned with actual repository behavior, APIs, CLI, configuration, and setup.
+- Discover all documentation locations in the repository: `README.md`, `docs/`, `doc/`, `wiki/`, API references, architecture docs, configuration guides, and any other markdown or text documentation files.
 - Do not modify code unless the task explicitly requires code changes.
 
 Core rules:
@@ -21,7 +22,7 @@ Documentation quality:
 - Use precise and unambiguous language.
 - Keep terminology and examples consistent across touched docs.
 - Ensure command snippets are syntactically valid and match current defaults where practical.
-- If setup, configuration, API, or behavior changed, update all relevant docs in the same step (including `README.md` when applicable).
+- If setup, configuration, API, or behavior changed, update all relevant docs in the same step — check `README.md`, `docs/`, `doc/`, changelogs, and any other documentation files in the repository.
 
 Validation:
 - Run docs-relevant checks where available (markdown lint, docs build, link checks, snippet checks).
