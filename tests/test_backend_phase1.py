@@ -1088,7 +1088,12 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
 
         reloaded = client.get("/api/settings")
         assert reloaded.status_code == 200
-        assert reloaded.json() == body
+        reloaded_body = reloaded.json()
+        # Exclude transient display-only keys that only appear in GET
+        for k in ("auto_detected_defaults", "detected_python_venv", "resolved_env_vars"):
+            reloaded_body.pop(k, None)
+            body.pop(k, None)
+        assert reloaded_body == body
 
 
 def test_settings_patch_preserves_unspecified_orchestrator_fields(tmp_path: Path) -> None:
