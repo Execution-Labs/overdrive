@@ -11,7 +11,8 @@ export function humanizeLabel(value: string): string {
     .split(' ')
     .map((word) => {
       if (/^[A-Z0-9]+$/.test(word)) return word
-      if (word.toLowerCase() === 'id') return 'ID'
+      const upper = word.toUpperCase()
+      if (upper === 'ID' || upper === 'PR' || upper === 'MR' || upper === 'API' || upper === 'HITL' || upper === 'PRD') return upper
       return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
     })
     .join(' ')
