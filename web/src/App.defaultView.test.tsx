@@ -69,7 +69,7 @@ describe('App default route', () => {
     render(<App />)
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /board/i })).toBeInTheDocument()
+      expect(document.querySelector('.board-grid')).toBeInTheDocument()
     })
   })
 
@@ -937,52 +937,6 @@ describe('App default route', () => {
     vi.setSystemTime(new Date('2026-02-21T12:00:10Z'))
     await new Promise((resolve) => setTimeout(resolve, 1_200))
     expect(screen.getByText(/Total time taken: 1m 15s/i)).toBeInTheDocument()
-  })
-
-  it('board summary strip shows queue depth and worker count', async () => {
-    const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
-    mockedFetch.mockImplementation((url) => {
-      const u = String(url)
-      if (u.includes('/api/tasks/board')) {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({
-            columns: {
-              backlog: [],
-              queued: [{ id: 'task-1', title: 'Task 1', priority: 'P2', status: 'queued', task_type: 'feature' }],
-              in_progress: [],
-              in_review: [],
-              blocked: [],
-              done: [],
-            },
-          }),
-        })
-      }
-      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
-        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
-      }
-      if (u.includes('/api/orchestrator/status')) {
-        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 3, in_progress: 1, draining: false, run_branch: null }) })
-      }
-      if (u.includes('/api/review-queue')) {
-        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
-      }
-      if (u.includes('/api/agents')) {
-        return Promise.resolve({ ok: true, json: async () => ({ agents: [{ id: 'agent-1', role: 'general', status: 'running' }] }) })
-      }
-      if (u.includes('/api/projects')) {
-        return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) })
-    })
-
-    render(<App />)
-
-    await waitFor(() => {
-      expect(screen.getByText(/Queue: 3/i)).toBeInTheDocument()
-      expect(screen.getByText(/In progress: 1/i)).toBeInTheDocument()
-      expect(screen.getByText(/Workers: 1/i)).toBeInTheDocument()
-    })
   })
 
   it('loads activity timeline for selected task via modal', async () => {

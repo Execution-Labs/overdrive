@@ -63,17 +63,17 @@ describe('App navigation and settings flows', () => {
     render(<App />)
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /board/i })).toBeInTheDocument()
+      expect(document.querySelector('.board-grid')).toBeInTheDocument()
     })
 
     fireEvent.click(screen.getByRole('button', { name: /Execution/i }))
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /execution/i })).toBeInTheDocument()
+      expect(document.querySelector('.status-grid')).toBeInTheDocument()
     })
 
     fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /settings/i })).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /Providers/i })).toBeInTheDocument()
     })
   })
 
@@ -82,7 +82,7 @@ describe('App navigation and settings flows', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /settings/i })).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /Providers/i })).toBeInTheDocument()
     })
 
     fireEvent.click(screen.getByRole('tab', { name: /Advanced/i }))

@@ -189,48 +189,99 @@
    ======================================================================== */
 
 [data-theme="dark"] {
-  /* Override semantic color aliases */
-  --color-text-primary: #f9fafb;
-  --color-text-secondary: #d1d5db;
-  --color-text-muted: #9ca3af;
-  --color-text-disabled: #6b7280;
-  --color-text-inverse: #111827;
+  /* Green-tinted dark neutrals — carry brand identity into dark mode */
+  --color-text-primary: #f0f5f2;
+  --color-text-secondary: #c8d8ce;
+  --color-text-muted: #8ea89a;
+  --color-text-disabled: #5a7a6a;
+  --color-text-inverse: #0e1a14;
 
-  --color-bg-primary: #111827;
-  --color-bg-secondary: #1f2937;
-  --color-bg-tertiary: #374151;
-  --color-bg-hover: #374151;
-  --color-bg-selected: #1e3a5f;
+  --color-bg-primary: #0c1610;
+  --color-bg-secondary: #142018;
+  --color-bg-tertiary: #1c2e24;
+  --color-bg-hover: #1c2e24;
+  --color-bg-selected: rgba(74, 183, 127, 0.14);
 
-  --color-border-default: #374151;
-  --color-border-light: #1f2937;
-  --color-border-dark: #4b5563;
+  --color-border-default: #2e4a3c;
+  --color-border-light: #223a2e;
+  --color-border-dark: #3e6050;
   --color-border-focus: var(--color-primary-400);
 
-  /* Override shadows for dark mode */
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.2);
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
-  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.25), 0 2px 4px rgba(0, 0, 0, 0.2);
-  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.3), 0 4px 6px rgba(0, 0, 0, 0.2);
-  --shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.35), 0 10px 10px rgba(0, 0, 0, 0.2);
+  /* Adjusted primary scale for dark backgrounds */
+  --color-primary-50: rgba(74, 183, 127, 0.10);
+  --color-primary-100: rgba(74, 183, 127, 0.16);
 
-  /* TODO: green-tinted dark neutrals when dark mode is actively used */
+  /* Adjusted semantic color light tints for dark backgrounds */
+  --color-success-50: rgba(34, 197, 94, 0.10);
+  --color-success-100: rgba(34, 197, 94, 0.16);
+  --color-error-50: rgba(239, 68, 68, 0.10);
+  --color-error-100: rgba(239, 68, 68, 0.16);
+  --color-warning-50: rgba(245, 158, 11, 0.10);
+  --color-warning-100: rgba(245, 158, 11, 0.16);
+  --color-info-50: rgba(139, 92, 246, 0.10);
+  --color-info-100: rgba(139, 92, 246, 0.16);
+
+  /* Adjusted gray scale for green-tinted dark */
+  --color-gray-50: #0e1a14;
+  --color-gray-100: #152420;
+  --color-gray-200: #1e302a;
+  --color-gray-300: #243830;
+  --color-gray-400: #506860;
+  --color-gray-500: #7a9486;
+  --color-gray-600: #b0c4b8;
+
+  /* Shadows for dark mode */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 0.25);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.4), 0 4px 6px rgba(0, 0, 0, 0.3);
+  --shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.45), 0 10px 10px rgba(0, 0, 0, 0.3);
 }
 
 /* Respect system preference when no explicit theme is set */
 @media (prefers-color-scheme: dark) {
   [data-theme="system"] {
-    --color-text-primary: #f9fafb;
-    --color-text-secondary: #d1d5db;
-    --color-text-muted: #9ca3af;
-    --color-bg-primary: #111827;
-    --color-bg-secondary: #1f2937;
-    --color-bg-tertiary: #374151;
-    --color-bg-hover: #374151;
-    --color-border-default: #374151;
-    --color-border-light: #1f2937;
-    --color-border-dark: #4b5563;
+    --color-text-primary: #f0f5f2;
+    --color-text-secondary: #c8d8ce;
+    --color-text-muted: #8ea89a;
+    --color-text-disabled: #5a7a6a;
+    --color-text-inverse: #0c1610;
 
-    /* TODO: green-tinted dark neutrals when dark mode is actively used */
+    --color-bg-primary: #0c1610;
+    --color-bg-secondary: #142018;
+    --color-bg-tertiary: #1c2e24;
+    --color-bg-hover: #1c2e24;
+    --color-bg-selected: rgba(74, 183, 127, 0.14);
+
+    --color-border-default: #2e4a3c;
+    --color-border-light: #223a2e;
+    --color-border-dark: #3e6050;
+    --color-border-focus: var(--color-primary-400);
+
+    --color-primary-50: rgba(74, 183, 127, 0.10);
+    --color-primary-100: rgba(74, 183, 127, 0.16);
+
+    --color-success-50: rgba(34, 197, 94, 0.10);
+    --color-success-100: rgba(34, 197, 94, 0.16);
+    --color-error-50: rgba(239, 68, 68, 0.10);
+    --color-error-100: rgba(239, 68, 68, 0.16);
+    --color-warning-50: rgba(245, 158, 11, 0.10);
+    --color-warning-100: rgba(245, 158, 11, 0.16);
+    --color-info-50: rgba(139, 92, 246, 0.10);
+    --color-info-100: rgba(139, 92, 246, 0.16);
+
+    --color-gray-50: #0c1610;
+    --color-gray-100: #142018;
+    --color-gray-200: #1c2e24;
+    --color-gray-300: #2e4a3c;
+    --color-gray-400: #5a7a6a;
+    --color-gray-500: #8ea89a;
+    --color-gray-600: #c8d8ce;
+
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 0.25);
+    --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.4), 0 4px 6px rgba(0, 0, 0, 0.3);
+    --shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.45), 0 10px 10px rgba(0, 0, 0, 0.3);
   }
 }
