@@ -150,6 +150,17 @@ Notes:
 - `done` recency is based on task `updated_at`.
 - Missing or malformed timestamps are sorted last with deterministic ID tie-breakers.
 
+### `POST /api/tasks/queue-backlog`
+Transition all backlog tasks to queued status in a single bulk operation.
+
+Query parameters:
+- `project_dir` (optional): project directory to resolve runtime state.
+
+Response:
+- `queued_count` (number of tasks transitioned)
+- `task_ids` (list of transitioned task IDs)
+- `message` (user-facing summary)
+
 ### `POST /api/tasks/clear`
 Clear all board tasks by archiving runtime state and reinitializing empty state.
 
