@@ -46,3 +46,9 @@ Quality bar:
 - Return only the diagnosis body.
 - No conversational preface, no tool logs, no follow-up questions (except under Open Questions).
 - Be concise, specific, and actionable for immediate implementation.
+
+## No-issue case
+If after thorough investigation the reported behavior is expected, not a bug, or cannot be reproduced:
+- Write "No issues found" as the first line of your response.
+- Follow with a brief explanation of why the reported behavior is correct or why the issue cannot be confirmed.
+- The pipeline will skip implementation and complete the task.

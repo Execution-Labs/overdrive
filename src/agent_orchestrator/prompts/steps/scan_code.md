@@ -23,3 +23,11 @@ Output requirements:
   - file/location,
   - concrete evidence observed,
   - uncertainty notes when applicable.
+
+## No-issue case
+If no code-level security issues are identified AND the prior dependency scan (provided as context, if any) also found no issues:
+- Write "No issues found" as the first line of your response.
+- Follow with a brief summary of what was scanned and why it is clean.
+- The pipeline will skip task generation and complete.
+
+If THIS scan found no issues but the prior dependency scan DID find issues, report your clean code scan results normally (do NOT write "No issues found" as the first line) so that task generation can proceed for the dependency findings.
