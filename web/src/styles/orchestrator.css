@@ -20,7 +20,7 @@ body.modal-open {
   position: fixed;
   inset: 0;
   z-index: -1;
-  background: var(--color-bg-primary);
+  background: linear-gradient(180deg, var(--color-primary-50) 0%, var(--color-warning-50) 100%);
 }
 
 .topbar {
@@ -549,7 +549,7 @@ a:focus-visible {
   display: flex;
   gap: 0;
   border-bottom: 1px solid var(--color-border-default);
-  margin-bottom: 0.75rem;
+  margin-bottom: 0;
 }
 
 .detail-tab {
@@ -648,7 +648,7 @@ a:focus-visible {
 }
 
 .task-detail-section-body {
-  margin-top: 0.65rem;
+  margin-top: 0.35rem;
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
@@ -760,6 +760,10 @@ a:focus-visible {
 }
 
 
+.status-card {
+  text-align: left;
+}
+
 .status-card span {
   color: var(--color-text-secondary);
   display: block;
@@ -773,7 +777,6 @@ a:focus-visible {
 
 .status-card-clickable {
   cursor: pointer;
-  text-align: left;
   font: inherit;
   transition: border-color 0.15s, background 0.15s;
 }
@@ -1420,8 +1423,38 @@ textarea {
 
 .error-banner {
   margin-top: 1rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--color-error-50);
+  border: 1px solid var(--color-error-200);
+  border-radius: var(--radius-md);
   color: var(--color-error-700);
-  font-weight: 600;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.error-banner > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.error-banner-dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--color-error-400);
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0 0.125rem;
+  transition: color var(--transition-fast);
+}
+
+.error-banner-dismiss:hover {
+  color: var(--color-error-700);
 }
 
 .info-banner {
@@ -1509,6 +1542,151 @@ textarea {
   background: var(--color-bg-primary);
   display: flex;
   gap: 0.5rem;
+}
+
+/* PR/MR Review List */
+.pr-review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.pr-review-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--color-bg-primary);
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: var(--color-text-primary);
+  width: 100%;
+  transition: background var(--transition-fast);
+}
+
+.pr-review-row:not(:last-child) {
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.pr-review-row:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+}
+
+.pr-review-row.is-selected {
+  background: var(--color-bg-selected);
+}
+
+.pr-review-row.is-reviewed {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.pr-review-number {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  min-width: 3rem;
+}
+
+.pr-review-title {
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pr-review-meta {
+  display: flex;
+  gap: 0.5rem;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.pr-review-branches {
+  font-family: var(--font-mono);
+}
+
+.pr-review-badge {
+  font-size: var(--text-xs);
+  padding: 0.125rem 0.4rem;
+  border-radius: var(--radius-full);
+  background: var(--color-info-100);
+  color: var(--color-info-600);
+  white-space: nowrap;
+}
+
+.auto-detected-commands {
+  margin-left: 0.25rem;
+}
+
+.auto-detected-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+  margin-top: 0.125rem;
+}
+
+.auto-detected-table td {
+  padding: 0.2rem 0.5rem 0.2rem 0;
+  vertical-align: top;
+  border: none;
+}
+
+.auto-detected-step {
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+  width: 7rem;
+}
+
+.pr-review-setup {
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  padding: 1rem;
+  background: var(--color-bg-secondary);
+}
+
+.pr-review-setup-error {
+  color: var(--color-error-600);
+  font-weight: var(--font-medium);
+  margin: 0 0 0.75rem;
+}
+
+.pr-review-setup-help {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.pr-review-setup-help p {
+  margin: 0 0 0.375rem;
+}
+
+.pr-review-setup-help pre {
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  padding: 0.375rem 0.625rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  margin: 0.25rem 0 0.5rem;
+  overflow-x: auto;
+}
+
+.pr-review-setup-help code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  background: var(--color-bg-tertiary);
+  padding: 0.1rem 0.3rem;
+  border-radius: var(--radius-sm);
 }
 
 .tab-row {
@@ -1602,7 +1780,7 @@ textarea {
 }
 
 .plan-content-field {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.82rem;
   line-height: 1.5;
   resize: vertical;
@@ -2331,10 +2509,18 @@ textarea {
   font-size: 0.78rem;
 }
 
-.plan-content-field.rendered-markdown h1 { font-size: 1.55em; }
-.plan-content-field.rendered-markdown h2 { font-size: 1.35em; }
-.plan-content-field.rendered-markdown h3 { font-size: 1.18em; }
-.plan-content-field.rendered-markdown h4 { font-size: 1.05em; }
+.plan-content-field.rendered-markdown h1,
+.plan-content-field.rendered-markdown h2,
+.plan-content-field.rendered-markdown h3,
+.plan-content-field.rendered-markdown h4,
+.plan-content-field.rendered-markdown h5,
+.plan-content-field.rendered-markdown h6 {
+  margin: 0.6rem 0 0.25rem;
+}
+.plan-content-field.rendered-markdown h1 { font-size: 1.15em; }
+.plan-content-field.rendered-markdown h2 { font-size: 1.08em; }
+.plan-content-field.rendered-markdown h3 { font-size: 1.02em; }
+.plan-content-field.rendered-markdown h4,
 .plan-content-field.rendered-markdown h5,
 .plan-content-field.rendered-markdown h6 { font-size: 1em; }
 
@@ -2960,6 +3146,10 @@ textarea {
   color-scheme: dark;
 }
 
+[data-theme="dark"] .bg-layer {
+  background: linear-gradient(180deg, #0f1f16 0%, #0c1610 100%);
+}
+
 /* Cards & panels — lift off background for clear sections */
 [data-theme="dark"] .panel,
 [data-theme="dark"] .modal-card,
@@ -3307,6 +3497,10 @@ textarea {
   [data-theme="system"] .orchestrator-app,
   [data-theme="system"] .modal-card,
   [data-theme="system"] .context-menu { color-scheme: dark; }
+
+  [data-theme="system"] .bg-layer {
+    background: linear-gradient(180deg, #0f1f16 0%, #0c1610 100%);
+  }
 
   [data-theme="system"] .panel,
   [data-theme="system"] .modal-card,

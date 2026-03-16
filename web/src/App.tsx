@@ -11,7 +11,17 @@ import './styles/orchestrator.css'
 type ThemeMode = 'light' | 'dark' | 'system'
 type RouteKey = 'board' | 'execution' | 'settings'
 type SettingsTab = 'providers' | 'execution' | 'advanced'
-type CreateTab = 'task' | 'import'
+type CreateTab = 'task' | 'import' | 'review'
+type PullRequestItem = {
+  number: number
+  title: string
+  author: string
+  head_ref: string
+  base_ref: string
+  url: string
+  has_review_task: boolean
+  review_task_id: string | null
+}
 type TaskDetailTab = 'overview' | 'plan' | 'workdoc' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
 type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate' | 'review_commit'
 type GeneratedTaskStatus = 'backlog' | 'queued'
@@ -332,15 +342,10 @@ type SystemSettings = {
 
 type MetricsSnapshot = {
   tokens_used: number
-  api_calls: number
   estimated_cost_usd: number
   cost_available: boolean
-  wall_time_seconds: number
-  phases_completed: number
-  phases_total: number
-  files_changed: number
-  lines_added: number
-  lines_removed: number
+  worker_time_seconds: number
+  tasks_completed: number
   queue_depth: number
   in_progress: number
 }
@@ -837,8 +842,10 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
       // ignore parse failures for non-json bodies
     }
     const parsed = _extractApiErrorFields(payload)
-    const detailSuffix = parsed.detail ? `: ${parsed.detail}` : ''
-    const error = new Error(`${response.status} ${response.statusText} [${url}]${detailSuffix}`) as ApiRequestError
+    const displayMessage = parsed.detail
+      ? parsed.detail
+      : `${response.status} ${response.statusText}`
+    const error = new Error(displayMessage) as ApiRequestError
     error.status = response.status
     error.statusText = response.statusText
     error.url = url
@@ -1247,15 +1254,10 @@ function normalizeMetrics(payload: unknown): MetricsSnapshot | null {
   }
   return {
     tokens_used: toNumber(raw.tokens_used),
-    api_calls: toNumber(raw.api_calls),
     estimated_cost_usd: toNumber(raw.estimated_cost_usd),
     cost_available: raw.cost_available === true,
-    wall_time_seconds: toNumber(raw.wall_time_seconds),
-    phases_completed: toNumber(raw.phases_completed),
-    phases_total: toNumber(raw.phases_total),
-    files_changed: toNumber(raw.files_changed),
-    lines_added: toNumber(raw.lines_added),
-    lines_removed: toNumber(raw.lines_removed),
+    worker_time_seconds: toNumber(raw.worker_time_seconds),
+    tasks_completed: toNumber(raw.tasks_completed),
     queue_depth: toNumber(raw.queue_depth),
     in_progress: toNumber(raw.in_progress),
   }
@@ -1754,6 +1756,13 @@ export default function App() {
 
   const [workOpen, setWorkOpen] = useState(false)
   const [createTab, setCreateTab] = useState<CreateTab>('task')
+  const [prList, setPrList] = useState<PullRequestItem[]>([])
+  const [prListLoading, setPrListLoading] = useState(false)
+  const [prListError, setPrListError] = useState('')
+  const [prPlatform, setPrPlatform] = useState<string | null>(null)
+  const [selectedPrNumber, setSelectedPrNumber] = useState<number | null>(null)
+  const [prReviewGuidance, setPrReviewGuidance] = useState('')
+  const [isSubmittingReview, setIsSubmittingReview] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [selectedTaskId, setSelectedTaskId] = useState<string>('')
   const modalDismissedRef = useRef(false)
@@ -2034,6 +2043,12 @@ export default function App() {
   const [settingsGateLow, setSettingsGateLow] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.low))
   const [settingsDependencyPolicy, setSettingsDependencyPolicy] = useState(DEFAULT_SETTINGS.defaults.dependency_policy)
   const [settingsDefaultHitlMode, setSettingsDefaultHitlMode] = useState<SystemSettings['defaults']['hitl_mode']>(DEFAULT_SETTINGS.defaults.hitl_mode)
+  const [autoDetectedDefaults, setAutoDetectedDefaults] = useState<{
+    languages: string[]
+    commands: Record<string, Record<string, string>>
+    venv: { path: string; source: string } | null
+  } | null>(null)
+  const [resolvedEnvVars, setResolvedEnvVars] = useState<{ key: string; source: string; has_value: boolean }[]>([])
   const settingsLoadedRef = useRef(false)
   const shouldPrefillTaskProjectCommandsRef = useRef(false)
 
@@ -2217,8 +2232,10 @@ export default function App() {
       Object.keys(roleProviderOverrides).length > 0 ? JSON.stringify(roleProviderOverrides, null, 2) : ''
     )
     const workerDefault = payload.workers.default || 'codex'
-    setSettingsWorkerDefault(workerDefault === 'ollama' || workerDefault === 'claude' ? workerDefault : 'codex')
-    setSettingsProviderView(workerDefault === 'ollama' || workerDefault === 'claude' ? workerDefault : 'codex')
+    setSettingsWorkerDefault(workerDefault)
+    const providerView: 'codex' | 'ollama' | 'claude' =
+      workerDefault === 'ollama' || workerDefault === 'claude' ? workerDefault : 'codex'
+    setSettingsProviderView(providerView)
     const workerRouting = payload.workers.routing || {}
     setSettingsWorkerRouting(Object.keys(workerRouting).length > 0 ? JSON.stringify(workerRouting, null, 2) : '')
     const providers = payload.workers.providers || {}
@@ -2309,8 +2326,30 @@ export default function App() {
     setSettingsError('')
     setSettingsSuccess('')
     try {
-      const payload = await requestJson<Partial<SystemSettings>>(buildApiUrl('/api/settings', projectDir))
+      const payload = await requestJson<Partial<SystemSettings> & { auto_detected_defaults?: unknown; resolved_env_vars?: unknown }>(buildApiUrl('/api/settings', projectDir))
       applySettings(normalizeSettings(payload))
+      // Capture auto-detected defaults and resolved env vars
+      const rawDefaults = payload.auto_detected_defaults
+      if (rawDefaults && typeof rawDefaults === 'object' && !Array.isArray(rawDefaults)) {
+        const d = rawDefaults as Record<string, unknown>
+        setAutoDetectedDefaults({
+          languages: Array.isArray(d.languages) ? d.languages.map(String) : [],
+          commands: (d.commands && typeof d.commands === 'object' && !Array.isArray(d.commands))
+            ? d.commands as Record<string, Record<string, string>> : {},
+          venv: (d.venv && typeof d.venv === 'object') ? d.venv as { path: string; source: string } : null,
+        })
+      } else {
+        setAutoDetectedDefaults(null)
+      }
+      const rawEnvVars = payload.resolved_env_vars
+      if (Array.isArray(rawEnvVars)) {
+        setResolvedEnvVars(rawEnvVars.filter(
+          (v): v is { key: string; source: string; has_value: boolean } =>
+            !!v && typeof v === 'object' && typeof (v as Record<string, unknown>).key === 'string'
+        ))
+      } else {
+        setResolvedEnvVars([])
+      }
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'unknown error'
       setSettingsError(`Failed to load settings (${detail})`)
@@ -2359,9 +2398,11 @@ export default function App() {
         hitl_mode: normalizeHitlMode(detail.task.hitl_mode),
       }
       setSelectedTaskDetail(task)
+      // Always reload plan + workdoc so the plan tab updates when a step completes
+      // (including quiet WebSocket-triggered refreshes).
+      void loadTaskPlan(taskId)
+      void loadTaskWorkdoc(taskId)
       if (!quiet) {
-        void loadTaskPlan(taskId)
-        void loadTaskWorkdoc(taskId)
         setEditTaskTitle(task.title || '')
         setEditTaskDescription(task.description || '')
         setEditTaskType(task.task_type || 'feature')
@@ -2404,7 +2445,8 @@ export default function App() {
         return
       }
       const root = (payload && typeof payload === 'object') ? payload as Record<string, unknown> : {}
-      const content = typeof root.content === 'string' ? root.content : ''
+      const rawContent = typeof root.content === 'string' ? root.content : ''
+      const content = rawContent.replace(/<!--[\s\S]*?-->/g, '').replace(/\n{3,}/g, '\n\n')
       setSelectedTaskWorkdoc({
         task_id: String(root.task_id || taskId),
         content,
@@ -2415,8 +2457,8 @@ export default function App() {
         return
       }
       setSelectedTaskWorkdoc(null)
-      const detail = err instanceof Error ? err.message : ''
-      if (detail.includes('409 ')) {
+      const apiErr = err as ApiRequestError
+      if (apiErr.status === 409) {
         setSelectedTaskWorkdocError('Workdoc is missing for this task.')
       } else {
         setSelectedTaskWorkdocError(toErrorMessage('Failed to load workdoc', err))
@@ -3546,6 +3588,48 @@ export default function App() {
     }
   }
 
+  async function fetchPullRequests(): Promise<void> {
+    setPrListLoading(true)
+    setPrListError('')
+    try {
+      const data = await requestJson<{ platform: string | null; error: string | null; items: PullRequestItem[] }>(
+        buildApiUrl('/api/pull-requests', projectDir),
+      )
+      setPrPlatform(data.platform)
+      if (data.error) {
+        setPrListError(data.error)
+        setPrList([])
+      } else {
+        setPrList(data.items)
+      }
+    } catch (err) {
+      setPrListError(err instanceof Error ? err.message : 'Failed to load pull requests')
+      setPrList([])
+    } finally {
+      setPrListLoading(false)
+    }
+  }
+
+  async function submitPrReview(): Promise<void> {
+    if (selectedPrNumber === null) return
+    setIsSubmittingReview(true)
+    try {
+      await requestJson(buildApiUrl(`/api/pull-requests/${selectedPrNumber}/review`, projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ guidance: prReviewGuidance }),
+      })
+      setWorkOpen(false)
+      setSelectedPrNumber(null)
+      setPrReviewGuidance('')
+      void reloadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create review')
+    } finally {
+      setIsSubmittingReview(false)
+    }
+  }
+
   async function previewImport(event: FormEvent): Promise<void> {
     event.preventDefault()
     if (!importText.trim()) return
@@ -4257,7 +4341,7 @@ export default function App() {
           hitl_mode: settingsDefaultHitlMode,
         },
         workers: {
-          default: (settingsWorkerDefault === 'ollama' || settingsWorkerDefault === 'claude') ? settingsWorkerDefault : 'codex',
+          default: settingsWorkerDefault || 'codex',
           default_model: '',
           routing: workerRouting,
           providers: workerProviders,
@@ -4304,7 +4388,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           workers: {
-            default: (settingsWorkerDefault === 'ollama' || settingsWorkerDefault === 'claude') ? settingsWorkerDefault : 'codex',
+            default: settingsWorkerDefault || 'codex',
             default_model: '',
             routing: workerRouting,
             providers: workerProviders,
@@ -5722,7 +5806,7 @@ export default function App() {
     return (
       <section className="panel">
         {taskActionMessage ? <p className="field-label">{taskActionMessage}</p> : null}
-        {taskActionError ? <p className="error-banner">{taskActionError}</p> : null}
+        {taskActionError ? <div className="error-banner"><span>{taskActionError}</span><button type="button" className="error-banner-dismiss" onClick={() => setTaskActionError('')} aria-label="Dismiss">&times;</button></div> : null}
         <div className="board-toolbar">
           <label className="board-compact-toggle" title="Compact view">
             <input type="checkbox" checked={boardCompact} onChange={() => setBoardCompact((v) => !v)} />
@@ -5959,14 +6043,10 @@ export default function App() {
           <p className="field-label section-heading">Runtime metrics</p>
           <div className="row-card">
             <p className="task-meta">
-              API calls: {metrics?.api_calls ?? 0} ·
-              wall time: {metrics?.wall_time_seconds ?? 0}s ·
-              steps: {metrics?.phases_completed ?? 0}/{metrics?.phases_total ?? 0}
-            </p>
-            <p className="task-meta">
-              tokens: {(metrics?.tokens_used ?? 0).toLocaleString()} ·
-              est cost: {metrics?.cost_available ? `$${(metrics.estimated_cost_usd ?? 0).toFixed(2)}` : 'N/A'} ·
-              files changed: {metrics?.files_changed ?? 0}
+              Tasks completed: {metrics?.tasks_completed ?? 0} ·
+              Worker time: {formatDuration(metrics?.worker_time_seconds ?? 0)} ·
+              Tokens: {(metrics?.tokens_used ?? 0).toLocaleString()} ·
+              Est. cost: {metrics?.cost_available ? `$${(metrics.estimated_cost_usd ?? 0).toFixed(2)}` : 'N/A'}
             </p>
           </div>
         </div>
@@ -6085,10 +6165,10 @@ export default function App() {
                   <div
                     className={`row-card row-card-clickable${settingsWorkerDefault === provider.name ? ' row-card-default' : ''}`}
                     key={provider.name}
-                    onClick={() => { if (provider.configured && settingsWorkerDefault !== provider.name) void setDefaultProvider(provider.name) }}
+                    onClick={() => { if ((provider.configured || provider.healthy) && settingsWorkerDefault !== provider.name) void setDefaultProvider(provider.name) }}
                     role="button"
                     tabIndex={0}
-                    onKeyDown={(event) => { if ((event.key === 'Enter' || event.key === ' ') && provider.configured && settingsWorkerDefault !== provider.name) void setDefaultProvider(provider.name) }}
+                    onKeyDown={(event) => { if ((event.key === 'Enter' || event.key === ' ') && (provider.configured || provider.healthy) && settingsWorkerDefault !== provider.name) void setDefaultProvider(provider.name) }}
                   >
                     <div>
                       <p className="task-title">
@@ -6428,6 +6508,75 @@ export default function App() {
                 </div>
               </article>
             </form>
+
+            {autoDetectedDefaults && (
+              <article className="settings-card">
+                <h3>Auto-detected Defaults</h3>
+                <p className="field-label" style={{ marginBottom: '0.75rem' }}>
+                  What workers will use when no overrides are configured. Override by editing Project Commands above.
+                </p>
+
+                {autoDetectedDefaults.languages.length > 0 && (
+                  <div style={{ marginBottom: '0.75rem' }}>
+                    <span className="field-label" style={{ fontWeight: 600 }}>Languages: </span>
+                    {autoDetectedDefaults.languages.map((lang) => (
+                      <span key={lang} className="pr-review-badge" style={{ marginRight: '0.25rem' }}>{lang}</span>
+                    ))}
+                  </div>
+                )}
+
+                {autoDetectedDefaults.venv && (
+                  <div style={{ marginBottom: '0.75rem' }}>
+                    <span className="field-label" style={{ fontWeight: 600 }}>Python venv: </span>
+                    <code style={{ fontSize: '0.85em' }}>{autoDetectedDefaults.venv.path}</code>
+                    <span className="field-label"> ({autoDetectedDefaults.venv.source})</span>
+                  </div>
+                )}
+
+                {Object.keys(autoDetectedDefaults.commands).length > 0 && (
+                  <div style={{ marginBottom: '0.75rem' }}>
+                    <span className="field-label" style={{ fontWeight: 600, display: 'block', marginBottom: '0.25rem' }}>Project commands:</span>
+                    <div className="auto-detected-commands">
+                      {Object.entries(autoDetectedDefaults.commands).map(([lang, cmds]) => (
+                        <div key={lang} style={{ marginBottom: '0.5rem' }}>
+                          <span style={{ fontSize: '0.85em', fontWeight: 600 }}>{lang}</span>
+                          <table className="auto-detected-table">
+                            <tbody>
+                              {Object.entries(cmds).map(([step, cmd]) => (
+                                <tr key={step}>
+                                  <td className="auto-detected-step">{step}</td>
+                                  <td><code style={{ fontSize: '0.85em' }}>{cmd}</code></td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {resolvedEnvVars.length > 0 && (
+                  <div>
+                    <span className="field-label" style={{ fontWeight: 600, display: 'block', marginBottom: '0.25rem' }}>Environment variables:</span>
+                    <table className="auto-detected-table">
+                      <tbody>
+                        {resolvedEnvVars.map((v) => (
+                          <tr key={v.key}>
+                            <td className="auto-detected-step"><code style={{ fontSize: '0.85em' }}>{v.key}</code></td>
+                            <td className="field-label">{v.source}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {autoDetectedDefaults.languages.length === 0 && Object.keys(autoDetectedDefaults.commands).length === 0 && !autoDetectedDefaults.venv && resolvedEnvVars.length === 0 && (
+                  <p className="field-label">No languages or commands detected for this project.</p>
+                )}
+              </article>
+            )}
 
             <form className="form-stack" onSubmit={(event) => void saveSettings(event)}>
               <article className="settings-card">
@@ -6782,6 +6931,11 @@ export default function App() {
         void loadSettings()
       }
     }
+    if (tab === 'review') {
+      setSelectedPrNumber(null)
+      setPrReviewGuidance('')
+      void fetchPullRequests()
+    }
     setWorkOpen(true)
   }
 
@@ -6899,7 +7053,7 @@ export default function App() {
             </div>
             <footer className="task-detail-modal-foot">
               {taskActionMessage ? <p className="field-label">{taskActionMessage}</p> : null}
-              {taskActionError ? <p className="error-banner">{taskActionError}</p> : null}
+              {taskActionError ? <div className="error-banner"><span>{taskActionError}</span><button type="button" className="error-banner-dismiss" onClick={() => setTaskActionError('')} aria-label="Dismiss">&times;</button></div> : null}
               {taskStatus === 'blocked' ? (
                 <>
                   <div className="inline-actions blocked-retry-row">
@@ -6930,9 +7084,9 @@ export default function App() {
                       onChange={(event) => setRetryProvider(event.target.value)}
                       disabled={isTaskActionBusy || hasUnresolvedBlockers}
                     >
-                      <option value="">Default provider</option>
-                      {workerHealth.filter((p) => p.configured && p.healthy).map((p) => (
-                        <option key={p.name} value={p.name}>{p.name}</option>
+                      <option value="">{humanizeLabel(workerDefaultProvider)} (default)</option>
+                      {workerHealth.filter((p) => (p.configured || p.healthy) && p.name !== workerDefaultProvider).map((p) => (
+                        <option key={p.name} value={p.name}>{humanizeLabel(p.name)}</option>
                       ))}
                     </select>
                     <button
@@ -7027,7 +7181,7 @@ export default function App() {
         </div>
       ) : null}
 
-      {error ? <p className="error-banner">{error}</p> : null}
+      {error ? <div className="error-banner"><span>{error}</span><button type="button" className="error-banner-dismiss" onClick={() => setError('')} aria-label="Dismiss">&times;</button></div> : null}
 
       {workOpen ? (
         <div className="modal-scrim" role="dialog" aria-modal="true" aria-label="Create Work modal" onClick={(event) => { if (event.target === event.currentTarget) setWorkOpen(false) }} onKeyDown={(event) => { if (event.key === 'Escape') setWorkOpen(false) }}>
@@ -7035,12 +7189,13 @@ export default function App() {
             <div className="modal-sticky-top">
               <header className="panel-head">
                 <h2>Create Work</h2>
-                <button className="button" onClick={() => setWorkOpen(false)}>Close</button>
+                <button className="topbar-icon-btn" onClick={() => setWorkOpen(false)} title="Close" aria-label="Close">&times;</button>
               </header>
 
               <div className="tab-row">
                 <button className={`tab ${createTab === 'task' ? 'is-active' : ''}`} onClick={() => setCreateTab('task')}>Create Task</button>
                 <button className={`tab ${createTab === 'import' ? 'is-active' : ''}`} onClick={() => setCreateTab('import')}>Import PRD</button>
+                <button className={`tab ${createTab === 'review' ? 'is-active' : ''}`} onClick={() => { setCreateTab('review'); void fetchPullRequests() }}>Review PR/MR</button>
               </div>
             </div>
 
@@ -7173,9 +7328,9 @@ export default function App() {
                         value={newTaskWorkerProvider}
                         onChange={(event) => setNewTaskWorkerProvider(event.target.value)}
                       >
-                        <option value="">Default provider</option>
-                        {workerHealth.filter((p) => p.configured && p.healthy).map((p) => (
-                          <option key={p.name} value={p.name}>{p.name}</option>
+                        <option value="">{humanizeLabel(workerDefaultProvider)} (default)</option>
+                        {workerHealth.filter((p) => (p.configured || p.healthy) && p.name !== workerDefaultProvider).map((p) => (
+                          <option key={p.name} value={p.name}>{humanizeLabel(p.name)}</option>
                         ))}
                       </select>
                       <label className="field-label" htmlFor="task-metadata">Metadata JSON object (optional)</label>
@@ -7215,11 +7370,102 @@ export default function App() {
                 </div>
               ) : null}
 
+              {createTab === 'review' ? (
+                <div className="form-stack">
+                  {prListLoading ? <p className="text-muted">Loading open pull requests…</p> : null}
+                  {prListError ? (
+                    <div className="pr-review-setup">
+                      <p className="pr-review-setup-error">{prListError}</p>
+                      {!prPlatform ? (
+                        <div className="pr-review-setup-help">
+                          <p>This project does not appear to have a GitHub or GitLab remote configured.</p>
+                          <p>Make sure your <code>origin</code> remote points to a GitHub or GitLab repository:</p>
+                          <pre>git remote -v</pre>
+                        </div>
+                      ) : prListError.toLowerCase().includes('not installed') ? (
+                        <div className="pr-review-setup-help">
+                          <p>To list and review {prPlatform === 'gitlab' ? 'merge requests' : 'pull requests'}, install the {prPlatform === 'gitlab' ? 'GitLab' : 'GitHub'} CLI:</p>
+                          {prPlatform === 'github' ? (
+                            <>
+                              <pre>brew install gh</pre>
+                              <p>Then authenticate:</p>
+                              <pre>gh auth login</pre>
+                            </>
+                          ) : (
+                            <>
+                              <pre>brew install glab</pre>
+                              <p>Then authenticate:</p>
+                              <pre>glab auth login</pre>
+                            </>
+                          )}
+                        </div>
+                      ) : prListError.toLowerCase().includes('auth') || prListError.toLowerCase().includes('login') || prListError.toLowerCase().includes('401') || prListError.toLowerCase().includes('403') ? (
+                        <div className="pr-review-setup-help">
+                          <p>The {prPlatform === 'gitlab' ? 'GitLab' : 'GitHub'} CLI does not appear to be authenticated. Run:</p>
+                          <pre>{prPlatform === 'github' ? 'gh auth login' : 'glab auth login'}</pre>
+                        </div>
+                      ) : (
+                        <div className="pr-review-setup-help">
+                          <p>Check that the {prPlatform === 'gitlab' ? 'GitLab' : 'GitHub'} CLI is authenticated and can access this repository:</p>
+                          <pre>{prPlatform === 'github' ? 'gh pr list' : 'glab mr list'}</pre>
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+                  {!prListLoading && !prListError && prList.length === 0 ? (
+                    <p className="text-muted">No open {prPlatform === 'gitlab' ? 'merge requests' : 'pull requests'} found.</p>
+                  ) : null}
+                  {!prListLoading && prList.length > 0 ? (
+                    <div className="pr-review-list" role="radiogroup" aria-label="Open pull requests">
+                      {prList.map((pr) => (
+                        <button
+                          key={pr.number}
+                          type="button"
+                          className={`pr-review-row ${selectedPrNumber === pr.number ? 'is-selected' : ''} ${pr.has_review_task ? 'is-reviewed' : ''}`}
+                          onClick={() => !pr.has_review_task && setSelectedPrNumber(pr.number)}
+                          disabled={pr.has_review_task}
+                          role="radio"
+                          aria-checked={selectedPrNumber === pr.number}
+                        >
+                          <span className="pr-review-number">{prPlatform === 'gitlab' ? '!' : '#'}{pr.number}</span>
+                          <span className="pr-review-title">{pr.title}</span>
+                          <span className="pr-review-meta">
+                            <span className="pr-review-author">{pr.author}</span>
+                            <span className="pr-review-branches">{pr.base_ref} ← {pr.head_ref}</span>
+                          </span>
+                          {pr.has_review_task ? <span className="pr-review-badge">Review exists</span> : null}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  <label className="field-label" htmlFor="pr-review-guidance">Review guidance (optional)</label>
+                  <textarea
+                    id="pr-review-guidance"
+                    rows={3}
+                    value={prReviewGuidance}
+                    onChange={(e) => setPrReviewGuidance(e.target.value)}
+                    placeholder="e.g. Focus on error handling in the auth module…"
+                  />
+                </div>
+              ) : null}
+
             </div>
             {createTab === 'task' ? (
               <div className="modal-footer">
                 <button className="button button-primary" type="submit" form="create-task-form" disabled={isSubmittingTask}>{submittingTaskTarget === 'queued' ? 'Creating…' : 'Create & Queue'}</button>
                 <button className="button" type="button" onClick={(event) => void submitTask(event, 'backlog')} disabled={isSubmittingTask}>{submittingTaskTarget === 'backlog' ? 'Creating…' : 'Add to Backlog'}</button>
+              </div>
+            ) : null}
+            {createTab === 'review' ? (
+              <div className="modal-footer">
+                <button
+                  className="button button-primary"
+                  type="button"
+                  disabled={selectedPrNumber === null || isSubmittingReview || prList.find((p) => p.number === selectedPrNumber)?.has_review_task === true}
+                  onClick={() => void submitPrReview()}
+                >
+                  {isSubmittingReview ? 'Creating…' : 'Create Review'}
+                </button>
               </div>
             ) : null}
           </div>
@@ -7231,26 +7477,27 @@ export default function App() {
           <div className="modal-card">
             <header className="panel-head">
               <h2>Browse Repositories</h2>
-              <button className="button" onClick={() => setBrowseOpen(false)}>Close</button>
+              <button className="topbar-icon-btn" onClick={() => setBrowseOpen(false)} title="Close" aria-label="Close">&times;</button>
             </header>
             <div className="browse-toolbar">
-              <button className="button" onClick={() => void loadBrowseDirectories(browseParentPath || undefined)} disabled={!browseParentPath || browseLoading}>
-                Up
+              <button className="topbar-icon-btn" onClick={() => void loadBrowseDirectories(browseParentPath || undefined)} disabled={!browseParentPath || browseLoading} title="Up" aria-label="Up">
+                &#x2191;
               </button>
-              <button className="button" onClick={() => void loadBrowseDirectories(browsePath || undefined)} disabled={browseLoading}>
-                Refresh
+              <button className="topbar-icon-btn" onClick={() => void loadBrowseDirectories(browsePath || undefined)} disabled={browseLoading} title="Refresh" aria-label="Refresh">
+                &#x21BB;
               </button>
               <div className="browse-path-wrap">
                 <input
                   className={`browse-path-input ${browseCurrentIsGit ? 'is-git' : ''}`}
                   value={browsePath}
                   onChange={(event) => setBrowsePath(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === 'Enter' && browsePath) void loadBrowseDirectories(browsePath) }}
                   aria-label="Browse path"
                 />
                 {browseCurrentIsGit ? <span className="git-chip">Git repo</span> : null}
               </div>
-              <button className="button" onClick={() => void loadBrowseDirectories(browsePath || undefined)} disabled={!browsePath || browseLoading}>
-                Go
+              <button className="topbar-icon-btn" onClick={() => void loadBrowseDirectories(browsePath || undefined)} disabled={!browsePath || browseLoading} title="Go" aria-label="Go">
+                &#x2192;
               </button>
             </div>
 

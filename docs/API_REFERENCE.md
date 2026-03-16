@@ -474,6 +474,34 @@ Response:
 ### `GET /api/import/{job_id}`
 Fetch stored import job state.
 
+## Pull Requests
+
+### `GET /api/pull-requests`
+List open pull requests (GitHub) or merge requests (GitLab).
+
+Detects the git platform from the remote URL and fetches open PRs/MRs via the
+appropriate CLI (`gh` or `glab`). Each item is annotated with whether a review
+task already exists.
+
+Response:
+- `platform` (`github`, `gitlab`, or `null`)
+- `error` (string or `null`)
+- `items[]` — each with `number`, `title`, `author`, `head_ref`, `base_ref`,
+  `url`, `has_review_task`, `review_task_id`
+
+### `POST /api/pull-requests/{number}/review`
+Create a review task for a pull request or merge request.
+
+Request:
+- `guidance` (optional review instructions)
+
+Response:
+- `task` (the newly created review task payload)
+
+Errors:
+- `400` if platform detection or CLI check fails
+- `409` if a review task already exists for this PR/MR number
+
 ## Review and Collaboration
 
 ### `GET /api/review-queue`

@@ -361,6 +361,52 @@ def detect_project_languages(project_dir: Path) -> list[str]:
     return langs
 
 
+def get_auto_detected_defaults(
+    project_dir: Path,
+) -> dict[str, Any]:
+    """Return auto-detected project commands and environment info for display.
+
+    This mirrors the detection logic used at execution time so the UI can
+    show users what the worker will use when no overrides are configured.
+
+    Returns:
+        Dict with ``languages``, ``commands``, ``venv``, keys.
+    """
+    langs = detect_project_languages(project_dir)
+    venv_info = detect_python_venv(project_dir)
+
+    commands: dict[str, dict[str, str]] = {}
+    for lang in langs:
+        defaults = _DEFAULT_PROJECT_COMMANDS.get(lang)
+        if not defaults:
+            continue
+        cmds = dict(defaults)
+        if lang == "python" and venv_info is not None:
+            rel_prefix = (
+                str(venv_info.path.relative_to(project_dir) / "bin")
+                if _is_subpath(venv_info.path, project_dir)
+                else str(venv_info.bin_dir)
+            )
+            cmds = _apply_venv_to_defaults(cmds, venv_info.bin_dir, rel_prefix)
+        if lang in ("javascript", "typescript"):
+            cmds = _filter_npm_commands_by_scripts(cmds, project_dir)
+        if cmds:
+            commands[lang] = cmds
+
+    venv_payload: dict[str, str] | None = None
+    if venv_info is not None:
+        venv_payload = {
+            "path": str(venv_info.path),
+            "source": venv_info.source,
+        }
+
+    return {
+        "languages": langs,
+        "commands": commands,
+        "venv": venv_payload,
+    }
+
+
 _LANGUAGE_DISPLAY_NAMES: dict[str, str] = {
     "python": "Python",
     "typescript": "TypeScript",
@@ -1262,6 +1308,11 @@ def build_step_prompt(
             label = f"PR/MR diff ({base_label}...{ref_label})"
             parts.append(f"## {label}")
             parts.append(f"```diff\n{_pr_diff}\n```")
+        _pr_guidance = str(task.metadata.get("review_guidance") or "").strip()
+        if _pr_guidance:
+            parts.append("")
+            parts.append("## Review guidance from the user")
+            parts.append(_pr_guidance)
 
     # Inject outputs from prior pipeline steps.
     # For implement/implement_fix, rely on the workdoc as the single source of truth.

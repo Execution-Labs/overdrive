@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ...collaboration.modes import normalize_hitl_mode
 from ..orchestrator.env_resolver import resolved_env_vars_view
+from ..orchestrator.live_worker_adapter import get_auto_detected_defaults
 from ..orchestrator.venv_detector import detect_python_venv
 from ..orchestrator.human_guidance import (
     clear_active_human_guidance,
@@ -46,13 +47,10 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         status = orchestrator.status()
         tasks = container.tasks.list()
         runs = container.runs.list()
-        events = container.events.list_recent(limit=2000)
-        phases_completed = sum(len(list(run.steps or [])) for run in runs)
-        phases_total = sum(max(1, len(list(task.pipeline_template or []))) for task in tasks)
-        wall_time_seconds = 0.0
+        tasks_completed = sum(1 for t in tasks if t.status == "done")
+        worker_time_seconds = 0.0
         for run in runs:
-            wall_time_seconds += run.effective_worker_seconds()
-        api_calls = len(events)
+            worker_time_seconds += run.effective_worker_seconds()
 
         # Aggregate token usage from persisted step logs.
         total_input_tokens = 0
@@ -79,15 +77,10 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
 
         return {
             "tokens_used": total_input_tokens + total_output_tokens,
-            "api_calls": api_calls,
             "estimated_cost_usd": total_cost_usd,
             "cost_available": has_cost_data,
-            "wall_time_seconds": int(wall_time_seconds),
-            "phases_completed": phases_completed,
-            "phases_total": phases_total,
-            "files_changed": 0,
-            "lines_added": 0,
-            "lines_removed": 0,
+            "worker_time_seconds": int(worker_time_seconds),
+            "tasks_completed": tasks_completed,
             "queue_depth": int(status.get("queue_depth", 0)),
             "in_progress": int(status.get("in_progress", 0)),
         }
@@ -485,6 +478,12 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             )
         except Exception:
             payload["detected_python_venv"] = None
+        try:
+            payload["auto_detected_defaults"] = get_auto_detected_defaults(
+                container.project_dir,
+            )
+        except Exception:
+            payload["auto_detected_defaults"] = None
         return payload
 
     @router.get("/workers/health")
@@ -573,7 +572,17 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             incoming_workers = body.workers.model_dump(exclude_none=True, exclude_unset=True)
 
             if "default" in incoming_workers:
-                workers_cfg["default"] = str(incoming_workers.get("default") or "codex")
+                chosen_default = str(incoming_workers.get("default") or "codex")
+                workers_cfg["default"] = chosen_default
+                # Ensure the chosen default has a provider entry so
+                # normalization won't discard it.
+                existing_providers = dict(workers_cfg.get("providers") or {})
+                if chosen_default not in existing_providers:
+                    if chosen_default == "claude":
+                        existing_providers["claude"] = {"type": "claude", "command": "claude -p", "execution_mode": "host_access"}
+                    elif chosen_default == "ollama":
+                        existing_providers["ollama"] = {"type": "ollama"}
+                    workers_cfg["providers"] = existing_providers
             if "default_model" in incoming_workers:
                 default_model = str(incoming_workers.get("default_model") or "").strip()
                 if default_model:

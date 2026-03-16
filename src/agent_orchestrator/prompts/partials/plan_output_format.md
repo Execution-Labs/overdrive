@@ -1,4 +1,5 @@
-Output format (use these exact section headings):
+Output format (use these exact section headings).
+When using tables, use standard markdown pipe tables (`| col | col |` with `| --- | --- |` separator). Never use Unicode box-drawing characters for tables.
 
 ## Objective
 - Restate the goal in 1-3 sentences.

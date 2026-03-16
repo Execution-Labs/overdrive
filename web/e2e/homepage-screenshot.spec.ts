@@ -148,8 +148,8 @@ test('captures homepage screenshot with task detail over board context', async (
 
   await page.goto('/')
   await expect(page.getByRole('heading', { name: 'Agent Orchestrator' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Board' })).toBeVisible()
-  const compactToggle = page.getByRole('switch', { name: 'Compact' })
+  await expect(page.getByRole('button', { name: 'Board' })).toBeVisible()
+  const compactToggle = page.locator('.board-compact-toggle input')
   if (await compactToggle.isChecked()) {
     await compactToggle.click()
   }
