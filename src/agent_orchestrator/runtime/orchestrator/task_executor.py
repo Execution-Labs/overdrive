@@ -271,7 +271,7 @@ class TaskExecutor:
     def _infer_github_owner_repo(self, task: Task) -> tuple[str, str]:
         """Infer GitHub owner/repo from the git remote origin URL."""
         svc = self._service
-        project_dir = svc._step_project_dir(task)
+        project_dir = svc.step_project_dir(task)
         try:
             result = subprocess.run(
                 ["git", "remote", "get-url", "origin"],
@@ -316,7 +316,7 @@ class TaskExecutor:
             return "blocked"
 
         platform = str(platform_info.get("platform", ""))
-        git_dir = svc._step_project_dir(task)
+        git_dir = svc.step_project_dir(task)
 
         try:
             if platform == "github":
@@ -420,7 +420,7 @@ class TaskExecutor:
             return "blocked"
 
         dry_run = bool(meta.get("comment_dry_run", True))
-        git_dir = svc._step_project_dir(task)
+        git_dir = svc.step_project_dir(task)
         posted_count = 0
         failed_count = 0
         results: list[dict[str, Any]] = []
@@ -594,7 +594,7 @@ class TaskExecutor:
                     id_to_platform[cid] = pid
 
         dry_run = bool(meta.get("comment_dry_run", True))
-        git_dir = svc._step_project_dir(task)
+        git_dir = svc.step_project_dir(task)
         posted_count = 0
         failed_count = 0
         skipped_count = 0

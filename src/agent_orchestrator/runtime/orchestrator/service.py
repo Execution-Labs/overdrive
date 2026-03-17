@@ -2747,7 +2747,7 @@ class OrchestratorService:
         self._finalize_run(task, run, status="blocked", summary=f"Blocked during {step}: missing required workdoc")
         self._emit_task_blocked(task)
 
-    def _step_project_dir(self, task: Task) -> Path:
+    def step_project_dir(self, task: Task) -> Path:
         """Resolve task worktree directory, falling back to the main project root."""
         worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
         return Path(worktree_path) if worktree_path else self.container.project_dir
@@ -3342,7 +3342,7 @@ class OrchestratorService:
             self._block_for_invalid_workdoc(task, run, step=step, detail=str(exc))
             return "blocked"
         # Refresh workdoc before each step so the worker sees the latest version.
-        step_project_dir = self._step_project_dir(task)
+        step_project_dir = self.step_project_dir(task)
         try:
             self._refresh_workdoc_with_diagnostics(task, step_project_dir)
         except ValueError as exc:

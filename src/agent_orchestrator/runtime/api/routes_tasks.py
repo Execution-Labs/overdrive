@@ -3770,9 +3770,10 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if not isinstance(platform_info, dict) or not platform_info.get("platform"):
             raise HTTPException(status_code=409, detail="Missing comment platform info")
 
-        git_dir = Path(orchestrator._step_project_dir(task))
+        git_dir = Path(orchestrator.step_project_dir(task))
 
-        post_results = post_comments_batch(
+        post_results = await asyncio.to_thread(
+            post_comments_batch,
             platform_info,
             generated_comments,
             git_dir=git_dir,
@@ -3799,7 +3800,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             platform = str(platform_info.get("platform", ""))
             try:
                 if platform == "github":
-                    dr = post_pr_review_decision(
+                    dr = await asyncio.to_thread(
+                        post_pr_review_decision,
                         str(platform_info["owner"]),
                         str(platform_info["repo"]),
                         int(platform_info["number"]),
@@ -3808,7 +3810,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                         git_dir=git_dir,
                     )
                 elif platform == "gitlab":
-                    dr = post_mr_review_decision(
+                    dr = await asyncio.to_thread(
+                        post_mr_review_decision,
                         str(platform_info["project_id"]),
                         int(platform_info["number"]),
                         decision=decision_type,  # type: ignore[arg-type]

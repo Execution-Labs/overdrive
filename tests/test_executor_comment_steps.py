@@ -25,7 +25,7 @@ def _make_service_mock() -> MagicMock:
     """Create a mock OrchestratorService with required attributes."""
     svc = MagicMock()
     svc.container.project_dir = _PROJECT_DIR
-    svc._step_project_dir.return_value = _PROJECT_DIR
+    svc.step_project_dir.return_value = _PROJECT_DIR
     svc._workdoc_canonical_path.return_value = _PROJECT_DIR / ".workdoc.md"
     svc._emit_task_blocked = MagicMock()
     svc.bus.emit = MagicMock()
