@@ -1583,6 +1583,8 @@ class OrchestratorService:
         """Return whether a done task can generate follow-up tasks post-completion."""
         if task.status != "done":
             return False
+        if len(task.children_ids or []) > 0:
+            return False
         pipeline_id = self._pipeline_id_for_task(task)
         return pipeline_id in self._POST_COMPLETION_GENERATION_PIPELINES
 
