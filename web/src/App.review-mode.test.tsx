@@ -87,7 +87,7 @@ async function openReviewTab() {
   await waitFor(() => expect(screen.getByText('Review mode')).toBeInTheDocument())
 }
 
-describe('Review mode selector', () => {
+describe('Review mode selector (simplified creation form)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     localStorage.clear()
@@ -97,67 +97,30 @@ describe('Review mode selector', () => {
     installFetchMock()
   })
 
-  it('renders radio group with Fix Code selected by default', async () => {
+  it('renders review mode dropdown with Fix Code selected by default', async () => {
     await openReviewTab()
-    const fixCodeRadio = screen.getByDisplayValue('fix_only') as HTMLInputElement
-    expect(fixCodeRadio.checked).toBe(true)
-    expect(screen.getByText('Review & Comment')).toBeInTheDocument()
-    expect(screen.getByText('Summarize')).toBeInTheDocument()
-    expect(screen.getByText('Fix Code')).toBeInTheDocument()
-    expect(screen.getByText('Fix & Respond to Comments')).toBeInTheDocument()
+    const modeSelect = screen.getByLabelText('Review mode') as HTMLSelectElement
+    expect(modeSelect.value).toBe('fix_only')
   })
 
-  it('shows review decision dropdown when Review & Comment is selected', async () => {
+  it('does not show review decision or post comments controls at creation time', async () => {
     await openReviewTab()
+    // No review decision dropdown in any mode
     expect(screen.queryByLabelText('Review decision')).toBeNull()
-    fireEvent.click(screen.getByDisplayValue('review_comment'))
-    expect(screen.getByLabelText('Review decision')).toBeInTheDocument()
-    expect(screen.getByText('Comment only')).toBeInTheDocument()
-    expect(screen.getByText('Approve')).toBeInTheDocument()
-    expect(screen.getByText('Request changes')).toBeInTheDocument()
-  })
-
-  it('hides review decision dropdown when Summarize is selected', async () => {
-    await openReviewTab()
-    fireEvent.click(screen.getByDisplayValue('review_comment'))
-    expect(screen.getByLabelText('Review decision')).toBeInTheDocument()
-    fireEvent.click(screen.getByDisplayValue('summarize'))
-    expect(screen.queryByLabelText('Review decision')).toBeNull()
-  })
-
-  it('shows Post comments checkbox for review_comment and fix_respond, hidden for others', async () => {
-    await openReviewTab()
-    // fix_only by default — no checkbox
     expect(screen.queryByText('Post comments to PR/MR')).toBeNull()
 
-    // review_comment — checkbox visible
-    fireEvent.click(screen.getByDisplayValue('review_comment'))
-    expect(screen.getByText('Post comments to PR/MR')).toBeInTheDocument()
-
-    // summarize — no checkbox
-    fireEvent.click(screen.getByDisplayValue('summarize'))
+    // Switch to review_comment — still no decision/post controls
+    fireEvent.change(screen.getByLabelText('Review mode'), { target: { value: 'review_comment' } })
+    expect(screen.queryByLabelText('Review decision')).toBeNull()
     expect(screen.queryByText('Post comments to PR/MR')).toBeNull()
 
-    // fix_respond — checkbox visible
-    fireEvent.click(screen.getByDisplayValue('fix_respond'))
-    expect(screen.getByText('Post comments to PR/MR')).toBeInTheDocument()
+    // Switch to fix_respond — still no decision/post controls
+    fireEvent.change(screen.getByLabelText('Review mode'), { target: { value: 'fix_respond' } })
+    expect(screen.queryByLabelText('Review decision')).toBeNull()
+    expect(screen.queryByText('Post comments to PR/MR')).toBeNull()
   })
 
-  it('resets decision to default when switching away from review_comment', async () => {
-    await openReviewTab()
-    fireEvent.click(screen.getByDisplayValue('review_comment'))
-    const dropdown = screen.getByLabelText('Review decision') as HTMLSelectElement
-    fireEvent.change(dropdown, { target: { value: 'approve' } })
-    expect(dropdown.value).toBe('approve')
-
-    // Switch away and back
-    fireEvent.click(screen.getByDisplayValue('fix_only'))
-    fireEvent.click(screen.getByDisplayValue('review_comment'))
-    const dropdownAfter = screen.getByLabelText('Review decision') as HTMLSelectElement
-    expect(dropdownAfter.value).toBe('comment')
-  })
-
-  it('sends review_mode and review_decision in the API call', async () => {
+  it('sends only review_mode and guidance in the API call (no review_decision or post_comments)', async () => {
     const mockedFetch = installFetchMock()
     await openReviewTab()
 
@@ -165,10 +128,8 @@ describe('Review mode selector', () => {
     await waitFor(() => expect(screen.getByText('#42')).toBeInTheDocument())
     fireEvent.click(screen.getByText('#42').closest('button')!)
 
-    // Select Review & Comment mode and Approve decision
-    fireEvent.click(screen.getByDisplayValue('review_comment'))
-    const dropdown = screen.getByLabelText('Review decision') as HTMLSelectElement
-    fireEvent.change(dropdown, { target: { value: 'approve' } })
+    // Select Review & Comment mode
+    fireEvent.change(screen.getByLabelText('Review mode'), { target: { value: 'review_comment' } })
 
     // Submit
     fireEvent.click(screen.getByText('Create Review'))
@@ -179,11 +140,12 @@ describe('Review mode selector', () => {
       expect(reviewCall).toBeDefined()
       const body = JSON.parse(String(reviewCall![1].body))
       expect(body.review_mode).toBe('review_comment')
-      expect(body.review_decision).toBe('approve')
+      expect(body.review_decision).toBeUndefined()
+      expect(body.post_comments).toBeUndefined()
     })
   })
 
-  it('does not send review_decision when mode is not review_comment', async () => {
+  it('sends fix_only review_mode when using default mode', async () => {
     const mockedFetch = installFetchMock()
     await openReviewTab()
 
@@ -200,6 +162,7 @@ describe('Review mode selector', () => {
       const body = JSON.parse(String(reviewCall![1].body))
       expect(body.review_mode).toBe('fix_only')
       expect(body.review_decision).toBeUndefined()
+      expect(body.post_comments).toBeUndefined()
     })
   })
 })

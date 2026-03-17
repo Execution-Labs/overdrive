@@ -31,6 +31,7 @@ class ModeConfig:
     approve_before_generate_tasks: bool = False
     approve_before_commit: bool = False
     approve_before_done: bool = False
+    approve_before_post_review: bool = True
 
     # Whether agent can proceed without human presence
     allow_unattended: bool = True
@@ -53,6 +54,7 @@ class ModeConfig:
             "approve_before_generate_tasks": self.approve_before_generate_tasks,
             "approve_before_commit": self.approve_before_commit,
             "approve_before_done": self.approve_before_done,
+            "approve_before_post_review": self.approve_before_post_review,
             "allow_unattended": self.allow_unattended,
             "require_reasoning": self.require_reasoning,
         }
@@ -67,6 +69,7 @@ MODE_CONFIGS: dict[str, ModeConfig] = {
         mode=HITLMode.AUTOPILOT,
         display_name="Autopilot",
         description="No approvals. Agents run end-to-end automatically.",
+        approve_before_post_review=False,
         allow_unattended=True,
         require_reasoning=False,
     ),
@@ -129,7 +132,7 @@ def should_gate(mode: str, gate_name: str) -> bool:
             ``autopilot`` defaults via :func:`get_mode_config`.
         gate_name (str): Gate name to evaluate. Supported values are
             ``before_plan``, ``before_implement``, ``before_generate_tasks``,
-            ``before_commit``, and ``before_done``.
+            ``before_commit``, ``before_done``, and ``before_post_review``.
 
     Returns:
         bool: ``True`` when the mode requires the named gate, otherwise
@@ -142,5 +145,6 @@ def should_gate(mode: str, gate_name: str) -> bool:
         "before_generate_tasks": config.approve_before_generate_tasks,
         "before_commit": config.approve_before_commit,
         "before_done": config.approve_before_done,
+        "before_post_review": config.approve_before_post_review,
     }
     return mapping.get(gate_name, False)

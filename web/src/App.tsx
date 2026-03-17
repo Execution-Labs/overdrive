@@ -6,7 +6,7 @@ import HITLModeSelector from './components/HITLModeSelector/HITLModeSelector'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { humanizeLabel } from './ui/labels'
-import { ReviewMode, ReviewDecisionType, REVIEW_MODE_OPTIONS, REVIEW_MODE_LABELS, COMMENT_POSTING_MODES, REVIEW_DECISION_OPTIONS } from './types/review'
+import { ReviewMode, ReviewDecisionType, REVIEW_MODE_OPTIONS, REVIEW_DECISION_OPTIONS } from './types/review'
 import './styles/orchestrator.css'
 
 type ThemeMode = 'light' | 'dark' | 'system'
@@ -693,6 +693,7 @@ function gateApprovalButtonLabel(gate: string | null | undefined): string {
   if (normalized === 'before_done') return 'Move to Done'
   if (normalized === 'before_commit') return 'Approve'
   if (normalized === 'human_intervention') return 'Acknowledge'
+  if (normalized === 'before_post_review') return 'Post review'
   return 'Approve gate'
 }
 
@@ -1775,8 +1776,6 @@ export default function App() {
   const [selectedPrNumber, setSelectedPrNumber] = useState<number | null>(null)
   const [prReviewGuidance, setPrReviewGuidance] = useState('')
   const [prReviewMode, setPrReviewMode] = useState<ReviewMode>(ReviewMode.FixOnly)
-  const [prReviewDecision, setPrReviewDecision] = useState<ReviewDecisionType>(ReviewDecisionType.Comment)
-  const [prPostComments, setPrPostComments] = useState(false)
   const [isSubmittingReview, setIsSubmittingReview] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [selectedTaskId, setSelectedTaskId] = useState<string>('')
@@ -1910,6 +1909,8 @@ export default function App() {
   const [newTaskDescription, setNewTaskDescription] = useState('')
   const [newTaskType, setNewTaskType] = useState('auto')
   const [gatePipelineSelection, setGatePipelineSelection] = useState('')
+  const [gateReviewDecision, setGateReviewDecision] = useState<ReviewDecisionType>(ReviewDecisionType.Comment)
+  const [gatePostComments, setGatePostComments] = useState(false)
   const [newTaskPriority, setNewTaskPriority] = useState('P2')
   const [newTaskLabels, setNewTaskLabels] = useState('')
   const [newTaskBlockedBy, setNewTaskBlockedBy] = useState('')
@@ -2078,6 +2079,19 @@ export default function App() {
   useEffect(() => {
     selectedTaskIdRef.current = selectedTaskId
   }, [selectedTaskId])
+
+  // Sync gate review controls from selected task's metadata when task changes
+  // or when the pending gate becomes before_post_review.
+  const selectedBoardTask = Object.values(board.columns).flat().find((t) => t.id === selectedTaskId)
+  const selectedTaskGate = selectedBoardTask?.pending_gate
+  useEffect(() => {
+    if (selectedTaskGate === 'before_post_review' && selectedBoardTask) {
+      const meta = (selectedBoardTask.metadata || {}) as Record<string, unknown>
+      const proposed = String(meta.proposed_review_decision || 'comment')
+      setGateReviewDecision(proposed as ReviewDecisionType)
+      setGatePostComments(false)
+    }
+  }, [selectedTaskId, selectedTaskGate]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const explicitTab = taskSelectTabRef.current
@@ -3560,15 +3574,12 @@ export default function App() {
         body: JSON.stringify({
           guidance: prReviewGuidance,
           review_mode: prReviewMode,
-          ...(prReviewMode === ReviewMode.ReviewComment ? { review_decision: prReviewDecision } : {}),
         }),
       })
       setWorkOpen(false)
       setSelectedPrNumber(null)
       setPrReviewGuidance('')
       setPrReviewMode(ReviewMode.FixOnly)
-      setPrReviewDecision(ReviewDecisionType.Comment)
-      setPrPostComments(false)
       void reloadAll()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create review')
@@ -3643,7 +3654,7 @@ export default function App() {
   }
 
   async function deleteTask(taskId: string): Promise<void> {
-    if (!window.confirm('Delete this terminal task permanently?')) {
+    if (!window.confirm('Delete this task permanently?')) {
       return
     }
     await runTaskMutation(
@@ -3918,7 +3929,7 @@ export default function App() {
     }
   }
 
-  async function approveGate(taskId: string, gate?: string | null): Promise<void> {
+  async function approveGate(taskId: string, gate?: string | null, reviewOpts?: { review_decision?: string; post_comments?: boolean }): Promise<void> {
     const previousBoardTask = Object.values(board.columns || {})
       .flat()
       .find((task) => task.id === taskId) || null
@@ -3973,6 +3984,10 @@ export default function App() {
           save_generation_policy_as_default: gate === 'before_generate_tasks'
             ? planGenerateSaveAsDefault
             : undefined,
+          ...(gate === 'before_post_review' && reviewOpts ? {
+            review_decision: reviewOpts.review_decision,
+            post_comments: reviewOpts.post_comments,
+          } : {}),
         }),
       })
       if (response.message) {
@@ -4868,6 +4883,129 @@ export default function App() {
         </div>
       )
     }
+    if (task.pending_gate === 'before_post_review') {
+      const meta = (task.metadata || {}) as Record<string, unknown>
+      const rawProposedDecision = meta.proposed_review_decision as string | undefined
+      const proposedDecision = rawProposedDecision ? String(rawProposedDecision) : null
+      const reviewSummary = String(meta.review_summary || '').trim()
+      const commentsPreview = meta.review_comments_preview
+      const commentsList = Array.isArray(commentsPreview) ? commentsPreview as Array<Record<string, unknown>> : []
+      const addressedList = commentsPreview && typeof commentsPreview === 'object' && !Array.isArray(commentsPreview)
+        ? (commentsPreview as Record<string, unknown>).addressed as Array<Record<string, unknown>> | undefined
+        : undefined
+      return (
+        <div className="preview-box plan-gate-banner">
+          <div className="plan-gate-header-row">
+            <p className="field-label plan-gate-title-inline">
+              <strong>Review complete</strong> <span aria-hidden="true">&middot;</span> Review before posting
+            </p>
+          </div>
+          {reviewSummary ? (
+            <div className="gate-review-summary" style={{ margin: '0.5rem 0', padding: '0.5rem', background: 'var(--bg-secondary, #f5f5f5)', borderRadius: '4px', fontSize: '0.9em' }}>
+              <strong>Summary:</strong> {reviewSummary}
+            </div>
+          ) : null}
+          {commentsList.length > 0 ? (
+            <details style={{ margin: '0.5rem 0' }}>
+              <summary style={{ cursor: 'pointer', fontWeight: 500 }}>
+                {commentsList.length} review comment{commentsList.length !== 1 ? 's' : ''} generated
+              </summary>
+              <div style={{ maxHeight: '300px', overflow: 'auto', marginTop: '0.25rem' }}>
+                {commentsList.map((c, i) => (
+                  <div key={i} style={{ padding: '0.25rem 0', borderBottom: '1px solid var(--border-color, #e0e0e0)', fontSize: '0.85em' }}>
+                    <code>{String(c.path || '')}:{String(c.line || '')}</code>
+                    {c.severity ? <span style={{ marginLeft: '0.5rem', fontWeight: 600, textTransform: 'uppercase', fontSize: '0.75em' }}>[{String(c.severity)}]</span> : null}
+                    <p style={{ margin: '0.25rem 0 0 0' }}>{String(c.body || '')}</p>
+                  </div>
+                ))}
+              </div>
+            </details>
+          ) : addressedList && addressedList.length > 0 ? (
+            <details style={{ margin: '0.5rem 0' }}>
+              <summary style={{ cursor: 'pointer', fontWeight: 500 }}>
+                {addressedList.length} comment response{addressedList.length !== 1 ? 's' : ''} drafted
+              </summary>
+              <div style={{ maxHeight: '300px', overflow: 'auto', marginTop: '0.25rem' }}>
+                {addressedList.map((c, i) => (
+                  <div key={i} style={{ padding: '0.25rem 0', borderBottom: '1px solid var(--border-color, #e0e0e0)', fontSize: '0.85em' }}>
+                    <strong>#{String(c.comment_id || '')}</strong>
+                    <p style={{ margin: '0.25rem 0 0 0' }}>{String(c.response_body || c.fix_description || '')}</p>
+                  </div>
+                ))}
+              </div>
+            </details>
+          ) : (
+            <p className="text-muted" style={{ margin: '0.5rem 0', fontSize: '0.9em' }}>No review comments generated.</p>
+          )}
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', margin: '0.5rem 0' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+              <span className="field-label" style={{ margin: 0 }}>Decision:</span>
+              <select
+                value={gateReviewDecision}
+                onChange={(e) => setGateReviewDecision(e.target.value as ReviewDecisionType)}
+                disabled={taskActionPending !== null}
+              >
+                {REVIEW_DECISION_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="checkbox-row" style={{ margin: 0 }}>
+              <input
+                type="checkbox"
+                checked={gatePostComments}
+                onChange={(e) => setGatePostComments(e.target.checked)}
+                disabled={taskActionPending !== null}
+              />
+              Post to PR/MR
+            </label>
+          </div>
+          {proposedDecision ? (
+            <p className="text-muted" style={{ fontSize: '0.8em', margin: '0 0 0.5rem 0' }}>
+              AI proposed: <strong>{proposedDecision}</strong>
+            </p>
+          ) : null}
+          <div className="inline-actions plan-gate-actions">
+            <button
+              className="button button-primary"
+              onClick={() => void approveGate(task.id, task.pending_gate, { review_decision: gateReviewDecision, post_comments: gatePostComments })}
+              disabled={taskActionPending === 'approve_gate'}
+            >
+              {taskActionPending === 'approve_gate' && taskActionDetail.startsWith('approve:')
+                ? 'Posting...'
+                : gatePostComments ? 'Post review' : 'Stage review'}
+            </button>
+            {!gateRequestOpen ? (
+              <button
+                className="button"
+                onClick={() => setGateRequestOpen(true)}
+                disabled={taskActionPending !== null}
+              >
+                Refine review
+              </button>
+            ) : (
+              <>
+                <input
+                  className="review-guidance-input"
+                  value={gateRequestGuidance}
+                  onChange={(event) => setGateRequestGuidance(event.target.value)}
+                  placeholder="What should be refined?"
+                  disabled={taskActionPending !== null}
+                />
+                <button
+                  className="button"
+                  onClick={() => void requestGateChanges(task.id, task.pending_gate)}
+                  disabled={taskActionPending !== null}
+                >
+                  Re-review
+                </button>
+                <button className="button" onClick={() => { setGateRequestOpen(false); setGateRequestGuidance('') }}>Cancel</button>
+              </>
+            )}
+          </div>
+        </div>
+      )
+    }
     return (
     <div className="preview-box plan-gate-banner plan-gate-banner-compact">
       <div className="plan-gate-header-row">
@@ -4969,7 +5107,7 @@ export default function App() {
   const taskDetailContent = selectedTaskView ? (
       <div className="detail-card">
         {selectedTaskDetailLoading ? <p className="field-label">Loading full task detail...</p> : null}
-        <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {humanizeLabel(normalizeHitlMode(selectedTaskView.hitl_mode || 'supervised'))} · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}{selectedTaskView.metadata?.review_mode ? <>{' · '}<span className="status-pill status-pill-inline status-review">{REVIEW_MODE_LABELS[selectedTaskView.metadata.review_mode as ReviewMode] || humanizeLabel(String(selectedTaskView.metadata.review_mode))}</span></> : null}{(() => { const ch = selectedTaskView.execution_summary?.steps?.map(s => s.commit).filter(Boolean).pop(); return ch ? <>{' · '}<span className="execution-step-commit" title={`Click to copy: ${ch}`} onClick={(e) => { e.stopPropagation(); void navigator.clipboard.writeText(ch) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(ch) } }}>{ch.slice(0, 8)}</span></> : null })()}</p>
+        <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {humanizeLabel(normalizeHitlMode(selectedTaskView.hitl_mode || 'supervised'))} · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}{(() => { const ch = selectedTaskView.execution_summary?.steps?.map(s => s.commit).filter(Boolean).pop(); return ch ? <>{' · '}<span className="execution-step-commit" title={`Click to copy: ${ch}`} onClick={(e) => { e.stopPropagation(); void navigator.clipboard.writeText(ch) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(ch) } }}>{ch.slice(0, 8)}</span></> : null })()}</p>
         {selectedTaskTotalSeconds != null ? (
           <p className="task-meta">
             Total time taken: {formatDuration(selectedTaskTotalSeconds) || '0s'}
@@ -5216,24 +5354,34 @@ export default function App() {
               </div>
             ) : null}
             {selectedTaskView.error?.trim() ? (() => {
-              const stderrTail = (stderrHistory || '').trim()
-              const logTail = (stdoutHistory || '').trim()
+              const errorText = selectedTaskView.error!.trim()
               const contextLines: string[] = []
-              if (logTail) {
-                const last = logTail.slice(-800)
-                const fromNewline = last.indexOf('\n')
-                contextLines.push(fromNewline > 0 ? last.slice(fromNewline + 1) : last)
+              // Pull summaries from failed/error execution steps for context
+              const execSteps = selectedTaskView.execution_summary?.steps || []
+              const failedSteps = execSteps.filter((s) => s.status === 'error' || s.status === 'blocked')
+              for (const fs of failedSteps) {
+                if (fs.summary && fs.summary !== errorText) {
+                  contextLines.push(`[${fs.step}] ${fs.summary}`)
+                }
               }
+              // Append stderr tail only if it adds new information not already
+              // present in the error or step summaries (the backend now embeds
+              // sanitized stderr into step summaries, so repeating it is noisy).
+              const stderrTail = (stderrHistory || '').trim()
               if (stderrTail) {
                 const last = stderrTail.slice(-400)
                 const fromNewline = last.indexOf('\n')
-                contextLines.push('stderr: ' + (fromNewline > 0 ? last.slice(fromNewline + 1) : last))
+                const stderrSnippet = (fromNewline > 0 ? last.slice(fromNewline + 1) : last).trim()
+                const alreadyShown = errorText + '\n' + contextLines.join('\n')
+                if (stderrSnippet && !alreadyShown.includes(stderrSnippet.slice(-120))) {
+                  contextLines.push('stderr: ' + stderrSnippet)
+                }
               }
-              const context = contextLines.join('\n').trim()
+              const context = contextLines.join('\n\n').trim()
               return (
                 <div className="error-detail-box">
-                  <p className="error-detail-label">Error</p>
-                  <pre>{context ? `${selectedTaskView.error}\n\n${context}` : selectedTaskView.error}</pre>
+                  <p className="error-detail-label">Error details</p>
+                  <pre>{context ? `${errorText}\n\n${context}` : errorText}</pre>
                 </div>
               )
             })() : null}
@@ -5972,16 +6120,14 @@ export default function App() {
                         key={task.id}
                         onClick={() => handleTaskSelect(task.id, (task.pending_gate === 'before_implement' || task.pending_gate === 'before_generate_tasks') ? 'plan' : undefined)}
                         onContextMenu={(e) => {
-                          if (task.status === 'done') {
-                            e.preventDefault()
-                            const menuW = 180
-                            const menuH = 50
-                            setContextMenu({ x: Math.max(0, Math.min(e.clientX, window.innerWidth - menuW)), y: Math.max(0, Math.min(e.clientY, window.innerHeight - menuH)), taskId: task.id })
-                          }
+                          e.preventDefault()
+                          const menuW = 180
+                          const menuH = 120
+                          setContextMenu({ x: Math.max(0, Math.min(e.clientX, window.innerWidth - menuW)), y: Math.max(0, Math.min(e.clientY, window.innerHeight - menuH)), taskId: task.id })
                         }}
                       >
                         <p className="task-title">{task.title}</p>
-                        {!boardCompact && <p className="task-meta">{task.priority} · {task.id.replace(/^task-/, '')}{task.parent_id ? ' · from plan' : ''}{task.metadata?.review_mode ? <>{' · '}<span className="status-pill status-pill-inline status-review">{REVIEW_MODE_LABELS[task.metadata.review_mode as ReviewMode] || humanizeLabel(String(task.metadata.review_mode))}</span></> : null}</p>}
+                        {!boardCompact && <p className="task-meta">{task.priority} · {task.id.replace(/^task-/, '')}{task.parent_id ? ' · from plan' : ''}</p>}
                         {!boardCompact && waitingLabel ? (
                           <p className="task-meta">
                             <span className={`status-pill status-pill-inline status-pill-no-offset ${waitingKind === 'intervention_wait' ? 'status-blocked' : 'status-review'}`}>{waitingLabel}</span>
@@ -7063,8 +7209,6 @@ export default function App() {
       setSelectedPrNumber(null)
       setPrReviewGuidance('')
       setPrReviewMode(ReviewMode.FixOnly)
-      setPrReviewDecision(ReviewDecisionType.Comment)
-      setPrPostComments(false)
       void fetchPullRequests()
     }
     setWorkOpen(true)
@@ -7315,14 +7459,27 @@ export default function App() {
         </div>
       ) : null}
 
-      {contextMenu ? (
-        <div className="context-menu" role="menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
-          <button role="menuitem" disabled={isTaskActionBusy} onClick={() => { setContextMenu(null); void reviewCommit(contextMenu.taskId) }}>Review Commit</button>
-          {taskSupportsPostCompletionGeneration(taskIndex.get(contextMenu.taskId)) ? (
-            <button role="menuitem" disabled={isTaskActionBusy} onClick={() => { setContextMenu(null); void generateFollowUpTasks(contextMenu.taskId) }}>Generate Follow-Up Tasks</button>
-          ) : null}
-        </div>
-      ) : null}
+      {contextMenu ? (() => {
+        const ctxTask = taskIndex.get(contextMenu.taskId)
+        const ctxStatus = ctxTask?.status
+        return (
+          <div className="context-menu" role="menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
+            <button role="menuitem" onClick={() => { void navigator.clipboard.writeText(contextMenu.taskId); setContextMenu(null) }}>Copy Task ID</button>
+            {ctxStatus === 'done' ? (
+              <button role="menuitem" disabled={isTaskActionBusy} onClick={() => { setContextMenu(null); void reviewCommit(contextMenu.taskId) }}>Review Commit</button>
+            ) : null}
+            {ctxStatus === 'done' && taskSupportsPostCompletionGeneration(ctxTask) ? (
+              <button role="menuitem" disabled={isTaskActionBusy} onClick={() => { setContextMenu(null); void generateFollowUpTasks(contextMenu.taskId) }}>Generate Follow-Up Tasks</button>
+            ) : null}
+            {ctxStatus === 'in_progress' || ctxStatus === 'blocked' ? (
+              <button role="menuitem" className="context-menu-danger" disabled={isTaskActionBusy} onClick={() => { setContextMenu(null); void transitionTask(contextMenu.taskId, 'cancelled') }}>Cancel Task</button>
+            ) : null}
+            {ctxStatus === 'backlog' || ctxStatus === 'queued' || ctxStatus === 'done' || ctxStatus === 'cancelled' ? (
+              <button role="menuitem" className="context-menu-danger" disabled={isTaskActionBusy} onClick={() => { setContextMenu(null); void deleteTask(contextMenu.taskId) }}>Delete Task</button>
+            ) : null}
+          </div>
+        )
+      })() : null}
 
       {error ? <div className="error-banner"><span>{error}</span><button type="button" className="error-banner-dismiss" onClick={() => setError('')} aria-label="Dismiss">&times;</button></div> : null}
 
@@ -7574,54 +7731,19 @@ export default function App() {
                       ))}
                     </div>
                   ) : null}
-                  <fieldset className="review-mode-fieldset">
-                    <legend className="field-label">Review mode</legend>
-                    {REVIEW_MODE_OPTIONS.map((opt) => (
-                      <label key={opt.value} className="review-mode-option">
-                        <input
-                          type="radio"
-                          name="review-mode"
-                          value={opt.value}
-                          checked={prReviewMode === opt.value}
-                          onChange={() => {
-                            setPrReviewMode(opt.value)
-                            if (opt.value !== ReviewMode.ReviewComment) {
-                              setPrReviewDecision(ReviewDecisionType.Comment)
-                            }
-                            if (!COMMENT_POSTING_MODES.has(opt.value)) {
-                              setPrPostComments(false)
-                            }
-                          }}
-                        />
-                        <span className="review-mode-label">{opt.label}</span>
-                        <span className="review-mode-desc text-muted">{opt.description}</span>
-                      </label>
-                    ))}
-                  </fieldset>
-                  {prReviewMode === ReviewMode.ReviewComment ? (
-                    <div className="review-decision-group">
-                      <label className="field-label" htmlFor="review-decision">Review decision</label>
-                      <select
-                        id="review-decision"
-                        value={prReviewDecision}
-                        onChange={(e) => setPrReviewDecision(e.target.value as ReviewDecisionType)}
-                      >
-                        {REVIEW_DECISION_OPTIONS.map((opt) => (
-                          <option key={opt.value} value={opt.value}>{opt.label}</option>
-                        ))}
-                      </select>
-                    </div>
-                  ) : null}
-                  {COMMENT_POSTING_MODES.has(prReviewMode) ? (
-                    <label className="checkbox-row">
-                      <input
-                        type="checkbox"
-                        checked={prPostComments}
-                        onChange={(e) => setPrPostComments(e.target.checked)}
-                      />
-                      Post comments to PR/MR
-                    </label>
-                  ) : null}
+                  <div className="review-mode-group">
+                    <label className="field-label" htmlFor="review-mode">Review mode</label>
+                    <select
+                      id="review-mode"
+                      value={prReviewMode}
+                      onChange={(e) => setPrReviewMode(e.target.value as ReviewMode)}
+                    >
+                      {REVIEW_MODE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                    <p className="review-mode-hint text-muted">{REVIEW_MODE_OPTIONS.find((o) => o.value === prReviewMode)?.description}</p>
+                  </div>
                   <label className="field-label" htmlFor="pr-review-guidance">Review guidance (optional)</label>
                   <textarea
                     id="pr-review-guidance"

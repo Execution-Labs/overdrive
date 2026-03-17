@@ -226,7 +226,8 @@ class TestExecutePostComments:
 
         assert result == "ok"
         assert run.steps[0]["comment_dry_run"] is True
-        assert run.steps[0]["posted_count"] == 1
+        assert run.steps[0]["staged_count"] == 1
+        assert run.steps[0]["posted_count"] == 0
         assert task.metadata["posted_comments"][0]["platform_id"] == "dry_run"
         assert task.metadata["posted_comments"][0]["post_status"] == "staged"
 
@@ -463,7 +464,7 @@ class TestExecutePostComments:
         executor._execute_post_comments(task, run)
 
         content = workdoc.read_text(encoding="utf-8")
-        assert "## Generated Comments" in content
+        assert "## Posted Comments" in content
         assert "dry run" in content
         assert "`staged`" in content
         assert "`src/main.py` L42" in content
@@ -472,7 +473,7 @@ class TestExecutePostComments:
         assert "2 staged" in content
 
     def test_workdoc_replaced_on_rerun(self, tmp_path: Path) -> None:
-        """Run twice → only one ## Generated Comments section exists."""
+        """Run twice → only one ## Posted Comments section exists."""
         svc = _make_service_mock()
         workdoc = tmp_path / ".workdoc.md"
         workdoc.write_text("# Task\n\n## Implementation Log\n\n_Pending_\n", encoding="utf-8")
@@ -499,7 +500,7 @@ class TestExecutePostComments:
         executor._execute_post_comments(task2, run2)
 
         content = workdoc.read_text(encoding="utf-8")
-        assert content.count("## Generated Comments") == 1
+        assert content.count("## Posted Comments") == 1
 
     def test_empty_comments_workdoc(self, tmp_path: Path) -> None:
         """Empty generated_comments → workdoc section still written with '0 comments' summary."""
@@ -519,7 +520,7 @@ class TestExecutePostComments:
         executor._execute_post_comments(task, run)
 
         content = workdoc.read_text(encoding="utf-8")
-        assert "## Generated Comments" in content
+        assert "## Posted Comments" in content
         assert "0 comments" in content
 
 
@@ -652,9 +653,10 @@ class TestExecutePostCommentResponses:
 
         result = executor._execute_post_comment_responses(task, run)
 
-        # Should still succeed (posts as top-level in dry_run mode).
+        # Should still succeed (staged in dry_run mode).
         assert result == "ok"
-        assert run.steps[0]["posted_count"] == 1
+        assert run.steps[0]["staged_count"] == 1
+        assert run.steps[0]["posted_count"] == 0
 
     def test_skips_empty_response_body(self) -> None:
         executor, svc = self._make_executor()
@@ -679,7 +681,8 @@ class TestExecutePostCommentResponses:
 
         assert result == "ok"
         assert run.steps[0]["skipped_count"] == 1
-        assert run.steps[0]["posted_count"] == 1
+        assert run.steps[0]["staged_count"] == 1
+        assert run.steps[0]["posted_count"] == 0
 
     @patch("agent_orchestrator.runtime.orchestrator.task_executor.post_comments_batch")
     def test_total_failure_blocks(self, mock_batch: MagicMock) -> None:

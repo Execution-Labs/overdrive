@@ -37,6 +37,47 @@ logger = logging.getLogger(__name__)
 _ORCHESTRATOR_COMMENT_STEPS: set[str] = {"fetch_comments", "post_comments", "post_comment_responses"}
 
 
+def _step_output_parse_error(step_name: str, exc: Exception, raw_output: str) -> str:
+    """Format a parse error with a preview of the raw output that failed."""
+    preview = repr(raw_output[:300]) if raw_output else "(empty)"
+    return f"Cannot parse {step_name} output: {exc}\n\nReceived: {preview}"
+
+
+def _prepare_post_review_gate_context(task: Task) -> None:
+    """Extract LLM review output into metadata for the before_post_review gate UI."""
+    if not isinstance(task.metadata, dict):
+        return
+    step_outputs: dict[str, str] = task.metadata.get("step_outputs", {})
+
+    # Determine which review step produced the output we care about.
+    review_output_raw: str | None = None
+    for key in ("pr_review_comment", "pr_review_fix_respond"):
+        if key in step_outputs:
+            review_output_raw = step_outputs[key]
+            break
+    if not review_output_raw:
+        return
+
+    try:
+        parsed = json.loads(review_output_raw)
+    except (json.JSONDecodeError, TypeError):
+        return
+    if not isinstance(parsed, dict):
+        return
+
+    if "proposed_decision" in parsed:
+        task.metadata["proposed_review_decision"] = parsed["proposed_decision"]
+    if "summary" in parsed:
+        task.metadata["review_summary"] = parsed["summary"]
+    if "comments" in parsed and isinstance(parsed["comments"], list):
+        task.metadata["review_comments_preview"] = parsed["comments"]
+    elif "addressed_comments" in parsed:
+        task.metadata["review_comments_preview"] = {
+            "addressed": parsed.get("addressed_comments", []),
+            "unaddressed": parsed.get("unaddressed_comments", []),
+        }
+
+
 def _get_current_head_sha(cwd: Path | str) -> str:
     """Return the current HEAD SHA for a directory, or empty string on failure."""
     try:
@@ -360,6 +401,13 @@ class TaskExecutor:
         svc.container.runs.upsert(run)
 
         logger.info("fetch_comments: fetched %d comments for task %s", len(comments), task.id)
+
+        # Write fetched comments summary to workdoc.
+        fetch_summary = f"Fetched **{len(comments)}** comment(s) from {platform_info.get('platform', 'unknown')}."
+        if comments:
+            fetch_summary += "\n\n" + formatted_text[:2000]
+        svc._sync_workdoc(task, "fetch_comments", svc.step_project_dir(task), fetch_summary)
+
         svc.bus.emit(
             channel="tasks",
             event_type="task.step_completed",
@@ -404,6 +452,21 @@ class TaskExecutor:
                 raise ValueError("Expected JSON object from pr_review_comment output")
             generated_comments = parsed.get("comments") or []
             summary_text = str(parsed.get("summary") or "")
+
+            # Filter out comments targeting files not in the diff.
+            diff_text = str(meta.get("source_diff") or "")
+            if diff_text and generated_comments:
+                import re as _re
+                diff_files = set(_re.findall(r"^diff --git a/(.+?) b/", diff_text, _re.MULTILINE))
+                before = len(generated_comments)
+                generated_comments = [c for c in generated_comments if c.get("path") in diff_files]
+                dropped = before - len(generated_comments)
+                if dropped:
+                    logger.warning(
+                        "post_comments: dropped %d comment(s) targeting files outside the diff for task %s",
+                        dropped, task.id,
+                    )
+
             # Persist generated comment details in a client-visible metadata key.
             task.metadata["generated_review_comments"] = [
                 {"path": c.get("path"), "line": c.get("line"), "body": c.get("body"), "severity": c.get("severity", "medium")}
@@ -412,9 +475,9 @@ class TaskExecutor:
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
             logger.warning("post_comments: failed to parse worker output for task %s: %s", task.id, exc)
             task.status = "blocked"
-            task.error = f"Cannot parse generated comments: {exc}"
+            task.error = _step_output_parse_error("pr_review_comment", exc, raw_output)
             svc.container.tasks.upsert(task)
-            run.steps.append({"step": "post_comments", "status": "error", "ts": now_iso(), "started_at": step_started, "error": str(exc)})
+            run.steps.append({"step": "post_comments", "status": "error", "ts": now_iso(), "started_at": step_started, "error": task.error})
             svc.container.runs.upsert(run)
             svc._emit_task_blocked(task)
             return "blocked"
@@ -422,6 +485,7 @@ class TaskExecutor:
         dry_run = bool(meta.get("comment_dry_run", True))
         git_dir = svc.step_project_dir(task)
         posted_count = 0
+        staged_count = 0
         failed_count = 0
         results: list[dict[str, Any]] = []
 
@@ -454,7 +518,7 @@ class TaskExecutor:
                 result_dict["_comment_path"] = comment.get("path", "")
                 result_dict["_comment_line"] = comment.get("line")
                 results.append(result_dict)
-                posted_count += 1
+                staged_count += 1
 
         task.metadata["posted_comments"] = results
 
@@ -495,7 +559,7 @@ class TaskExecutor:
         # Write structured comments to workdoc.
         self._write_generated_comments_to_workdoc(
             task,
-            heading="## Generated Comments",
+            heading="## Posted Comments",
             results=results,
             dry_run=dry_run,
             decision_result=decision_result,
@@ -509,6 +573,7 @@ class TaskExecutor:
             "ts": now_iso(),
             "started_at": step_started,
             "posted_count": posted_count,
+            "staged_count": staged_count,
             "failed_count": failed_count,
             "comment_dry_run": dry_run,
         }
@@ -528,14 +593,14 @@ class TaskExecutor:
         svc.container.runs.upsert(run)
 
         logger.info(
-            "post_comments: task %s posted=%d failed=%d comment_dry_run=%s",
-            task.id, posted_count, failed_count, dry_run,
+            "post_comments: task %s posted=%d staged=%d failed=%d dry_run=%s",
+            task.id, posted_count, staged_count, failed_count, dry_run,
         )
         svc.bus.emit(
             channel="tasks",
             event_type="task.step_completed",
             entity_id=task.id,
-            payload={"step": "post_comments", "posted_count": posted_count, "failed_count": failed_count, "comment_dry_run": dry_run},
+            payload={"step": "post_comments", "posted_count": posted_count, "staged_count": staged_count, "failed_count": failed_count, "comment_dry_run": dry_run},
         )
         return "ok"
 
@@ -576,9 +641,9 @@ class TaskExecutor:
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
             logger.warning("post_comment_responses: failed to parse worker output for task %s: %s", task.id, exc)
             task.status = "blocked"
-            task.error = f"Cannot parse addressed comments: {exc}"
+            task.error = _step_output_parse_error("pr_review_fix_respond", exc, raw_output)
             svc.container.tasks.upsert(task)
-            run.steps.append({"step": "post_comment_responses", "status": "error", "ts": now_iso(), "started_at": step_started, "error": str(exc)})
+            run.steps.append({"step": "post_comment_responses", "status": "error", "ts": now_iso(), "started_at": step_started, "error": task.error})
             svc.container.runs.upsert(run)
             svc._emit_task_blocked(task)
             return "blocked"
@@ -596,6 +661,7 @@ class TaskExecutor:
         dry_run = bool(meta.get("comment_dry_run", True))
         git_dir = svc.step_project_dir(task)
         posted_count = 0
+        staged_count = 0
         failed_count = 0
         skipped_count = 0
         results: list[dict[str, Any]] = []
@@ -621,10 +687,14 @@ class TaskExecutor:
                 result_dict["_comment_body"] = response_body[:200]
                 result_dict["_original_comment_id"] = original_id
                 results.append(result_dict)
-                posted_count += 1
+                staged_count += 1
                 continue
 
-            reply_to = int(platform_id) if platform_id else None
+            try:
+                reply_to = int(platform_id) if platform_id else None
+            except (ValueError, TypeError):
+                logger.warning("post_comment_responses: non-numeric platform_id %r for comment %s", platform_id, original_id)
+                reply_to = None
             comment_data: dict[str, Any] = {
                 "body": response_body,
                 "in_reply_to": reply_to,
@@ -651,7 +721,7 @@ class TaskExecutor:
         # Write structured comments to workdoc.
         self._write_generated_comments_to_workdoc(
             task,
-            heading="## Generated Comment Responses",
+            heading="## Comment Responses",
             results=results,
             dry_run=dry_run,
         )
@@ -664,6 +734,7 @@ class TaskExecutor:
             "ts": now_iso(),
             "started_at": step_started,
             "posted_count": posted_count,
+            "staged_count": staged_count,
             "failed_count": failed_count,
             "skipped_count": skipped_count,
             "comment_dry_run": dry_run,
@@ -685,14 +756,14 @@ class TaskExecutor:
         svc.container.runs.upsert(run)
 
         logger.info(
-            "post_comment_responses: task %s posted=%d failed=%d skipped=%d comment_dry_run=%s",
-            task.id, posted_count, failed_count, skipped_count, dry_run,
+            "post_comment_responses: task %s posted=%d staged=%d failed=%d skipped=%d dry_run=%s",
+            task.id, posted_count, staged_count, failed_count, skipped_count, dry_run,
         )
         svc.bus.emit(
             channel="tasks",
             event_type="task.step_completed",
             entity_id=task.id,
-            payload={"step": "post_comment_responses", "posted_count": posted_count, "failed_count": failed_count, "comment_dry_run": dry_run},
+            payload={"step": "post_comment_responses", "posted_count": posted_count, "staged_count": staged_count, "failed_count": failed_count, "comment_dry_run": dry_run},
         )
         return "ok"
 
@@ -1144,7 +1215,12 @@ class TaskExecutor:
                     skip_before_implement_gate=skip_before_implement_gate,
                 )
                 if gate_name and svc._should_gate(mode, gate_name):
-                    if not svc._wait_for_gate(task, gate_name):
+                    if gate_name == "before_post_review":
+                        _prepare_post_review_gate_context(task)
+                        svc.container.tasks.upsert(task)
+                        if not svc._wait_for_gate(task, gate_name, resume_step=step):
+                            return
+                    elif not svc._wait_for_gate(task, gate_name):
                         return
                 task.current_step = step
                 task.metadata["pipeline_phase"] = step

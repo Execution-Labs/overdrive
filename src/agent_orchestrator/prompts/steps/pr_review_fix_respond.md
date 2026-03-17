@@ -40,7 +40,8 @@ Respond with ONLY a JSON object:
       "response_body": "Response text to post as a reply"
     }
   ],
-  "summary": "Overall summary of fixes applied"
+  "summary": "Overall summary of fixes applied",
+  "proposed_decision": "comment"
 }
 ```
 
@@ -51,4 +52,5 @@ Rules:
 - Do not perform unrelated refactors or changes beyond what the review comments request.
 - Do not leave stubs, TODOs, placeholders, or empty bodies.
 - Be specific in `fix_description`: reference exact file paths and what changed.
+- `proposed_decision`: `"approve"` if all comments were addressed, `"request_changes"` if critical issues remain unaddressed, `"comment"` otherwise.
 - Return only the JSON object (no preamble, tool logs, or follow-up questions).

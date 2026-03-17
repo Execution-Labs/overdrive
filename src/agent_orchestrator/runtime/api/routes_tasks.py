@@ -25,7 +25,6 @@ from ..orchestrator.human_guidance import (
 from ..domain.models import (
     DependencyPolicy,
     Priority,
-    ReviewDecisionType,
     ReviewMode,
     Task,
     TaskStatus,
@@ -74,15 +73,6 @@ class CreatePullRequestReviewRequest(BaseModel):
 
     guidance: str = ""
     review_mode: ReviewMode = "fix_only"
-    review_decision: Optional[ReviewDecisionType] = None
-
-    @model_validator(mode="after")
-    def _validate_review_decision(self) -> "CreatePullRequestReviewRequest":
-        if self.review_decision is not None and self.review_mode != "review_comment":
-            raise ValueError(
-                "review_decision is only valid when review_mode is 'review_comment'"
-            )
-        return self
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +151,8 @@ def _gate_approved_message(gate: str | None, *, will_resume: bool) -> str:
             return "Marked done. Task will finalize shortly."
         if normalized == "before_commit":
             return "Approved. Task will resume shortly."
+        if normalized == "before_post_review":
+            return "Review approved. Proceeding to post."
         if normalized == "human_intervention":
             return "Intervention acknowledged. Task will resume shortly."
         gate_label = _gate_display_label(normalized)
@@ -184,6 +176,8 @@ def _gate_changes_requested_message(gate: str | None, *, start_from_step: str | 
         return "Changes requested. Task resumed before task generation."
     if normalized == "before_done":
         return "Refinement requested. Task will re-run analysis."
+    if normalized == "before_post_review":
+        return "Review refinement requested. Task will re-run the review step."
     if start_from_step:
         return f"Changes requested. Task resumed from {start_from_step}."
     return "Changes requested. Task resumed."
@@ -196,6 +190,7 @@ def _resume_step_for_gate(gate: str | None) -> str | None:
         "before_generate_tasks": "generate_tasks",
         "before_done": "__before_done__",
         "before_commit": "commit",
+        "before_post_review": "post_comments",
     }
     return mapping.get(str(gate or "").strip())
 
@@ -303,6 +298,13 @@ def _request_changes_step_for_gate(task: Task, gate: str | None) -> str | None:
         return _previous_step(steps, "commit") or "implement"
     if normalized == "before_plan":
         return _previous_step(steps, "plan") or "plan"
+    if normalized == "before_post_review":
+        # Re-run from the review step that precedes the posting step.
+        for posting_step in ("post_comments", "post_comment_responses"):
+            prev = _previous_step(steps, posting_step)
+            if prev and prev != posting_step:
+                return prev
+        return task.current_step or None
     return task.current_step or None
 
 
@@ -2837,6 +2839,26 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                     effective_policy=effective_generation_policy,
                 )
 
+        # Carry review-specific choices from gate approval into task metadata
+        # so that the post_comments / post_comment_responses steps pick them up.
+        _VALID_REVIEW_DECISIONS = {"approve", "request_changes", "comment"}
+        if cleared_gate == "before_post_review":
+            review_decision = getattr(body, "review_decision", None)
+            post_comments_flag = getattr(body, "post_comments", None)
+            if review_decision and review_decision not in _VALID_REVIEW_DECISIONS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid review_decision '{review_decision}'. Must be one of: {', '.join(sorted(_VALID_REVIEW_DECISIONS))}",
+                )
+            # Fall back to LLM's proposal when user didn't choose.
+            if not review_decision:
+                review_decision = task.metadata.get("proposed_review_decision", "comment")
+            task.metadata["review_decision"] = {
+                "decision": review_decision,
+                "body": task.metadata.get("review_summary", ""),
+            }
+            task.metadata["comment_dry_run"] = not post_comments_flag if post_comments_flag is not None else True
+
         if should_resume:
             checkpoint = task.metadata.get("execution_checkpoint")
             checkpoint_payload = dict(checkpoint) if isinstance(checkpoint, dict) else {}
@@ -3704,8 +3726,6 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             "comment_dry_run": True,
             "final_pipeline_id": pipeline_id,
         }
-        if body.review_decision is not None:
-            metadata["review_decision"] = body.review_decision
         if body.guidance:
             metadata["review_guidance"] = body.guidance
         if needs_comments and ctx.get("comments") is not None:

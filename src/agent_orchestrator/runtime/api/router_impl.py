@@ -196,6 +196,9 @@ class ApproveGateRequest(BaseModel):
     guidance: Optional[str] = None
     generation_policy: Optional[TaskGenerationPolicyRequest] = None
     save_generation_policy_as_default: bool = False
+    # Fields for the before_post_review gate only:
+    review_decision: Optional[str] = None
+    post_comments: Optional[bool] = None
 
 
 class OrchestratorControlRequest(BaseModel):
@@ -382,6 +385,7 @@ _GATE_DISPLAY_LABELS: dict[str, str] = {
     "human_intervention": "Needs intervention",
     "pipeline_classify": "Classifying\u2026",
     "select_pipeline": "Select pipeline",
+    "before_post_review": "Review before posting",
 }
 
 
@@ -684,10 +688,13 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
         step_status = str(step_data.get("status") or "unknown")
         if step_status == "skipped":
             continue
+        step_summary = str(step_data.get("summary") or "")
+        if not step_summary and step_data.get("error"):
+            step_summary = str(step_data["error"])
         entry: dict[str, Any] = {
             "step": str(step_data.get("step") or "unknown"),
             "status": step_status,
-            "summary": str(step_data.get("summary") or ""),
+            "summary": step_summary,
         }
         if step_data.get("open_counts") and isinstance(step_data["open_counts"], dict):
             entry["open_counts"] = step_data["open_counts"]

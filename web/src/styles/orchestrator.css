@@ -3166,7 +3166,7 @@ textarea {
 .context-menu {
   position: fixed;
   z-index: 9999;
-  background: var(--color-surface);
+  background: var(--color-bg-primary);
   border: 1px solid var(--color-border-default);
   border-radius: 6px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
@@ -3186,6 +3186,9 @@ textarea {
 }
 .context-menu button:hover {
   background: var(--color-bg-tertiary);
+}
+.context-menu-danger {
+  color: var(--color-danger, #dc2626) !important;
 }
 
 /* ========================================================================
@@ -3650,4 +3653,25 @@ textarea {
   [data-theme="system"] .toggle-button.is-active { background: rgba(74, 183, 127, 0.14); color: #4ade80; }
   [data-theme="system"] .button-primary { background: var(--color-primary-600); color: #fff; }
   [data-theme="system"] .board-icon-btn-primary { background: var(--color-primary-600); color: #fff; }
+}
+
+/* ------------------------------------------------------------------ */
+/* Review mode selector                                               */
+/* ------------------------------------------------------------------ */
+
+.review-mode-group {
+  margin: 0.5rem 0;
+}
+
+.review-mode-group select {
+  width: 100%;
+}
+
+.review-mode-hint {
+  font-size: 0.78rem;
+  margin: 0.25rem 0 0;
+}
+
+.review-decision-group {
+  margin: 0.5rem 0;
 }

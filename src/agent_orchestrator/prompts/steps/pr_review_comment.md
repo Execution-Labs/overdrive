@@ -36,15 +36,21 @@ Respond with ONLY a JSON object:
       "severity": "critical"
     }
   ],
-  "summary": "Overall review summary text"
+  "summary": "Overall review summary text",
+  "proposed_decision": "comment"
 }
 ```
 
 Severity values: `critical`, `high`, `medium`, `low`.
 
+`proposed_decision` values:
+- `"request_changes"` — if any `critical` or `high` severity issues were found
+- `"approve"` — if the code is clean with no actionable comments
+- `"comment"` — otherwise (only `medium`/`low` observations)
+
 Rules:
 - Be specific: reference exact file paths, line numbers, and variable names.
-- Each comment must target a specific file and line in the diff.
+- **CRITICAL: Every comment MUST target a file and line that appears in the diff.** The `path` field must be copied exactly from the diff headers (e.g. `diff --git a/path b/path`). Do not use paths to other files you explored for context — only files shown in the diff. The `line` must be a positive integer within a `@@` hunk range. Comments targeting files or lines outside the diff will be silently dropped before posting. You may read other files to understand context, but all comments must be anchored to changed lines in the diff.
 - Prioritize comments by severity (critical first).
 - Use `critical` for bugs that will cause failures in production, `high` for significant issues, `medium` for code quality concerns, `low` for style and minor improvements.
 - The `summary` field should provide a concise overall assessment of the PR/MR.

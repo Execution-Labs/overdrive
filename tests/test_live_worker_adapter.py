@@ -20,6 +20,7 @@ from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
     _extract_json_value,
     _is_no_action_needed,
     _normalize_planning_text,
+    _sanitize_stderr,
     _step_category,
     build_step_prompt,
     detect_project_languages,
@@ -2926,3 +2927,41 @@ class TestCommentAwareMapResult:
         assert step_result.comment_actions is not None
         assert len(step_result.comment_actions) == 1
         assert step_result.comment_actions[0]["path"] == "file.py"
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_stderr
+# ---------------------------------------------------------------------------
+
+class TestSanitizeStderr:
+    def test_takes_tail_past_startup_noise(self) -> None:
+        raw = (
+            "- Do NOT suppress or down-rank review findings.\n"
+            "- Prefer fixing issues over escalating; escalate only when truly stuck.\n"
+            "- Be explicit about risks, uncertainty, and assumptions.\n"
+            "mcp startup: no servers\n"
+            "ERROR: You've hit your usage limit.\n"
+        )
+        result = _sanitize_stderr(raw)
+        assert "ERROR: You've hit your usage limit." in result
+
+    def test_strips_tool_error_xml_tags(self) -> None:
+        raw = "Tool error: <tool_use_error>File has been modified</tool_use_error>"
+        result = _sanitize_stderr(raw)
+        assert "<tool_use_error>" not in result
+        assert "File has been modified" in result
+
+    def test_preserves_meaningful_errors(self) -> None:
+        raw = "ERROR: compilation failed\nsrc/main.rs:12: expected `;`"
+        result = _sanitize_stderr(raw)
+        assert "compilation failed" in result
+        assert "expected `;`" in result
+
+    def test_respects_max_length(self) -> None:
+        raw = "ERROR: " + "x" * 600
+        result = _sanitize_stderr(raw, max_length=100)
+        assert len(result) <= 100
+
+    def test_empty_input(self) -> None:
+        assert _sanitize_stderr("") == ""
+        assert _sanitize_stderr("   \n  ") == ""

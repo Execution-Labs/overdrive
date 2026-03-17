@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -140,6 +141,7 @@ class OrchestratorService:
         "before_generate_tasks": "generate_tasks",
         "before_done": _BEFORE_DONE_RESUME_STEP,
         "before_commit": "commit",
+        "before_post_review": "post_comments",
     }
     _HUMAN_INTERVENTION_GATE = "human_intervention"
     _WAIT_KIND_APPROVAL = "approval_wait"
@@ -461,6 +463,8 @@ class OrchestratorService:
         """
         task.wait_state = None
 
+    _POST_REVIEW_GATE_STEPS = {"post_comments", "post_comment_responses"}
+
     def _gate_for_step(
         self,
         *,
@@ -471,6 +475,10 @@ class OrchestratorService:
         skip_before_implement_gate: bool = False,
     ) -> str | None:
         """Resolve whether a specific step should pause for a human gate."""
+        # before_post_review fires for any HITL mode (controlled by its own
+        # ModeConfig flag, which defaults True for all modes).
+        if step in self._POST_REVIEW_GATE_STEPS:
+            return "before_post_review"
         normalized_mode = normalize_hitl_mode(mode)
         if normalized_mode != "supervised":
             return None
@@ -3459,14 +3467,22 @@ class OrchestratorService:
                 task.metadata = dict(refreshed.metadata)
 
         # Store step output for downstream prompt injection.
-        if result.summary:
+        if result.summary or result.comment_actions is not None:
             if not isinstance(task.metadata, dict):
                 task.metadata = {}
             so = task.metadata.setdefault("step_outputs", {})
-            # Plan text already bounded at 20KB by _normalize_planning_text.
-            # Other outputs truncated to 4KB to prevent metadata bloat.
-            max_len = 20_000 if step in {"plan", "initiative_plan", "diagnose", "analyze", "pr_review", "mr_review"} else 4_000
-            so[step] = result.summary[:max_len]
+            # When the step produced structured comment actions, store them
+            # as JSON so post_comments / post_comment_responses can parse them.
+            if result.comment_actions is not None:
+                payload: dict[str, Any] = {"comments": result.comment_actions, "summary": result.summary or ""}
+                if result.proposed_decision:
+                    payload["proposed_decision"] = result.proposed_decision
+                so[step] = json.dumps(payload)
+            else:
+                # Plan text already bounded at 20KB by _normalize_planning_text.
+                # Other outputs truncated to 4KB to prevent metadata bloat.
+                max_len = 20_000 if step in {"plan", "initiative_plan", "diagnose", "analyze", "pr_review", "mr_review"} else 4_000
+                so[step] = (result.summary or "")[:max_len]
 
         # Handle generate_tasks: prefer generated tasks, but avoid silent no-op by recording warning metadata.
         if step == "generate_tasks":

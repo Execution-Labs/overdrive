@@ -405,9 +405,18 @@ def post_comments_batch(
         body = str(comment.get("body") or "")
         path = comment.get("path")
         raw_line = comment.get("line")
-        line = int(raw_line) if raw_line is not None else None
+        line = int(raw_line) if raw_line is not None and int(raw_line) > 0 else None
         raw_reply = comment.get("in_reply_to")
         in_reply_to = int(raw_reply) if raw_reply is not None else None
+
+        # Inline comment requires a valid line; skip if path is set but line
+        # is missing/zero (the LLM failed to resolve a diff line number).
+        if path is not None and line is None and in_reply_to is None:
+            results.append(CommentPostResult(
+                success=False,
+                error=f"Skipped: no valid diff line number for {path}",
+            ))
+            continue
 
         if platform == "github":
             result = post_pr_comment(
