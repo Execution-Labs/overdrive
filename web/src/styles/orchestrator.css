@@ -550,6 +550,12 @@ a:focus-visible {
   gap: 0;
   border-bottom: 1px solid var(--color-border-default);
   margin-bottom: 0;
+  overflow-x: auto;
+  scrollbar-width: none;          /* Firefox */
+}
+
+.detail-tabs::-webkit-scrollbar {
+  display: none;                  /* Chrome / Safari / Edge */
 }
 
 .detail-tab {
@@ -564,6 +570,8 @@ a:focus-visible {
   cursor: pointer;
   transition: color var(--transition-fast), border-color var(--transition-fast);
   margin-bottom: -1px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .detail-tab:hover:not(.is-active) {
