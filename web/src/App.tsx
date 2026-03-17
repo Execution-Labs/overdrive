@@ -6,6 +6,7 @@ import HITLModeSelector from './components/HITLModeSelector/HITLModeSelector'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { humanizeLabel } from './ui/labels'
+import { ReviewMode, ReviewDecisionType, REVIEW_MODE_OPTIONS, COMMENT_POSTING_MODES, REVIEW_DECISION_OPTIONS } from './types/review'
 import './styles/orchestrator.css'
 
 type ThemeMode = 'light' | 'dark' | 'system'
@@ -1763,6 +1764,9 @@ export default function App() {
   const [prPlatform, setPrPlatform] = useState<string | null>(null)
   const [selectedPrNumber, setSelectedPrNumber] = useState<number | null>(null)
   const [prReviewGuidance, setPrReviewGuidance] = useState('')
+  const [prReviewMode, setPrReviewMode] = useState<ReviewMode>(ReviewMode.FixOnly)
+  const [prReviewDecision, setPrReviewDecision] = useState<ReviewDecisionType>(ReviewDecisionType.Comment)
+  const [prPostComments, setPrPostComments] = useState(false)
   const [isSubmittingReview, setIsSubmittingReview] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [selectedTaskId, setSelectedTaskId] = useState<string>('')
@@ -3543,11 +3547,18 @@ export default function App() {
       await requestJson(buildApiUrl(`/api/pull-requests/${selectedPrNumber}/review`, projectDir), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ guidance: prReviewGuidance }),
+        body: JSON.stringify({
+          guidance: prReviewGuidance,
+          review_mode: prReviewMode,
+          ...(prReviewMode === ReviewMode.ReviewComment ? { review_decision: prReviewDecision } : {}),
+        }),
       })
       setWorkOpen(false)
       setSelectedPrNumber(null)
       setPrReviewGuidance('')
+      setPrReviewMode(ReviewMode.FixOnly)
+      setPrReviewDecision(ReviewDecisionType.Comment)
+      setPrPostComments(false)
       void reloadAll()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create review')
@@ -6969,6 +6980,9 @@ export default function App() {
     if (tab === 'review') {
       setSelectedPrNumber(null)
       setPrReviewGuidance('')
+      setPrReviewMode(ReviewMode.FixOnly)
+      setPrReviewDecision(ReviewDecisionType.Comment)
+      setPrPostComments(false)
       void fetchPullRequests()
     }
     setWorkOpen(true)
@@ -7465,6 +7479,54 @@ export default function App() {
                         </button>
                       ))}
                     </div>
+                  ) : null}
+                  <fieldset className="review-mode-fieldset">
+                    <legend className="field-label">Review mode</legend>
+                    {REVIEW_MODE_OPTIONS.map((opt) => (
+                      <label key={opt.value} className="review-mode-option">
+                        <input
+                          type="radio"
+                          name="review-mode"
+                          value={opt.value}
+                          checked={prReviewMode === opt.value}
+                          onChange={() => {
+                            setPrReviewMode(opt.value)
+                            if (opt.value !== ReviewMode.ReviewComment) {
+                              setPrReviewDecision(ReviewDecisionType.Comment)
+                            }
+                            if (!COMMENT_POSTING_MODES.has(opt.value)) {
+                              setPrPostComments(false)
+                            }
+                          }}
+                        />
+                        <span className="review-mode-label">{opt.label}</span>
+                        <span className="review-mode-desc text-muted">{opt.description}</span>
+                      </label>
+                    ))}
+                  </fieldset>
+                  {prReviewMode === ReviewMode.ReviewComment ? (
+                    <div className="review-decision-group">
+                      <label className="field-label" htmlFor="review-decision">Review decision</label>
+                      <select
+                        id="review-decision"
+                        value={prReviewDecision}
+                        onChange={(e) => setPrReviewDecision(e.target.value as ReviewDecisionType)}
+                      >
+                        {REVIEW_DECISION_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : null}
+                  {COMMENT_POSTING_MODES.has(prReviewMode) ? (
+                    <label className="checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={prPostComments}
+                        onChange={(e) => setPrPostComments(e.target.checked)}
+                      />
+                      Post comments to PR/MR
+                    </label>
                   ) : null}
                   <label className="field-label" htmlFor="pr-review-guidance">Review guidance (optional)</label>
                   <textarea
