@@ -403,6 +403,11 @@ class TaskExecutor:
                 raise ValueError("Expected JSON object from pr_review_comment output")
             generated_comments = parsed.get("comments") or []
             summary_text = str(parsed.get("summary") or "")
+            # Persist generated comment details in a client-visible metadata key.
+            task.metadata["generated_review_comments"] = [
+                {"path": c.get("path"), "line": c.get("line"), "body": c.get("body"), "severity": c.get("severity", "medium")}
+                for c in generated_comments
+            ]
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
             logger.warning("post_comments: failed to parse worker output for task %s: %s", task.id, exc)
             task.status = "blocked"

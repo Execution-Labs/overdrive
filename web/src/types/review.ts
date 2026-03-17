@@ -24,6 +24,14 @@ export const REVIEW_MODE_OPTIONS: ReviewModeOption[] = [
   { value: ReviewMode.FixRespond, label: 'Fix & Respond to Comments', description: 'Fix code and respond to existing review comments' },
 ]
 
+/** Human-readable labels for each review mode, used in badges. */
+export const REVIEW_MODE_LABELS: Record<ReviewMode, string> = {
+  [ReviewMode.ReviewComment]: 'Review & Comment',
+  [ReviewMode.Summarize]: 'Summarize',
+  [ReviewMode.FixOnly]: 'Fix Code',
+  [ReviewMode.FixRespond]: 'Fix & Respond',
+}
+
 /** Modes that post comments to the PR/MR platform */
 export const COMMENT_POSTING_MODES = new Set<ReviewMode>([
   ReviewMode.ReviewComment,

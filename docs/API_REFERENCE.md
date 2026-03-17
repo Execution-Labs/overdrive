@@ -398,6 +398,16 @@ Request:
 - `parent_revision_id` (optional)
 - `feedback_note` (optional)
 
+### `POST /api/tasks/{task_id}/post-review-comments`
+Post dry-run review comments for a task.
+
+Validates task is a dry-run with generated comments. Posts comments via the configured platform and updates metadata.
+
+Response:
+- `posted_count`, `failed_count`, `results[]`, `task`
+
+Errors: 404 (not found), 409 (not dry-run or no generated comments).
+
 ### `POST /api/tasks/{task_id}/generate-tasks`
 Generate child tasks from plan content.
 
