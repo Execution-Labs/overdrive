@@ -85,6 +85,23 @@ class CreatePullRequestReviewRequest(BaseModel):
         return self
 
 
+# ---------------------------------------------------------------------------
+# Review mode → pipeline mapping
+# ---------------------------------------------------------------------------
+
+_REVIEW_MODE_TO_PIPELINE: dict[str, tuple[str, str]] = {
+    # review_mode → (task_type, pipeline_id)
+    "fix_only": ("pr_review_fix_only", "pr_review_fix_only"),
+    "review_comment": ("pr_review_comment", "pr_review_comment"),
+    "summarize": ("pr_review_summarize", "pr_review_summarize"),
+    "fix_respond": ("pr_review_fix_respond", "pr_review_fix_respond"),
+}
+
+_MODES_NEEDING_COMMENTS: set[str] = {"review_comment", "summarize", "fix_respond"}
+
+_MAX_FETCHED_COMMENTS = 200
+_MAX_COMMENT_BODY_CHARS = 4000
+
 _CHANGES_TELEMETRY_RECENT: dict[tuple[str, str, str, str], float] = {}
 _CHANGES_TELEMETRY_TTL_SECONDS = 900.0
 _CHANGES_TELEMETRY_MAX_KEYS = 2048
@@ -995,10 +1012,19 @@ def _detect_git_platform(project_dir: Path) -> str | None:
         return None
 
 
-def _fetch_github_pr_context(git_dir: Path, pr_number: int) -> dict[str, Any]:
+def _fetch_github_pr_context(
+    git_dir: Path, pr_number: int, *, fetch_comments: bool = False,
+) -> dict[str, Any]:
     """Fetch GitHub PR metadata, diff, and stat via the ``gh`` CLI.
 
-    Returns a dict with keys: title, body, head_ref, base_ref, url, diff, stat.
+    Args:
+        git_dir: Path to the git repository.
+        pr_number: GitHub pull request number.
+        fetch_comments: When True, also fetch PR comments and review comments.
+
+    Returns:
+        A dict with keys: title, body, head_ref, base_ref, url, diff, stat,
+        and optionally ``comments`` (list of dicts) when *fetch_comments* is True.
 
     Raises:
         HTTPException: If metadata fetch fails.
@@ -1051,7 +1077,7 @@ def _fetch_github_pr_context(git_dir: Path, pr_number: int) -> dict[str, Any]:
         except (subprocess.TimeoutExpired, OSError):
             pass
 
-    return {
+    result: dict[str, Any] = {
         "title": title,
         "body": body,
         "head_ref": head_ref,
@@ -1061,11 +1087,69 @@ def _fetch_github_pr_context(git_dir: Path, pr_number: int) -> dict[str, Any]:
         "stat": stat_text,
     }
 
+    if fetch_comments:
+        result["comments"] = _fetch_github_pr_comments(git_dir, pr_number)
 
-def _fetch_gitlab_mr_context(git_dir: Path, mr_number: int) -> dict[str, Any]:
+    return result
+
+
+def _fetch_github_pr_comments(git_dir: Path, pr_number: int) -> list[dict[str, Any]]:
+    """Fetch PR comments and review comments via the ``gh`` CLI.
+
+    Returns a list of comment dicts, each with keys: id, author, body,
+    created_at, type ("comment" or "review"), path (str | None),
+    line (int | None).  On failure returns an empty list (non-fatal).
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "comments,reviews"],
+            cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
+        )
+        data = json.loads(result.stdout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        return []
+
+    comments: list[dict[str, Any]] = []
+
+    for c in data.get("comments", []):
+        comments.append({
+            "id": str(c.get("id", "")),
+            "author": str((c.get("author") or {}).get("login", "")),
+            "body": str(c.get("body", ""))[:_MAX_COMMENT_BODY_CHARS],
+            "created_at": str(c.get("createdAt", "")),
+            "type": "comment",
+            "path": None,
+            "line": None,
+        })
+
+    for r in data.get("reviews", []):
+        comments.append({
+            "id": str(r.get("id", "")),
+            "author": str((r.get("author") or {}).get("login", "")),
+            "body": str(r.get("body", ""))[:_MAX_COMMENT_BODY_CHARS],
+            "created_at": str(r.get("submittedAt", "")),
+            "type": "review",
+            "path": None,
+            "line": None,
+        })
+
+    return comments[:_MAX_FETCHED_COMMENTS]
+
+
+def _fetch_gitlab_mr_context(
+    git_dir: Path, mr_number: int, *, fetch_comments: bool = False,
+) -> dict[str, Any]:
     """Fetch GitLab MR metadata, diff, and stat via the ``glab`` CLI.
 
-    Returns a dict with keys: title, body, head_ref, base_ref, url, diff, stat.
+    Args:
+        git_dir: Path to the git repository.
+        mr_number: GitLab merge request number.
+        fetch_comments: When True, include an empty ``comments`` list (GitLab
+            comment fetching for non-fix_only modes is not yet implemented).
+
+    Returns:
+        A dict with keys: title, body, head_ref, base_ref, url, diff, stat,
+        and optionally ``comments`` when *fetch_comments* is True.
 
     Raises:
         HTTPException: If metadata fetch fails.
@@ -1109,7 +1193,7 @@ def _fetch_gitlab_mr_context(git_dir: Path, mr_number: int) -> dict[str, Any]:
         except (subprocess.TimeoutExpired, OSError):
             pass
 
-    return {
+    result: dict[str, Any] = {
         "title": title,
         "body": body,
         "head_ref": head_ref,
@@ -1118,6 +1202,12 @@ def _fetch_gitlab_mr_context(git_dir: Path, mr_number: int) -> dict[str, Any]:
         "diff": diff_text,
         "stat": stat_text,
     }
+
+    if fetch_comments:
+        # GitLab comment fetching for non-fix_only modes is not yet implemented.
+        result["comments"] = []
+
+    return result
 
 
 SelectPipelineRequest = impl.SelectPipelineRequest
@@ -3290,12 +3380,16 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         return {"task": _task_payload(review_task, orchestrator=orchestrator)}
 
     # ------------------------------------------------------------------
-    # POST /tasks/{task_id}/review-pr
+    # POST /tasks/{task_id}/review-pr  (legacy — uses pr_review pipeline)
     # ------------------------------------------------------------------
 
     @router.post("/tasks/{task_id}/review-pr")
     async def review_pr(task_id: str, pr_number: int = Query(...), project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         """Create a PR-review task from a GitHub pull request.
+
+        Legacy endpoint that uses the original ``pr_review`` pipeline
+        (review → implement → verify → review → commit), distinct from the
+        mode-specific pipelines in ``POST /pull-requests/{number}/review``.
 
         Fetches the PR diff and metadata via the ``gh`` CLI and creates a
         ``pr_review`` task pre-loaded with that context.
@@ -3356,12 +3450,16 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         return {"task": _task_payload(review_task, orchestrator=orchestrator)}
 
     # ------------------------------------------------------------------
-    # POST /tasks/{task_id}/review-mr
+    # POST /tasks/{task_id}/review-mr  (legacy — uses mr_review pipeline)
     # ------------------------------------------------------------------
 
     @router.post("/tasks/{task_id}/review-mr")
     async def review_mr(task_id: str, mr_number: int = Query(...), project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         """Create an MR-review task from a GitLab merge request.
+
+        Legacy endpoint that uses the original ``mr_review`` pipeline
+        (review → implement → verify → review → commit), distinct from the
+        mode-specific pipelines in ``POST /pull-requests/{number}/review``.
 
         Fetches the MR diff and metadata via the ``glab`` CLI and creates an
         ``mr_review`` task pre-loaded with that context.
@@ -3529,20 +3627,22 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
     async def create_pull_request_review(number: int, body: CreatePullRequestReviewRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         """Create a review task for a pull request or merge request.
 
-        Detects the git platform, fetches PR/MR context, and creates a
+        Detects the git platform, fetches PR/MR context, maps the selected
+        ``review_mode`` to the appropriate pipeline template, and creates a
         review task queued for execution.
 
         Args:
             number: Pull request or merge request number.
-            body: Optional review guidance.
+            body: Review mode, optional decision, and guidance.
             project_dir: Optional project directory for runtime state resolution.
 
         Returns:
             A payload containing the newly created review task.
 
         Raises:
-            HTTPException: 400 if platform detection or CLI check fails,
-                409 if a review task already exists for this PR/MR number.
+            HTTPException: 400 if platform detection, CLI check, or unsupported
+                mode for the detected platform; 409 if a review task already
+                exists for this PR/MR number and mode.
         """
         container, bus, orchestrator = deps.ctx(project_dir)
         git_dir = container.project_dir
@@ -3556,9 +3656,21 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if platform == "gitlab" and not shutil.which("glab"):
             raise HTTPException(status_code=400, detail="GitLab CLI (glab) is not installed. Install it from https://gitlab.com/gitlab-org/cli")
 
-        # Duplicate check.
-        task_type_key = "pr_review" if platform == "github" else "mr_review"
+        # Resolve task_type and pipeline_id from the selected review mode.
+        if platform == "gitlab":
+            if body.review_mode != "fix_only":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Review mode '{body.review_mode}' is not yet supported for GitLab merge requests. Only 'fix_only' is available.",
+                )
+            task_type_key = "mr_review"
+            pipeline_id = "mr_review"
+        else:
+            task_type_key, pipeline_id = _REVIEW_MODE_TO_PIPELINE[body.review_mode]
+
         meta_number_key = "source_pr_number" if platform == "github" else "source_mr_number"
+
+        # Duplicate check using the mode-specific task_type.
         for existing in container.tasks.list():
             if (
                 existing.task_type == task_type_key
@@ -3568,11 +3680,16 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             ):
                 raise HTTPException(status_code=409, detail=f"A review task already exists: {existing.id}")
 
-        # Fetch context.
+        # Fetch context, optionally including comments.
+        needs_comments = body.review_mode in _MODES_NEEDING_COMMENTS
         if platform == "github":
-            ctx = _fetch_github_pr_context(git_dir, number)
+            ctx = _fetch_github_pr_context(git_dir, number, fetch_comments=needs_comments)
         else:
-            ctx = _fetch_gitlab_mr_context(git_dir, number)
+            ctx = _fetch_gitlab_mr_context(git_dir, number, fetch_comments=needs_comments)
+
+        # Resolve pipeline template and set step names on the task.
+        registry = PipelineRegistry()
+        template = registry.get(pipeline_id)
 
         # Build metadata.
         metadata: dict[str, Any] = {
@@ -3583,9 +3700,16 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             "source_url": ctx["url"],
             "source_ref": ctx["head_ref"],
             "source_base_ref": ctx["base_ref"],
+            "review_mode": body.review_mode,
+            "comment_dry_run": True,
+            "final_pipeline_id": pipeline_id,
         }
+        if body.review_decision is not None:
+            metadata["review_decision"] = body.review_decision
         if body.guidance:
             metadata["review_guidance"] = body.guidance
+        if needs_comments and ctx.get("comments") is not None:
+            metadata["source_comments"] = ctx["comments"]
 
         if platform == "github":
             title = f"PR Review: #{number} — {ctx['title']}" if ctx["title"] else f"PR Review: #{number}"
@@ -3600,6 +3724,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             task_type=task_type_key,
             status="queued",
             source=task_type_key,
+            pipeline_template=template.step_names(),
             metadata=metadata,
         )
         container.tasks.upsert(review_task)
