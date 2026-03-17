@@ -1246,10 +1246,16 @@ def build_step_prompt(
         if isinstance(allowed, list) and allowed:
             cleaned = [str(item).strip() for item in allowed if str(item).strip()]
             if cleaned:
+                registry = PipelineRegistry()
+                templates_by_id = {t.id: t for t in registry.list_templates()}
                 parts.append("")
-                parts.append("## Allowed pipeline IDs")
-                for pipeline_id in cleaned:
-                    parts.append(f"- {pipeline_id}")
+                parts.append("## Allowed pipelines")
+                for pid in cleaned:
+                    tmpl = templates_by_id.get(pid)
+                    if tmpl:
+                        parts.append(f"- `{pid}` — {tmpl.description}")
+                    else:
+                        parts.append(f"- `{pid}`")
         parts.append("")
         parts.append(guardrails)
         return "\n".join(parts)
