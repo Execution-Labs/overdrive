@@ -569,6 +569,10 @@ def test_plan_gate_request_changes_git_rerun_preserves_active_worktree_context(t
     assert str(parked_task.metadata.get("worktree_dir") or "").strip()
     assert isinstance(parked_task.metadata.get("task_context"), dict)
 
+    # Pause the scheduler *before* approve-gate so ensure_worker() does not
+    # immediately pick up the re-queued task in the background.
+    service.control("pause")
+
     resp = client.post(
         f"/api/tasks/{task.id}/approve-gate",
         json={
@@ -581,9 +585,6 @@ def test_plan_gate_request_changes_git_rerun_preserves_active_worktree_context(t
     queued = container.tasks.get(task.id)
     assert queued is not None
     assert queued.status == "queued"
-
-    # approve-gate(request_changes) starts the scheduler; pause to make rerun deterministic.
-    service.control("pause")
     rerun = service.run_task(task.id)
     assert rerun.status == "in_progress"
     assert rerun.pending_gate == "before_generate_tasks"
