@@ -440,7 +440,7 @@ class TaskExecutor:
             elif retry_from == svc._BEFORE_DONE_RESUME_STEP:
                 start_step = None
             else:
-                start_step = steps[0] if steps else None
+                start_step = task.current_step or (steps[0] if steps else None)
             task.current_step = start_step
             task.metadata["pipeline_phase"] = start_step
             task.status = "in_progress"

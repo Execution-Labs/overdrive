@@ -3633,6 +3633,7 @@ class OrchestratorService:
             next_retry_at=next_retry_at,
         )
         task.current_step = step
+        task.metadata["retry_from_step"] = step
         task.error = str(summary or f"Worker stalled during {step}. Auto-requeue scheduled.")
         task.status = "queued"
         task.current_agent_id = None
@@ -3752,6 +3753,7 @@ class OrchestratorService:
             next_retry_at=next_retry_at,
         )
         task.current_step = step
+        task.metadata["retry_from_step"] = step
         task.error = str(summary or f"Environment issue detected during {step}. Auto-requeue scheduled.")
         task.status = "queued"
         task.current_agent_id = None
