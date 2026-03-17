@@ -1300,7 +1300,13 @@ class TaskExecutor:
             if not early_complete and has_commit:
                 impl_dir = worktree_dir or svc.container.project_dir
                 svc._cleanup_workdoc_for_commit(impl_dir)
-                if not svc._has_uncommitted_changes(impl_dir) and not svc._has_commits_ahead(impl_dir):
+                # Skip the "no changes" guard when retrying from review/commit.
+                # The task already produced changes in a prior run — the guard
+                # only protects against empty implementation output on fresh runs.
+                # When the task branch is already merged into the base branch,
+                # _has_commits_ahead returns False (commits are reachable from
+                # base), causing a false "no changes" block on retry.
+                if not skip_phase1 and not svc._has_uncommitted_changes(impl_dir) and not svc._has_commits_ahead(impl_dir):
                     task.status = "blocked"
                     task.wait_state = None
                     task.error = "No file changes detected after implementation"
