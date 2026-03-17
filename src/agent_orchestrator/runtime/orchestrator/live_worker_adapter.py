@@ -36,12 +36,12 @@ from .worker_adapter import StepResult
 logger = logging.getLogger(__name__)
 
 # Step category mapping
-_PLANNING_STEPS = {"plan", "analyze", "plan_refine", "initiative_plan", "initiative_plan_refine", "commit_review", "pr_review", "mr_review"}
+_PLANNING_STEPS = {"plan", "analyze", "plan_refine", "initiative_plan", "initiative_plan_refine", "commit_review", "pr_review", "mr_review", "pr_review_comment", "pr_review_fix_respond"}
 _IMPL_STEPS = {"implement", "prototype"}
 _FIX_STEPS = {"implement_fix"}
 _VERIFY_STEPS = {"verify", "benchmark"}
 _REVIEW_STEPS = {"review"}
-_REPORT_STEPS = {"report", "summarize"}
+_REPORT_STEPS = {"report", "summarize", "pr_review_summarize"}
 _SCAN_STEPS = {"scan_deps", "scan_code"}
 _TASK_GEN_STEPS = {"generate_tasks"}
 _DIAGNOSIS_STEPS = {"diagnose"}
@@ -109,6 +109,9 @@ _SETTINGS_PROMPT_STEPS: tuple[str, ...] = (
     "plan",
     "plan_refine",
     "pr_review",
+    "pr_review_comment",
+    "pr_review_fix_respond",
+    "pr_review_summarize",
     "profile",
     "prototype",
     "report",
@@ -212,6 +215,12 @@ def _instruction_prompt_name(step: str, task_type: str) -> str:
         return "steps/pr_review.md"
     if step == "mr_review":
         return "steps/mr_review.md"
+    if step == "pr_review_comment":
+        return "steps/pr_review_comment.md"
+    if step == "pr_review_summarize":
+        return "steps/pr_review_summarize.md"
+    if step == "pr_review_fix_respond":
+        return "steps/pr_review_fix_respond.md"
     if step == "plan_refine":
         return "steps/plan_refine.md"
     if step == "initiative_plan_refine":
@@ -492,10 +501,11 @@ def _step_category(step: str) -> str:
 
 # Steps that support early pipeline completion when no action is needed.
 _EARLY_COMPLETE_STEPS = {
-    "commit_review", "pr_review", "mr_review",  # review pipelines
-    "diagnose",                                   # bug_fix: no bug found
-    "scan_code",                                  # security_audit: both scans clean
-    "profile",                                    # performance: no bottlenecks
+    "commit_review", "pr_review", "mr_review",    # review pipelines
+    "pr_review_comment", "pr_review_summarize",   # comment-aware review pipelines
+    "diagnose",                                    # bug_fix: no bug found
+    "scan_code",                                   # security_audit: both scans clean
+    "profile",                                     # performance: no bottlenecks
 }
 
 
@@ -1299,8 +1309,9 @@ def build_step_prompt(
             parts.append(f"## Commit diff to review ({_cr_sha[:12]})" if _cr_sha else "## Commit diff to review")
             parts.append(f"```diff\n{_cr_diff}\n```")
 
-    # Inject source context for pr_review / mr_review steps.
-    if step in ("pr_review", "mr_review") and isinstance(task.metadata, dict):
+    # Inject source context for pr_review / mr_review and comment-aware review steps.
+    _PR_CONTEXT_STEPS = {"pr_review", "mr_review", "pr_review_comment", "pr_review_summarize", "pr_review_fix_respond"}
+    if step in _PR_CONTEXT_STEPS and isinstance(task.metadata, dict):
         _pr_desc = str(task.metadata.get("source_description") or "").strip()
         _pr_url = str(task.metadata.get("source_url") or "").strip()
         _pr_diff = str(task.metadata.get("source_diff") or "").strip()
@@ -1330,6 +1341,15 @@ def build_step_prompt(
             parts.append("")
             parts.append("## Review guidance from the user")
             parts.append(_pr_guidance)
+
+    # Inject formatted comment context for comment-aware review steps.
+    _COMMENT_AWARE_STEPS = {"pr_review_comment", "pr_review_summarize", "pr_review_fix_respond"}
+    if step in _COMMENT_AWARE_STEPS and isinstance(task.metadata, dict):
+        _comments_formatted = str(task.metadata.get("source_comments_formatted") or "").strip()
+        if _comments_formatted:
+            parts.append("")
+            parts.append("## Existing review comments")
+            parts.append(_comments_formatted)
 
     # Inject outputs from prior pipeline steps.
     # For implement/implement_fix, rely on the workdoc as the single source of truth.
@@ -2255,6 +2275,24 @@ class LiveWorkerAdapter:
             merged = _merge_token_usage(primary_token_usage, fmt_usage) if (primary_token_usage or fmt_usage) else None
             step_result.token_usage = merged
 
+        # 8b. For pr_review_comment steps that produced freeform output,
+        #     run a lightweight LLM formatter to extract structured comments.
+        if (
+            step == "pr_review_comment"
+            and result.response_text
+            and step_result.status == "ok"
+            and step_result.comment_actions is None
+            and not raw_is_json
+        ):
+            step_result = self._parse_comment_output(
+                spec=spec,
+                response_text=result.response_text,
+                project_dir=project_dir,
+            )
+            fmt_usage = step_result.token_usage or {}
+            merged = _merge_token_usage(primary_token_usage, fmt_usage) if (primary_token_usage or fmt_usage) else None
+            step_result.token_usage = merged
+
         # 9. Check if the step signals that no further pipeline action is needed.
         if step_result.status == "ok" and _is_no_action_needed(step, step_result.summary):
             step_result = replace(step_result, no_action_needed=True)
@@ -2440,6 +2478,55 @@ class LiveWorkerAdapter:
 
         return StepResult(status="error", summary="Task generation output formatter returned no tasks list", token_usage=fmt_token_usage)
 
+    # ------------------------------------------------------------------
+    # Comment-output formatter (codex / claude)
+    # ------------------------------------------------------------------
+
+    def _parse_comment_output(
+        self,
+        *,
+        spec: Any,
+        response_text: str,
+        project_dir: Path,
+    ) -> StepResult:
+        """Use a short LLM call to extract structured comments from freeform pr_review_comment output."""
+        formatter_prompt = load_prompt("formatters/comment_output.md").format(
+            output=response_text[:8000],
+        )
+
+        fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
+        progress_path = fmt_run_dir / "progress.json"
+        try:
+            fmt_result = run_worker(
+                spec=spec,
+                prompt=formatter_prompt,
+                project_dir=project_dir,
+                run_dir=fmt_run_dir,
+                timeout_seconds=0,
+                heartbeat_seconds=30,
+                heartbeat_grace_seconds=60,
+                progress_path=progress_path,
+            )
+        except Exception:
+            logger.debug("Comment formatter call failed; returning error")
+            return StepResult(status="error", summary="Comment output formatter failed")
+        finally:
+            shutil.rmtree(fmt_run_dir, ignore_errors=True)
+
+        fmt_token_usage = fmt_result.token_usage or None
+
+        parsed = _extract_json(fmt_result.response_text or "")
+        if not isinstance(parsed, dict):
+            logger.debug("Comment formatter returned unparseable output")
+            return StepResult(status="error", summary="Comment output formatter returned invalid JSON", token_usage=fmt_token_usage)
+
+        comments = parsed.get("comments")
+        summary = str(parsed.get("summary") or "").strip()
+        if isinstance(comments, list):
+            return StepResult(status="ok", comment_actions=comments, summary=summary or None, token_usage=fmt_token_usage)
+
+        return StepResult(status="error", summary="Comment output formatter returned no comments field", token_usage=fmt_token_usage)
+
     def _map_result(
         self,
         result: WorkerRunResult,
@@ -2545,6 +2632,16 @@ class LiveWorkerAdapter:
             if isinstance(parsed, dict):
                 return StepResult(status="ok", summary=json.dumps(parsed))
             return StepResult(status="error", summary="Pipeline classification output must be valid JSON")
+
+        # pr_review_comment: try to parse structured comment JSON directly.
+        if step == "pr_review_comment" and result.response_text:
+            parsed = _extract_json(result.response_text)
+            if isinstance(parsed, dict) and isinstance(parsed.get("comments"), list):
+                return StepResult(
+                    status="ok",
+                    comment_actions=parsed["comments"],
+                    summary=str(parsed.get("summary") or "").strip() or None,
+                )
 
         if category == "planning" and result.response_text:
             parsed = _extract_json(result.response_text)
