@@ -1,4 +1,4 @@
-"""Tests for the GitHub PR comment reader."""
+"""Tests for the GitHub PR and GitLab MR comment readers."""
 
 from __future__ import annotations
 
@@ -11,15 +11,17 @@ from unittest.mock import patch
 import pytest
 
 from agent_orchestrator.comments.reader import (
+    CommentFetchError,
     _map_issue_comment,
     _map_review_comment,
     _map_review_decision,
-    _parse_paginated_json,
+    _parse_paginated_json_gh,
+    fetch_mr_comments,
     fetch_pr_comments,
 )
 
 # ---------------------------------------------------------------------------
-# JSON fixtures
+# GitHub: JSON fixtures
 # ---------------------------------------------------------------------------
 
 
@@ -77,46 +79,46 @@ FIXTURE_PAGINATED_50 = _page1 + _page2
 
 
 # ---------------------------------------------------------------------------
-# _parse_paginated_json
+# GitHub: _parse_paginated_json_gh
 # ---------------------------------------------------------------------------
 
 
-class TestParsePaginatedJson:
+class TestParsePaginatedJsonGh:
     def test_empty_array(self) -> None:
-        assert _parse_paginated_json("[]") == []
+        assert _parse_paginated_json_gh("[]") == []
 
     def test_single_page(self) -> None:
         items = [{"a": 1}, {"b": 2}]
-        result = _parse_paginated_json(json.dumps(items))
+        result = _parse_paginated_json_gh(json.dumps(items))
         assert result == items
 
     def test_multi_page(self) -> None:
         page_a = [{"x": 1}]
         page_b = [{"y": 2}, {"z": 3}]
         raw = json.dumps(page_a) + json.dumps(page_b)
-        result = _parse_paginated_json(raw)
+        result = _parse_paginated_json_gh(raw)
         assert result == page_a + page_b
 
     def test_multi_page_with_whitespace(self) -> None:
         raw = "[{\"a\":1}]  \n  [{\"b\":2}]"
-        result = _parse_paginated_json(raw)
+        result = _parse_paginated_json_gh(raw)
         assert len(result) == 2
 
     def test_invalid_json(self) -> None:
-        assert _parse_paginated_json("not json at all") == []
+        assert _parse_paginated_json_gh("not json at all") == []
 
     def test_empty_string(self) -> None:
-        assert _parse_paginated_json("") == []
+        assert _parse_paginated_json_gh("") == []
 
     def test_whitespace_only(self) -> None:
-        assert _parse_paginated_json("   \n  ") == []
+        assert _parse_paginated_json_gh("   \n  ") == []
 
     def test_non_array_json(self) -> None:
-        assert _parse_paginated_json('{"key": "value"}') == []
+        assert _parse_paginated_json_gh('{"key": "value"}') == []
 
 
 # ---------------------------------------------------------------------------
-# Mappers
+# GitHub: Mappers
 # ---------------------------------------------------------------------------
 
 
@@ -182,7 +184,7 @@ class TestMappers:
 
 
 # ---------------------------------------------------------------------------
-# fetch_pr_comments
+# GitHub: fetch_pr_comments
 # ---------------------------------------------------------------------------
 
 
@@ -292,3 +294,241 @@ class TestFetchPrComments:
             result = fetch_pr_comments("o", "r", 1, tmp_path)
         dates = [c.created_at for c in result]
         assert dates == sorted(dates)
+
+
+# ---------------------------------------------------------------------------
+# GitLab: fixtures and helpers
+# ---------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures" / "gitlab_notes"
+
+
+def _load_fixture(name: str) -> str:
+    return (FIXTURES / name).read_text()
+
+
+def _mock_run_ok(stdout: str):
+    """Return a mock subprocess result with the given stdout."""
+
+    def _side_effect(*_args, **_kwargs):
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+    return _side_effect
+
+
+# ---------------------------------------------------------------------------
+# GitLab: fetch_mr_comments
+# ---------------------------------------------------------------------------
+
+
+class TestFetchMrCommentsBasic:
+    def test_filters_system_notes_and_parses_fields(self) -> None:
+        fixture = _load_fixture("mr_notes_page1.json")
+        with (
+            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok(fixture)),
+        ):
+            comments = fetch_mr_comments("123", 1)
+
+        assert len(comments) == 2
+
+        general = comments[0]
+        assert general.platform_id == "101"
+        assert general.author == "reviewer1"
+        assert general.body == "Great work on this feature!"
+        assert general.path is None
+        assert general.line is None
+        assert general.resolved is False
+
+        inline = comments[1]
+        assert inline.platform_id == "102"
+        assert inline.path == "src/main.py"
+        assert inline.line == 42
+        assert inline.resolved is True
+
+
+class TestFetchMrCommentsInlineFallback:
+    def test_falls_back_to_old_path_and_old_line(self) -> None:
+        note = json.dumps([
+            {
+                "id": 301,
+                "body": "Old-side comment",
+                "author": {"username": "dev"},
+                "created_at": "2026-03-10T09:00:00.000Z",
+                "system": False,
+                "resolved": False,
+                "position": {
+                    "new_path": None,
+                    "old_path": "old.py",
+                    "new_line": None,
+                    "old_line": 15,
+                },
+            }
+        ])
+        with (
+            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok(note)),
+        ):
+            comments = fetch_mr_comments("123", 1)
+
+        assert len(comments) == 1
+        assert comments[0].path == "old.py"
+        assert comments[0].line == 15
+
+
+class TestFetchMrCommentsPagination:
+    def test_handles_newline_separated_json_arrays(self) -> None:
+        page1 = _load_fixture("mr_notes_page1.json").strip()
+        page2 = _load_fixture("mr_notes_page2.json").strip()
+        paginated = page1 + "\n" + page2
+        with (
+            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok(paginated)),
+        ):
+            comments = fetch_mr_comments("123", 1)
+
+        # 2 user notes from page1 (system note filtered) + 1 from page2
+        assert len(comments) == 3
+        assert comments[-1].platform_id == "201"
+
+
+class TestFetchMrCommentsEmpty:
+    def test_empty_notes_returns_empty_list(self) -> None:
+        fixture = _load_fixture("mr_notes_empty.json")
+        with (
+            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok(fixture)),
+        ):
+            comments = fetch_mr_comments("123", 1)
+
+        assert comments == []
+
+
+class TestFetchMrCommentsGlabNotInstalled:
+    def test_raises_when_glab_missing(self) -> None:
+        with patch("agent_orchestrator.comments.reader.shutil.which", return_value=None):
+            with pytest.raises(CommentFetchError, match="not installed"):
+                fetch_mr_comments("123", 1)
+
+
+class TestFetchMrCommentsGlabError:
+    def test_raises_on_subprocess_error(self) -> None:
+        with (
+            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch(
+                "agent_orchestrator.comments.reader.subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, "glab", stderr="not found"),
+            ),
+        ):
+            with pytest.raises(CommentFetchError, match="glab api failed"):
+                fetch_mr_comments("123", 1)
+
+
+class TestFetchMrCommentsTimeout:
+    def test_raises_on_timeout(self) -> None:
+        with (
+            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch(
+                "agent_orchestrator.comments.reader.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("glab", 60),
+            ),
+        ):
+            with pytest.raises(CommentFetchError, match="timed out"):
+                fetch_mr_comments("123", 1)
+
+
+class TestFetchMrCommentsInvalidJson:
+    def test_raises_on_bad_json(self) -> None:
+        with (
+            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok("not json {{")),
+        ):
+            with pytest.raises(CommentFetchError, match="Failed to parse"):
+                fetch_mr_comments("123", 1)
+
+
+class TestFetchMrCommentsMalformedNote:
+    def test_skips_malformed_notes_with_warning(self) -> None:
+        notes = json.dumps([
+            {
+                "id": 401,
+                "body": "Valid note",
+                "author": {"username": "dev"},
+                "created_at": "2026-03-10T09:00:00.000Z",
+                "system": False,
+                "resolved": False,
+                "position": None,
+            },
+            {
+                "id": 402,
+                "body": "Missing author field",
+                "created_at": "2026-03-10T10:00:00.000Z",
+                "system": False,
+                "resolved": False,
+                "position": None,
+            },
+        ])
+        with (
+            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok(notes)),
+        ):
+            comments = fetch_mr_comments("123", 1)
+
+        assert len(comments) == 1
+        assert comments[0].platform_id == "401"
+
+
+class TestFetchMrCommentsResolvedNull:
+    def test_resolved_null_coerced_to_false(self) -> None:
+        """GitLab returns ``"resolved": null`` for non-resolvable notes."""
+        notes = json.dumps([
+            {
+                "id": 601,
+                "body": "General comment",
+                "author": {"username": "dev"},
+                "created_at": "2026-03-10T09:00:00.000Z",
+                "system": False,
+                "resolved": None,
+                "position": None,
+            }
+        ])
+        with (
+            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok(notes)),
+        ):
+            comments = fetch_mr_comments("123", 1)
+
+        assert len(comments) == 1
+        assert comments[0].resolved is False
+
+
+class TestFetchMrCommentsSortedByDate:
+    def test_results_sorted_ascending(self) -> None:
+        notes = json.dumps([
+            {
+                "id": 502,
+                "body": "Second",
+                "author": {"username": "b"},
+                "created_at": "2026-03-10T12:00:00.000Z",
+                "system": False,
+                "resolved": False,
+                "position": None,
+            },
+            {
+                "id": 501,
+                "body": "First",
+                "author": {"username": "a"},
+                "created_at": "2026-03-10T08:00:00.000Z",
+                "system": False,
+                "resolved": False,
+                "position": None,
+            },
+        ])
+        with (
+            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok(notes)),
+        ):
+            comments = fetch_mr_comments("123", 1)
+
+        assert comments[0].platform_id == "501"
+        assert comments[1].platform_id == "502"
