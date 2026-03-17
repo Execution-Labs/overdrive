@@ -7062,7 +7062,7 @@ export default function App() {
                 const pipelineSteps = selectedTaskView.pipeline_template!
                 const currentStep = selectedTaskView.current_step || null
                 const pipelinePhase = String(selectedTaskView.metadata?.pipeline_phase || '') || currentStep
-                const isDone = selectedTaskView.status === 'done' || selectedTaskView.status === 'in_review'
+                const isDone = selectedTaskView.status === 'done'
                 const phaseIdx = pipelinePhase ? pipelineSteps.indexOf(pipelinePhase) : -1
                 return (
                   <div className="pipeline-flow">
