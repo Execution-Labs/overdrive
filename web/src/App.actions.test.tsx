@@ -426,6 +426,8 @@ describe('App action coverage', () => {
     })
 
     fireEvent.click(screen.getByRole('button', { name: /^Configuration$/i }))
+    fireEvent.change(screen.getByLabelText(/^Title$/i), { target: { value: 'Updated title' } })
+    fireEvent.change(screen.getByLabelText(/^Description$/i), { target: { value: 'Updated description' } })
     fireEvent.change(screen.getByLabelText(/Labels/i), { target: { value: 'ui,frontend' } })
     fireEvent.click(screen.getByRole('button', { name: /^Save$/i }))
     await waitFor(() => {
@@ -434,8 +436,37 @@ describe('App action coverage', () => {
       )
       expect(editCall).toBeTruthy()
       const body = JSON.parse(String((editCall?.[1] as RequestInit).body))
+      expect(body.title).toBe('Updated title')
+      expect(body.description).toBe('Updated description')
       expect(body.labels).toEqual(['ui', 'frontend'])
     })
+  }, 30000)
+
+  it('blocks save when title is empty and shows validation error', async () => {
+    const mockedFetch = installFetchMock()
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Task 1')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('Task 1'))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Configuration$/i })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Configuration$/i }))
+    fireEvent.change(screen.getByLabelText(/^Title$/i), { target: { value: '   ' } })
+    fireEvent.click(screen.getByRole('button', { name: /^Save$/i }))
+    await waitFor(() => {
+      expect(screen.getByText(/Task title cannot be empty/i)).toBeInTheDocument()
+    })
+    // Verify no PATCH was sent
+    expect(
+      mockedFetch.mock.calls.some(([url, init]) =>
+        String(url).includes('/api/tasks/task-1') && (init as RequestInit | undefined)?.method === 'PATCH'
+      )
+    ).toBe(false)
   }, 30000)
 
   it('deletes terminal tasks and clears board with archive notice', async () => {

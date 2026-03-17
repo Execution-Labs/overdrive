@@ -4168,6 +4168,10 @@ export default function App() {
   }
 
   async function saveTaskEdits(taskId: string): Promise<void> {
+    if (!editTaskTitle.trim()) {
+      setError('Task title cannot be empty')
+      return
+    }
     const parsedStepTimeout = parseOptionalPositiveInt(editTaskStepTimeout)
     if (editTaskStepTimeout.trim() && parsedStepTimeout === null) {
       setError('Task timeout must be a positive number of seconds')
@@ -5367,6 +5371,22 @@ export default function App() {
         {taskDetailTab === 'configuration' ? (
           <div className="task-detail-section-body">
               <div className="form-stack">
+                <label className="field-label" htmlFor="edit-task-title">Title</label>
+                <input
+                  id="edit-task-title"
+                  value={configLocked ? (selectedTaskView.title || '') : editTaskTitle}
+                  onChange={(event) => setEditTaskTitle(event.target.value)}
+                  disabled={configLocked || taskActionPending === 'save'}
+                />
+                <label className="field-label" htmlFor="edit-task-description">Description</label>
+                <textarea
+                  id="edit-task-description"
+                  className="json-editor-textarea"
+                  rows={4}
+                  value={configLocked ? (selectedTaskView.description || '') : editTaskDescription}
+                  onChange={(event) => setEditTaskDescription(event.target.value)}
+                  disabled={configLocked || taskActionPending === 'save'}
+                />
                 <label className="field-label" htmlFor="edit-task-labels">Labels (comma-separated)</label>
                 <input
                   id="edit-task-labels"
