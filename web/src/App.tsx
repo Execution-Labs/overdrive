@@ -653,12 +653,11 @@ function statusPillClass(status: string): string {
 }
 
 const GATE_DISPLAY_MAP: Record<string, string> = {
-  before_implement: 'Plan ready.',
-  before_generate_tasks: 'Plan ready to generate tasks.',
-  before_done: 'Analysis complete.',
-  after_implement: 'Implementation complete; approval required',
-  before_commit: 'Implementation completed.',
-  human_intervention: 'Human intervention required',
+  before_implement: 'Plan ready',
+  before_generate_tasks: 'Generate tasks',
+  before_done: 'Work complete',
+  before_commit: 'Review implementation',
+  human_intervention: 'Needs intervention',
 }
 
 function normalizeHitlMode(raw: string | null | undefined): 'autopilot' | 'supervised' | 'review_only' {
@@ -681,7 +680,6 @@ function gateApprovalButtonLabel(gate: string | null | undefined): string {
   if (normalized === 'before_implement') return 'Approve plan'
   if (normalized === 'before_generate_tasks') return 'Generate tasks'
   if (normalized === 'before_done') return 'Move to Done'
-  if (normalized === 'after_implement') return 'Approve implementation'
   if (normalized === 'before_commit') return 'Approve'
   if (normalized === 'human_intervention') return 'Acknowledge'
   return 'Approve gate'
@@ -704,7 +702,10 @@ function taskWaitingGateKind(task: TaskRecord | null | undefined): WaitingGateKi
 function taskWaitingGateLabel(task: TaskRecord | null | undefined): string | null {
   const kind = taskWaitingGateKind(task)
   if (kind === 'intervention_wait') return 'Needs Intervention'
-  if (kind === 'approval_wait') return 'Awaiting Approval'
+  if (kind === 'approval_wait') {
+    const display = String(task?.gate_context?.display || '').trim()
+    return display || 'Awaiting Approval'
+  }
   return null
 }
 
@@ -1894,12 +1895,7 @@ export default function App() {
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskDescription, setNewTaskDescription] = useState('')
   const [newTaskType, setNewTaskType] = useState('auto')
-  const [autoPipelineNeedsManualSelection, setAutoPipelineNeedsManualSelection] = useState(false)
-  const [pendingPipelineClassification, setPendingPipelineClassification] = useState<{
-    pipeline_id: string
-    confidence: 'high' | 'low'
-    reason: string
-  } | null>(null)
+  const [gatePipelineSelection, setGatePipelineSelection] = useState('')
   const [newTaskPriority, setNewTaskPriority] = useState('P2')
   const [newTaskLabels, setNewTaskLabels] = useState('')
   const [newTaskBlockedBy, setNewTaskBlockedBy] = useState('')
@@ -3467,70 +3463,6 @@ export default function App() {
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean)
-    let resolvedTaskType = newTaskType
-    let classifierPipelineId: string | undefined
-    let classifierConfidence: 'high' | 'low' | undefined
-    let classifierReason: string | undefined
-    let wasUserOverride = false
-    if (resolvedTaskType === 'auto') {
-      if (autoPipelineNeedsManualSelection) {
-        setError('Auto pipeline selection was low confidence. Please choose a specific pipeline and submit again.')
-        return
-      }
-      try {
-        const classification = await requestJson<{
-          pipeline_id: string
-          task_type: string
-          confidence: 'high' | 'low'
-          reason: string
-        }>(buildApiUrl('/api/tasks/classify-pipeline', projectDir), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            title: newTaskTitle.trim(),
-            description: newTaskDescription,
-            metadata: parsedMetadata,
-          }),
-        })
-        classifierPipelineId = String(classification.pipeline_id || '').trim() || 'feature'
-        classifierConfidence = classification.confidence === 'high' ? 'high' : 'low'
-        classifierReason = String(classification.reason || '').trim()
-        if (classifierConfidence !== 'high') {
-          const suggestedTaskType = String(classification.task_type || '').trim() || 'feature'
-          setPendingPipelineClassification({
-            pipeline_id: classifierPipelineId,
-            confidence: classifierConfidence,
-            reason: classifierReason,
-          })
-          setNewTaskType(suggestedTaskType)
-          setAutoPipelineNeedsManualSelection(true)
-          setError(`Auto classification is low confidence: ${classifierReason || 'please choose a pipeline manually.'}`)
-          return
-        }
-        resolvedTaskType = String(classification.task_type || '').trim() || 'feature'
-      } catch (err) {
-        setError(`Auto classification failed: ${toErrorMessage('Please choose a pipeline manually', err)}`)
-        setNewTaskType('feature')
-        setAutoPipelineNeedsManualSelection(true)
-        setPendingPipelineClassification({
-          pipeline_id: 'feature',
-          confidence: 'low',
-          reason: 'Pipeline auto-classification failed.',
-        })
-        return
-      }
-    } else {
-      if (autoPipelineNeedsManualSelection) {
-        wasUserOverride = true
-      }
-      if (autoPipelineNeedsManualSelection && pendingPipelineClassification) {
-        classifierPipelineId = pendingPipelineClassification.pipeline_id
-        classifierConfidence = pendingPipelineClassification.confidence
-        classifierReason = pendingPipelineClassification.reason
-      } else if (pendingPipelineClassification) {
-        setPendingPipelineClassification(null)
-      }
-    }
     try {
       await requestJson<{ task: TaskRecord }>(buildApiUrl('/api/tasks', projectDir), {
         method: 'POST',
@@ -3538,7 +3470,7 @@ export default function App() {
         body: JSON.stringify({
           title: newTaskTitle.trim(),
           description: newTaskDescription,
-          task_type: resolvedTaskType,
+          task_type: newTaskType,
           priority: newTaskPriority,
           labels: newTaskLabels.split(',').map((item) => item.trim()).filter(Boolean),
           blocked_by: newTaskBlockedBy.split(',').map((item) => item.trim()).filter(Boolean),
@@ -3551,10 +3483,6 @@ export default function App() {
           pipeline_template: parsedPipelineTemplate.length > 0 ? parsedPipelineTemplate : undefined,
           metadata: parsedMetadata,
           project_commands: parsedProjectCommands,
-          classifier_pipeline_id: classifierPipelineId,
-          classifier_confidence: classifierConfidence,
-          classifier_reason: classifierReason,
-          was_user_override: wasUserOverride || undefined,
           status: statusOverride || 'queued',
         }),
       })
@@ -3566,8 +3494,6 @@ export default function App() {
     setNewTaskTitle('')
     setNewTaskDescription('')
     setNewTaskType('auto')
-    setAutoPipelineNeedsManualSelection(false)
-    setPendingPipelineClassification(null)
     setNewTaskPriority('P2')
     setNewTaskLabels('')
     setNewTaskBlockedBy('')
@@ -4828,7 +4754,63 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [selectedTaskId, selectedTaskView?.id, selectedTaskView?.timing_summary?.is_running, selectedTaskView?.timing_summary?.active_run_started_at])
 
-  const renderPendingGateBanner = (task: TaskRecord): JSX.Element => (
+  async function selectPipelineForTask(taskId: string, pipelineId: string): Promise<void> {
+    try {
+      await requestJson(buildApiUrl(`/api/tasks/${taskId}/select-pipeline`, projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pipeline_id: pipelineId }),
+      })
+      setGatePipelineSelection('')
+      await reloadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to select pipeline')
+    }
+  }
+
+  const renderPendingGateBanner = (task: TaskRecord): JSX.Element => {
+    if (task.pending_gate === 'pipeline_classify') {
+      return (
+        <div className="preview-box plan-gate-banner plan-gate-banner-compact">
+          <div className="plan-gate-header-row">
+            <p className="field-label">Classifying pipeline&hellip; The task will become eligible for execution once classification completes.</p>
+          </div>
+        </div>
+      )
+    }
+    if (task.pending_gate === 'select_pipeline') {
+      const allowedPipelines: string[] = (task.metadata as Record<string, unknown>)?.classification_allowed_pipelines as string[] || []
+      const reason = String((task.metadata as Record<string, unknown>)?.classifier_reason || '').trim()
+      return (
+        <div className="preview-box plan-gate-banner plan-gate-banner-compact">
+          <div className="plan-gate-header-row">
+            <p className="field-label">
+              <strong>Select pipeline</strong>
+              {reason ? <> &mdash; {reason}</> : null}
+            </p>
+          </div>
+          <div className="inline-actions plan-gate-actions">
+            <select
+              value={gatePipelineSelection}
+              onChange={(event) => setGatePipelineSelection(event.target.value)}
+            >
+              <option value="">Choose pipeline&hellip;</option>
+              {allowedPipelines.map((pid) => (
+                <option key={pid} value={pid}>{humanizeLabel(pid)}</option>
+              ))}
+            </select>
+            <button
+              className="button button-primary"
+              onClick={() => void selectPipelineForTask(task.id, gatePipelineSelection)}
+              disabled={!gatePipelineSelection}
+            >
+              Confirm
+            </button>
+          </div>
+        </div>
+      )
+    }
+    return (
     <div className="preview-box plan-gate-banner plan-gate-banner-compact">
       <div className="plan-gate-header-row">
         {task.pending_gate === 'before_generate_tasks' ? (
@@ -4924,7 +4906,7 @@ export default function App() {
         )}
       </div>
     </div>
-  )
+  )}
 
   const taskDetailContent = selectedTaskView ? (
       <div className="detail-card">
@@ -7263,17 +7245,10 @@ export default function App() {
                   <select
                     id="task-type"
                     value={newTaskType}
-                    onChange={(event) => {
-                      const value = event.target.value
-                      if (value === 'auto' && autoPipelineNeedsManualSelection) {
-                        setError('Auto selection is locked after low confidence. Please select a specific pipeline for this task.')
-                        return
-                      }
-                      setNewTaskType(value)
-                    }}
+                    onChange={(event) => setNewTaskType(event.target.value)}
                   >
                     {TASK_TYPE_OPTIONS.map((taskType) => (
-                      <option key={taskType} value={taskType} disabled={taskType === 'auto' && autoPipelineNeedsManualSelection}>
+                      <option key={taskType} value={taskType}>
                         {humanizeLabel(taskType)}
                       </option>
                     ))}

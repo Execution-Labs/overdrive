@@ -16,7 +16,7 @@ interface ModeConfig {
   approve_before_generate_tasks?: boolean
   approve_before_commit: boolean
   approve_before_done?: boolean
-  approve_after_implement: boolean
+
   allow_unattended: boolean
   require_reasoning: boolean
 }
@@ -47,7 +47,7 @@ const DEFAULT_MODES: ModeConfig[] = [
     approve_before_plan: false,
     approve_before_implement: false,
     approve_before_commit: false,
-    approve_after_implement: false,
+
     allow_unattended: true,
     require_reasoning: false,
   },
@@ -60,7 +60,7 @@ const DEFAULT_MODES: ModeConfig[] = [
     approve_before_generate_tasks: true,
     approve_before_commit: true,
     approve_before_done: true,
-    approve_after_implement: false,
+
     allow_unattended: false,
     require_reasoning: true,
   },
@@ -73,7 +73,7 @@ const DEFAULT_MODES: ModeConfig[] = [
     approve_before_generate_tasks: false,
     approve_before_commit: true,
     approve_before_done: true,
-    approve_after_implement: false,
+
     allow_unattended: true,
     require_reasoning: false,
   },
@@ -153,7 +153,7 @@ export default function HITLModeSelector({
     approve_before_generate_tasks: false,
     approve_before_commit: false,
     approve_before_done: false,
-    approve_after_implement: false,
+
     allow_unattended: true,
     require_reasoning: false,
   }
@@ -165,8 +165,7 @@ export default function HITLModeSelector({
     if (mode.approve_before_plan) gates.push('Plan')
     if (mode.approve_before_implement) gates.push('Impl')
     if (mode.approve_before_generate_tasks) gates.push('Tasks')
-    if (mode.approve_after_implement) gates.push('Review')
-    if (mode.approve_before_commit) gates.push('Commit')
+    if (mode.approve_before_commit) gates.push('Review')
     if (mode.approve_before_done) gates.push('Done')
     return gates
   }

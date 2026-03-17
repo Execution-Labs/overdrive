@@ -79,6 +79,11 @@ class PipelineClassificationResponse(BaseModel):
     allowed_pipelines: list[str]
 
 
+class SelectPipelineRequest(BaseModel):
+    """Payload for manually selecting a pipeline for a task awaiting classification."""
+    pipeline_id: str
+
+
 class UpdateTaskRequest(BaseModel):
     """Patch payload for updating mutable task fields."""
     title: Optional[str] = None
@@ -370,12 +375,13 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
 IMPORT_JOB_TTL_SECONDS = 60 * 60 * 24
 IMPORT_JOB_MAX_RECORDS = 200
 _GATE_DISPLAY_LABELS: dict[str, str] = {
-    "before_implement": "Plan ready.",
-    "before_generate_tasks": "Plan ready to generate tasks.",
-    "before_done": "Work complete.",
-    "after_implement": "Implementation complete; approval required",
-    "before_commit": "Implementation completed.",
-    "human_intervention": "Human intervention required",
+    "before_implement": "Plan ready",
+    "before_generate_tasks": "Generate tasks",
+    "before_done": "Work complete",
+    "before_commit": "Review implementation",
+    "human_intervention": "Needs intervention",
+    "pipeline_classify": "Classifying\u2026",
+    "select_pipeline": "Select pipeline",
 }
 
 

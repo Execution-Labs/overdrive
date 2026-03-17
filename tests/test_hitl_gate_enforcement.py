@@ -80,7 +80,6 @@ def test_supervised_blocks_at_gates(tmp_path: Path) -> None:
     assert result.status == "in_review"
     assert "before_plan" not in gates_seen
     assert "before_implement" in gates_seen
-    assert "after_implement" not in gates_seen
     assert "before_commit" not in gates_seen
 
 
@@ -192,7 +191,6 @@ def test_review_only_pauses_in_precommit_review(tmp_path: Path) -> None:
     assert result.status == "in_review"
     assert "before_plan" not in gates_seen
     assert "before_implement" not in gates_seen
-    assert "after_implement" not in gates_seen
     assert "before_commit" not in gates_seen
 
 

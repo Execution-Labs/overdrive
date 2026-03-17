@@ -30,7 +30,6 @@ class TestHITLModes:
         assert config.allow_unattended is False
         assert config.approve_before_plan is False
         assert config.approve_before_implement is True
-        assert config.approve_after_implement is False
         assert config.approve_before_commit is True
         assert config.require_reasoning is True
 
@@ -38,7 +37,6 @@ class TestHITLModes:
         """Test that review only config."""
         config = MODE_CONFIGS["review_only"]
         assert config.allow_unattended is True
-        assert config.approve_after_implement is False
         assert config.approve_before_commit is True
         assert config.approve_before_done is True
 
@@ -58,14 +56,13 @@ class TestHITLModes:
         d = config.to_dict()
         assert d["mode"] == "supervised"
         assert d["approve_before_plan"] is False
-        assert d["approve_after_implement"] is False
+        assert "approve_after_implement" not in d
 
     def test_should_gate(self):
         """Test that should gate."""
         assert should_gate("supervised", "before_plan") is False
         assert should_gate("supervised", "before_implement") is True
         assert should_gate("supervised", "before_generate_tasks") is True
-        assert should_gate("supervised", "after_implement") is False
         assert should_gate("supervised", "before_done") is True
         assert should_gate("autopilot", "before_plan") is False
         assert should_gate("autopilot", "before_commit") is False
@@ -76,7 +73,6 @@ class TestHITLModes:
 
     def test_should_gate_review_only(self):
         """Test that should gate review only."""
-        assert should_gate("review_only", "after_implement") is False
         assert should_gate("review_only", "before_commit") is True
         assert should_gate("review_only", "before_done") is True
         assert should_gate("review_only", "before_plan") is False

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -128,8 +130,6 @@ def _gate_approved_message(gate: str | None, *, will_resume: bool) -> str:
             return "Task generation approved. Task will resume shortly."
         if normalized == "before_done":
             return "Marked done. Task will finalize shortly."
-        if normalized == "after_implement":
-            return "Implementation approved. Task will resume shortly."
         if normalized == "before_commit":
             return "Approved. Task will resume shortly."
         if normalized == "human_intervention":
@@ -166,7 +166,6 @@ def _resume_step_for_gate(gate: str | None) -> str | None:
         "before_implement": "implement",
         "before_generate_tasks": "generate_tasks",
         "before_done": "__before_done__",
-        "after_implement": "review",
         "before_commit": "commit",
     }
     return mapping.get(str(gate or "").strip())
@@ -273,8 +272,6 @@ def _request_changes_step_for_gate(task: Task, gate: str | None) -> str | None:
         return steps[-1] if steps else task.current_step
     if normalized == "before_commit":
         return _previous_step(steps, "commit") or "implement"
-    if normalized == "after_implement":
-        return "implement"
     if normalized == "before_plan":
         return _previous_step(steps, "plan") or "plan"
     return task.current_step or None
@@ -1111,6 +1108,99 @@ def _fetch_gitlab_mr_context(git_dir: Path, mr_number: int) -> dict[str, Any]:
     }
 
 
+SelectPipelineRequest = impl.SelectPipelineRequest
+
+_bg_classify_logger = logging.getLogger(__name__ + ".bg_classify")
+
+
+async def _run_background_classification(
+    task_id: str,
+    project_dir: str | None,
+    allowed_pipelines: list[str],
+    deps: RouteDeps,
+) -> None:
+    """Classify a task's pipeline in the background and update the gate."""
+    try:
+        container, bus, orchestrator = deps.ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task or task.pending_gate != "pipeline_classify":
+            return
+        registry = PipelineRegistry()
+        synthetic = Task(
+            title=task.title,
+            description=task.description,
+            task_type="feature",
+            status="queued",
+            metadata={"classification_allowed_pipelines": allowed_pipelines},
+        )
+        try:
+            result = await asyncio.to_thread(
+                orchestrator.worker_adapter.run_step_ephemeral,
+                task=synthetic, step="pipeline_classify", attempt=1,
+            )
+        except Exception:
+            _bg_classify_logger.warning("Background classification failed for %s", task_id, exc_info=True)
+            result = None
+
+        # Re-fetch task to avoid overwriting concurrent edits
+        task = container.tasks.get(task_id)
+        if not task:
+            return
+        if task.pending_gate != "pipeline_classify":
+            return  # Gate was already resolved manually
+
+        if result and result.status == "ok":
+            classified = _normalize_pipeline_classification_output(
+                summary=result.summary,
+                allowed_pipelines=allowed_pipelines,
+                registry=registry,
+            )
+            if classified.confidence == "high":
+                resolved_type = _canonical_task_type_for_pipeline(registry, classified.pipeline_id)
+                template = registry.resolve_for_task_type(resolved_type)
+                task.task_type = resolved_type
+                task.pipeline_template = template.step_names()
+                task.pending_gate = None
+                task.metadata["classifier_pipeline_id"] = classified.pipeline_id
+                task.metadata["classifier_confidence"] = "high"
+                task.metadata["classifier_reason"] = classified.reason
+                task.metadata["final_pipeline_id"] = template.id
+            else:
+                task.pending_gate = "select_pipeline"
+                task.metadata["classifier_pipeline_id"] = classified.pipeline_id
+                task.metadata["classifier_confidence"] = "low"
+                task.metadata["classifier_reason"] = classified.reason
+                task.metadata["classification_allowed_pipelines"] = allowed_pipelines
+        else:
+            task.pending_gate = "select_pipeline"
+            task.metadata["classifier_confidence"] = "failed"
+            task.metadata["classifier_reason"] = "Auto-classification failed."
+            task.metadata["classification_allowed_pipelines"] = allowed_pipelines
+
+        container.tasks.upsert(task)
+        bus.emit(
+            channel="tasks", event_type="task.updated",
+            entity_id=task.id, payload={"status": task.status},
+        )
+    except Exception:
+        _bg_classify_logger.error("Unhandled error in background classification for %s", task_id, exc_info=True)
+        try:
+            container, bus, _ = deps.ctx(project_dir)
+            task = container.tasks.get(task_id)
+            if task and task.pending_gate == "pipeline_classify":
+                task.pending_gate = "select_pipeline"
+                task.metadata["classifier_confidence"] = "failed"
+                task.metadata["classifier_reason"] = "Auto-classification failed."
+                task.metadata["classification_allowed_pipelines"] = allowed_pipelines
+                container.tasks.upsert(task)
+                bus.emit(
+                    channel="tasks", event_type="task.updated",
+                    entity_id=task.id, payload={"status": task.status},
+                )
+        except Exception:
+            _bg_classify_logger.error("Failed to recover task %s after classification error", task_id, exc_info=True)
+
+
 def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
     """Register task, planning, execution, and logs routes."""
     @router.post("/tasks")
@@ -1137,13 +1227,14 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         classifier_confidence_valid = classifier_confidence in {"high", "low"}
         requested_task_type = str(body.task_type or "feature").strip() or "feature"
 
+        needs_background_classification = False
         if requested_task_type == "auto":
-            if classifier_confidence != "high" or not classifier_pipeline_valid:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Auto task type requires a high-confidence classifier result.",
-                )
-            resolved_task_type = _canonical_task_type_for_pipeline(registry, classifier_pipeline_id)
+            if classifier_confidence == "high" and classifier_pipeline_valid:
+                resolved_task_type = _canonical_task_type_for_pipeline(registry, classifier_pipeline_id)
+            else:
+                # Defer classification to background — use feature as placeholder
+                resolved_task_type = "feature"
+                needs_background_classification = True
         else:
             resolved_task_type = requested_task_type
 
@@ -1190,6 +1281,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             task.metadata["classifier_reason"] = classifier_reason
             task.metadata["was_user_override"] = bool(body.was_user_override)
         task.metadata["final_pipeline_id"] = final_pipeline_id
+        if needs_background_classification:
+            task.pending_gate = "pipeline_classify"
         requested_status = str(body.status or "").strip()
         valid_statuses = {"backlog", "queued", "in_progress", "in_review", "done", "blocked", "cancelled"}
         if requested_status in valid_statuses:
@@ -1205,6 +1298,10 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 container.tasks.upsert(parent)
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.created", entity_id=task.id, payload={"status": task.status})
+        if needs_background_classification:
+            asyncio.ensure_future(_run_background_classification(
+                task.id, project_dir, allowed_pipelines, deps,
+            ))
         return {"task": _task_payload(task, orchestrator=orchestrator)}
 
     @router.post("/tasks/classify-pipeline", response_model=PipelineClassificationResponse)
@@ -1252,6 +1349,38 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             registry=registry,
         )
 
+    @router.post("/tasks/{task_id}/select-pipeline")
+    async def select_pipeline(
+        task_id: str,
+        body: SelectPipelineRequest,
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        """Manually select a pipeline for a task awaiting classification."""
+        container, bus, orchestrator = deps.ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if task.pending_gate != "select_pipeline":
+            raise HTTPException(400, "Task is not awaiting pipeline selection")
+        registry = PipelineRegistry()
+        allowed = sorted(t.id for t in registry.list_templates())
+        if body.pipeline_id not in allowed:
+            raise HTTPException(400, f"Unknown pipeline: {body.pipeline_id}")
+        resolved_type = _canonical_task_type_for_pipeline(registry, body.pipeline_id)
+        template = registry.resolve_for_task_type(resolved_type)
+        task.task_type = resolved_type
+        task.pipeline_template = template.step_names()
+        task.pending_gate = None
+        task.metadata["final_pipeline_id"] = template.id
+        task.metadata["was_user_override"] = True
+        task.metadata.pop("classification_allowed_pipelines", None)
+        container.tasks.upsert(task)
+        bus.emit(
+            channel="tasks", event_type="task.updated",
+            entity_id=task.id, payload={"status": task.status},
+        )
+        return {"task": _task_payload(task, orchestrator=orchestrator)}
+
     @router.get("/tasks")
     async def list_tasks(
         project_dir: Optional[str] = Query(None),
@@ -1260,7 +1389,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         priority: Optional[str] = Query(None),
     ) -> dict[str, Any]:
         """List tasks filtered by lifecycle, type, or priority.
-        
+
         Args:
             project_dir: Optional project directory used to resolve runtime state.
             status: Optional status filter.

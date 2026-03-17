@@ -138,7 +138,6 @@ class OrchestratorService:
         "before_implement": "implement",
         "before_generate_tasks": "generate_tasks",
         "before_done": _BEFORE_DONE_RESUME_STEP,
-        "after_implement": "review",
         "before_commit": "commit",
     }
     _HUMAN_INTERVENTION_GATE = "human_intervention"

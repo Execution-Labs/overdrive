@@ -240,6 +240,14 @@ Notes:
 ### `POST /api/tasks/{task_id}/run`
 Queue/execute a task through the orchestrator.
 
+### `POST /api/tasks/{task_id}/select-pipeline`
+Manually select a pipeline for a task awaiting classification.
+
+Request:
+- `pipeline_id` — the pipeline to assign.
+
+Returns 400 if `pending_gate` is not `select_pipeline` or `pipeline_id` is invalid.
+
 ### `POST /api/tasks/{task_id}/retry`
 Reset task for another run.
 

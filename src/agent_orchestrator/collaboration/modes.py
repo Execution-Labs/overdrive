@@ -31,7 +31,6 @@ class ModeConfig:
     approve_before_generate_tasks: bool = False
     approve_before_commit: bool = False
     approve_before_done: bool = False
-    approve_after_implement: bool = False
 
     # Whether agent can proceed without human presence
     allow_unattended: bool = True
@@ -54,7 +53,6 @@ class ModeConfig:
             "approve_before_generate_tasks": self.approve_before_generate_tasks,
             "approve_before_commit": self.approve_before_commit,
             "approve_before_done": self.approve_before_done,
-            "approve_after_implement": self.approve_after_implement,
             "allow_unattended": self.allow_unattended,
             "require_reasoning": self.require_reasoning,
         }
@@ -80,7 +78,6 @@ MODE_CONFIGS: dict[str, ModeConfig] = {
         approve_before_plan=False,
         approve_before_implement=True,
         approve_before_generate_tasks=True,
-        approve_after_implement=False,
         approve_before_commit=True,
         approve_before_done=True,
         allow_unattended=False,
@@ -91,7 +88,6 @@ MODE_CONFIGS: dict[str, ModeConfig] = {
         mode=HITLMode.REVIEW_ONLY,
         display_name="Review Only",
         description="Skip plan approval. Review implementation before commit.",
-        approve_after_implement=False,
         approve_before_commit=True,
         approve_before_done=True,
         allow_unattended=True,
@@ -133,7 +129,7 @@ def should_gate(mode: str, gate_name: str) -> bool:
             ``autopilot`` defaults via :func:`get_mode_config`.
         gate_name (str): Gate name to evaluate. Supported values are
             ``before_plan``, ``before_implement``, ``before_generate_tasks``,
-            ``before_commit``, ``before_done``, and ``after_implement``.
+            ``before_commit``, and ``before_done``.
 
     Returns:
         bool: ``True`` when the mode requires the named gate, otherwise
@@ -146,6 +142,5 @@ def should_gate(mode: str, gate_name: str) -> bool:
         "before_generate_tasks": config.approve_before_generate_tasks,
         "before_commit": config.approve_before_commit,
         "before_done": config.approve_before_done,
-        "after_implement": config.approve_after_implement,
     }
     return mapping.get(gate_name, False)
