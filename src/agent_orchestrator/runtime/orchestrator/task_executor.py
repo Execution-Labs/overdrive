@@ -372,8 +372,9 @@ class TaskExecutor:
         """Post generated review comments and optional review decision.
 
         Reads generated comments from the ``pr_review_comment`` worker step
-        output in ``task.metadata["step_outputs"]``. Respects the ``dry_run``
-        flag.
+        output in ``task.metadata["step_outputs"]``. Respects the
+        ``comment_dry_run`` flag (defaults to ``True`` for safe-by-default
+        behavior).
 
         Returns:
             ``"ok"`` on success or dry_run, ``"blocked"`` on total failure.
@@ -413,7 +414,7 @@ class TaskExecutor:
             svc._emit_task_blocked(task)
             return "blocked"
 
-        dry_run = bool(meta.get("dry_run", False))
+        dry_run = bool(meta.get("comment_dry_run", True))
         git_dir = svc._step_project_dir(task)
         posted_count = 0
         failed_count = 0
@@ -425,16 +426,29 @@ class TaskExecutor:
                 generated_comments,
                 git_dir=git_dir,
             )
-            for r in post_results:
-                results.append(r.to_dict())
+            for idx, r in enumerate(post_results):
+                status = "posted" if r.success else "failed"
+                result_dict = r.to_dict()
+                result_dict["post_status"] = status
+                # Attach comment data for workdoc rendering.
+                if idx < len(generated_comments):
+                    comment = generated_comments[idx]
+                    result_dict["_comment_body"] = str(comment.get("body", ""))[:200]
+                    result_dict["_comment_path"] = comment.get("path", "")
+                    result_dict["_comment_line"] = comment.get("line")
+                results.append(result_dict)
                 if r.success:
                     posted_count += 1
                 else:
                     failed_count += 1
-        elif dry_run:
-            # Dry run: record comments without posting.
+        else:
+            # Dry run (default) or no comments: record without posting.
             for comment in generated_comments:
-                results.append(CommentPostResult(success=True, platform_id="dry_run").to_dict())
+                result_dict = CommentPostResult(success=True, platform_id="dry_run", post_status="staged").to_dict()
+                result_dict["_comment_body"] = str(comment.get("body", ""))[:200]
+                result_dict["_comment_path"] = comment.get("path", "")
+                result_dict["_comment_line"] = comment.get("line")
+                results.append(result_dict)
                 posted_count += 1
 
         task.metadata["posted_comments"] = results
@@ -473,12 +487,11 @@ class TaskExecutor:
                 decision_result = CommentPostResult(success=False, error=str(exc)).to_dict()
                 task.metadata["review_decision_result"] = decision_result
 
-        # Write summary to workdoc.
-        self._append_comment_summary_to_workdoc(
+        # Write structured comments to workdoc.
+        self._write_generated_comments_to_workdoc(
             task,
-            heading="## Posted Comments",
-            posted_count=posted_count,
-            failed_count=failed_count,
+            heading="## Generated Comments",
+            results=results,
             dry_run=dry_run,
             decision_result=decision_result,
         )
@@ -492,7 +505,7 @@ class TaskExecutor:
             "started_at": step_started,
             "posted_count": posted_count,
             "failed_count": failed_count,
-            "dry_run": dry_run,
+            "comment_dry_run": dry_run,
         }
 
         # Total failure: no comments posted and we had comments to post.
@@ -510,14 +523,14 @@ class TaskExecutor:
         svc.container.runs.upsert(run)
 
         logger.info(
-            "post_comments: task %s posted=%d failed=%d dry_run=%s",
+            "post_comments: task %s posted=%d failed=%d comment_dry_run=%s",
             task.id, posted_count, failed_count, dry_run,
         )
         svc.bus.emit(
             channel="tasks",
             event_type="task.step_completed",
             entity_id=task.id,
-            payload={"step": "post_comments", "posted_count": posted_count, "failed_count": failed_count, "dry_run": dry_run},
+            payload={"step": "post_comments", "posted_count": posted_count, "failed_count": failed_count, "comment_dry_run": dry_run},
         )
         return "ok"
 
@@ -575,7 +588,7 @@ class TaskExecutor:
                 if cid and pid:
                     id_to_platform[cid] = pid
 
-        dry_run = bool(meta.get("dry_run", False))
+        dry_run = bool(meta.get("comment_dry_run", True))
         git_dir = svc._step_project_dir(task)
         posted_count = 0
         failed_count = 0
@@ -599,7 +612,10 @@ class TaskExecutor:
                 )
 
             if dry_run:
-                results.append(CommentPostResult(success=True, platform_id="dry_run").to_dict())
+                result_dict = CommentPostResult(success=True, platform_id="dry_run", post_status="staged").to_dict()
+                result_dict["_comment_body"] = response_body[:200]
+                result_dict["_original_comment_id"] = original_id
+                results.append(result_dict)
                 posted_count += 1
                 continue
 
@@ -614,7 +630,12 @@ class TaskExecutor:
                 git_dir=git_dir,
             )
             r = batch_results[0] if batch_results else CommentPostResult(success=False, error="No result")
-            results.append(r.to_dict())
+            status = "posted" if r.success else "failed"
+            result_dict = r.to_dict()
+            result_dict["post_status"] = status
+            result_dict["_comment_body"] = response_body[:200]
+            result_dict["_original_comment_id"] = original_id
+            results.append(result_dict)
             if r.success:
                 posted_count += 1
             else:
@@ -622,14 +643,12 @@ class TaskExecutor:
 
         task.metadata["posted_responses"] = results
 
-        # Write summary to workdoc.
-        self._append_comment_summary_to_workdoc(
+        # Write structured comments to workdoc.
+        self._write_generated_comments_to_workdoc(
             task,
-            heading="## Posted Comment Responses",
-            posted_count=posted_count,
-            failed_count=failed_count,
+            heading="## Generated Comment Responses",
+            results=results,
             dry_run=dry_run,
-            skipped_count=skipped_count,
         )
 
         svc.container.tasks.upsert(task)
@@ -642,7 +661,7 @@ class TaskExecutor:
             "posted_count": posted_count,
             "failed_count": failed_count,
             "skipped_count": skipped_count,
-            "dry_run": dry_run,
+            "comment_dry_run": dry_run,
         }
 
         # Total failure: no responses posted and we had responses to post.
@@ -661,57 +680,137 @@ class TaskExecutor:
         svc.container.runs.upsert(run)
 
         logger.info(
-            "post_comment_responses: task %s posted=%d failed=%d skipped=%d dry_run=%s",
+            "post_comment_responses: task %s posted=%d failed=%d skipped=%d comment_dry_run=%s",
             task.id, posted_count, failed_count, skipped_count, dry_run,
         )
         svc.bus.emit(
             channel="tasks",
             event_type="task.step_completed",
             entity_id=task.id,
-            payload={"step": "post_comment_responses", "posted_count": posted_count, "failed_count": failed_count, "dry_run": dry_run},
+            payload={"step": "post_comment_responses", "posted_count": posted_count, "failed_count": failed_count, "comment_dry_run": dry_run},
         )
         return "ok"
 
-    def _append_comment_summary_to_workdoc(
+    def _write_generated_comments_to_workdoc(
         self,
         task: Task,
         *,
         heading: str,
-        posted_count: int,
-        failed_count: int,
+        results: list[dict[str, Any]],
         dry_run: bool,
         decision_result: dict[str, Any] | None = None,
-        skipped_count: int = 0,
     ) -> None:
-        """Append a comment posting summary to the task workdoc."""
+        """Write a structured generated-comments section to the task workdoc.
+
+        Each comment entry shows its body preview, file/line info, and post
+        status badge (``staged``, ``posted``, or ``failed``).  On re-run the
+        existing section with the same *heading* is replaced rather than
+        duplicated.
+
+        Args:
+            task: The task owning the workdoc.
+            heading: Markdown heading for the section (e.g. ``## Generated Comments``).
+            results: List of result dicts (from ``CommentPostResult.to_dict()``
+                with extra ``_comment_body``, ``_comment_path``, ``_comment_line``,
+                and optionally ``_original_comment_id`` keys).
+            dry_run: Whether this was a dry-run execution.
+            decision_result: Optional review-decision result dict.
+        """
         svc = self._service
         canonical = svc._workdoc_canonical_path(task.id)
         if not canonical.exists():
             return
 
-        lines = [f"{heading}\n"]
+        lines: list[str] = [f"{heading}\n"]
         if dry_run:
-            lines.append(f"**Mode:** dry run (no comments posted)\n")
-        lines.append(f"- Posted: {posted_count}\n")
-        if failed_count:
-            lines.append(f"- Failed: {failed_count}\n")
-        if skipped_count:
-            lines.append(f"- Skipped: {skipped_count}\n")
+            lines.append("**Mode:** dry run \u2014 comments staged for review\n\n")
+        else:
+            lines.append("**Mode:** live \u2014 comments posted\n\n")
+
+        staged_count = 0
+        posted_count = 0
+        failed_count = 0
+
+        for idx, result in enumerate(results, start=1):
+            status = str(result.get("post_status", "staged"))
+            if status == "staged":
+                staged_count += 1
+            elif status == "posted":
+                posted_count += 1
+            else:
+                failed_count += 1
+
+            lines.append(f"### Comment {idx} \u00b7 `{status}`\n")
+
+            # File/line info.
+            path = result.get("_comment_path", "")
+            line_num = result.get("_comment_line")
+            if path:
+                loc = f"`{path}`"
+                if line_num is not None:
+                    loc += f" L{line_num}"
+                lines.append(f"**File:** {loc}\n")
+
+            # Original comment reference (for responses).
+            orig_id = result.get("_original_comment_id")
+            if orig_id:
+                lines.append(f"**In reply to:** `{orig_id}`\n")
+
+            # Body preview.
+            body = str(result.get("_comment_body", ""))
+            if body:
+                preview = body[:200]
+                if len(body) > 200:
+                    preview += "\u2026"
+                lines.append(f"> {preview}\n")
+
+            # Error info for failed comments.
+            error = result.get("error")
+            if status == "failed" and error:
+                lines.append(f"**Error:** {error}\n")
+
+            lines.append("\n")
+
+        # Decision result.
         if decision_result:
             success = "succeeded" if decision_result.get("success") else "failed"
-            lines.append(f"- Review decision: {success}\n")
+            lines.append(f"**Review decision:** {success}\n\n")
+
+        # Summary line.
+        parts: list[str] = []
+        if staged_count:
+            parts.append(f"{staged_count} staged")
+        if posted_count:
+            parts.append(f"{posted_count} posted")
+        if failed_count:
+            parts.append(f"{failed_count} failed")
+        lines.append(f"---\n**Summary:** {', '.join(parts) if parts else '0 comments'}\n")
 
         summary_block = "".join(lines)
 
         try:
             content = canonical.read_text(encoding="utf-8")
-            # Append before the Implementation Log section if it exists.
-            log_marker = "## Implementation Log"
-            idx = content.find(log_marker)
-            if idx != -1:
-                updated = content[:idx] + summary_block + "\n" + content[idx:]
+
+            # Replace existing section with same heading on re-run.
+            section_start = content.find(heading)
+            if section_start != -1:
+                # Find the end of this section: next H2 heading or end of file.
+                rest = content[section_start + len(heading):]
+                next_h2 = re.search(r"^## ", rest, re.MULTILINE)
+                if next_h2:
+                    section_end = section_start + len(heading) + next_h2.start()
+                else:
+                    section_end = len(content)
+                updated = content[:section_start] + summary_block + "\n" + content[section_end:]
             else:
-                updated = content.rstrip() + "\n\n" + summary_block
+                # Insert before Implementation Log if it exists.
+                log_marker = "## Implementation Log"
+                idx = content.find(log_marker)
+                if idx != -1:
+                    updated = content[:idx] + summary_block + "\n" + content[idx:]
+                else:
+                    updated = content.rstrip() + "\n\n" + summary_block
+
             canonical.write_text(updated, encoding="utf-8")
         except OSError as exc:
             logger.warning("Failed to update workdoc for task %s: %s", task.id, exc)

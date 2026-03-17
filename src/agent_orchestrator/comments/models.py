@@ -111,6 +111,7 @@ class CommentPostResult:
     success: bool = False
     platform_id: str = ""
     error: Optional[str] = None
+    post_status: str = "staged"  # "staged" | "posted" | "failed"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the result to a plain dictionary.
@@ -134,4 +135,5 @@ class CommentPostResult:
             success=bool(data.get("success", False)),
             platform_id=str(data.get("platform_id") or ""),
             error=(str(data.get("error")) if data.get("error") is not None else None),
+            post_status=str(data.get("post_status") or "staged"),
         )
