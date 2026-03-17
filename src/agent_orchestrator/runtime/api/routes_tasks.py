@@ -3730,3 +3730,110 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         container.tasks.upsert(review_task)
         bus.emit(channel="tasks", event_type="task.created", entity_id=review_task.id, payload={"status": review_task.status})
         return {"task": _task_payload(review_task, orchestrator=orchestrator)}
+
+    @router.post("/tasks/{task_id}/post-review-comments")
+    async def post_review_comments(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Publish review comments that were previously generated in dry-run mode.
+
+        Args:
+            task_id: ID of the task whose dry-run comments should be posted.
+            project_dir: Optional project directory used to resolve runtime state.
+
+        Returns:
+            Summary of posted/failed counts and per-comment results.
+
+        Raises:
+            HTTPException: 404 if task not found, 409 if not a dry-run task or
+                no generated comments exist.
+        """
+        from ...comments.models import CommentPostResult
+        from ...comments.writer import (
+            post_comments_batch,
+            post_mr_review_decision,
+            post_pr_review_decision,
+        )
+
+        container, bus, orchestrator = deps.ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        meta = task.metadata if isinstance(task.metadata, dict) else {}
+        if not meta.get("comment_dry_run"):
+            raise HTTPException(status_code=409, detail="Task is not a dry-run review task")
+
+        generated_comments = meta.get("generated_review_comments")
+        if not isinstance(generated_comments, list) or len(generated_comments) == 0:
+            raise HTTPException(status_code=409, detail="No generated review comments to post")
+
+        platform_info = meta.get("comment_platform")
+        if not isinstance(platform_info, dict) or not platform_info.get("platform"):
+            raise HTTPException(status_code=409, detail="Missing comment platform info")
+
+        git_dir = Path(orchestrator._step_project_dir(task))
+
+        post_results = post_comments_batch(
+            platform_info,
+            generated_comments,
+            git_dir=git_dir,
+        )
+
+        results: list[dict[str, Any]] = []
+        posted_count = 0
+        failed_count = 0
+        for r in post_results:
+            results.append(r.to_dict())
+            if r.success:
+                posted_count += 1
+            else:
+                failed_count += 1
+
+        task.metadata["posted_comments"] = results
+        task.metadata["comment_dry_run"] = False
+
+        # Post review decision if present and not yet posted.
+        review_decision_raw = meta.get("review_decision")
+        if isinstance(review_decision_raw, dict):
+            decision_type = str(review_decision_raw.get("decision") or "comment")
+            decision_body = str(review_decision_raw.get("body") or "")
+            platform = str(platform_info.get("platform", ""))
+            try:
+                if platform == "github":
+                    dr = post_pr_review_decision(
+                        str(platform_info["owner"]),
+                        str(platform_info["repo"]),
+                        int(platform_info["number"]),
+                        decision=decision_type,  # type: ignore[arg-type]
+                        body=decision_body,
+                        git_dir=git_dir,
+                    )
+                elif platform == "gitlab":
+                    dr = post_mr_review_decision(
+                        str(platform_info["project_id"]),
+                        int(platform_info["number"]),
+                        decision=decision_type,  # type: ignore[arg-type]
+                        body=decision_body,
+                        cwd=git_dir,
+                    )
+                else:
+                    dr = CommentPostResult(success=False, error=f"Unsupported platform: {platform}")
+                task.metadata["review_decision_result"] = dr.to_dict()
+            except Exception as exc:
+                task.metadata["review_decision_result"] = CommentPostResult(
+                    success=False, error=str(exc),
+                ).to_dict()
+
+        container.tasks.upsert(task)
+        bus.emit(
+            channel="tasks",
+            event_type="task.updated",
+            entity_id=task.id,
+            payload={"posted_count": posted_count, "failed_count": failed_count},
+        )
+
+        return {
+            "posted_count": posted_count,
+            "failed_count": failed_count,
+            "results": results,
+            "task": _task_payload(task, container, orchestrator),
+        }

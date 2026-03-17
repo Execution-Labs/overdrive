@@ -6,7 +6,7 @@ import HITLModeSelector from './components/HITLModeSelector/HITLModeSelector'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { humanizeLabel } from './ui/labels'
-import { ReviewMode, ReviewDecisionType, REVIEW_MODE_OPTIONS, COMMENT_POSTING_MODES, REVIEW_DECISION_OPTIONS } from './types/review'
+import { ReviewMode, ReviewDecisionType, REVIEW_MODE_OPTIONS, REVIEW_MODE_LABELS, COMMENT_POSTING_MODES, REVIEW_DECISION_OPTIONS } from './types/review'
 import './styles/orchestrator.css'
 
 type ThemeMode = 'light' | 'dark' | 'system'
@@ -24,7 +24,7 @@ type PullRequestItem = {
   review_task_id: string | null
 }
 type TaskDetailTab = 'overview' | 'plan' | 'workdoc' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
-type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate' | 'review_commit' | 'queue-backlog' | 'generate_follow_ups'
+type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate' | 'review_commit' | 'queue-backlog' | 'generate_follow_ups' | 'post_review_comments'
 type GeneratedTaskStatus = 'backlog' | 'queued'
 type GeneratedTaskHitlSelection = 'inherit_parent' | 'autopilot' | 'supervised' | 'review_only'
 
@@ -4532,6 +4532,23 @@ export default function App() {
     )
   }
 
+  async function postReviewComments(taskId: string): Promise<void> {
+    await runTaskMutation(
+      'post_review_comments',
+      async () => {
+        await requestJson<{ posted_count: number; failed_count: number }>(
+          buildApiUrl(`/api/tasks/${taskId}/post-review-comments`, projectDir),
+          { method: 'POST' },
+        )
+        await loadTaskDetail(taskId)
+      },
+      {
+        successMessage: 'Review comments posted.',
+        errorPrefix: 'Failed to post review comments',
+      },
+    )
+  }
+
   async function skipToPrecommit(taskId: string): Promise<void> {
     await runTaskMutation(
       'transition',
@@ -4952,7 +4969,7 @@ export default function App() {
   const taskDetailContent = selectedTaskView ? (
       <div className="detail-card">
         {selectedTaskDetailLoading ? <p className="field-label">Loading full task detail...</p> : null}
-        <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {humanizeLabel(normalizeHitlMode(selectedTaskView.hitl_mode || 'supervised'))} · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}{(() => { const ch = selectedTaskView.execution_summary?.steps?.map(s => s.commit).filter(Boolean).pop(); return ch ? <>{' · '}<span className="execution-step-commit" title={`Click to copy: ${ch}`} onClick={(e) => { e.stopPropagation(); void navigator.clipboard.writeText(ch) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(ch) } }}>{ch.slice(0, 8)}</span></> : null })()}</p>
+        <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {humanizeLabel(normalizeHitlMode(selectedTaskView.hitl_mode || 'supervised'))} · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}{selectedTaskView.metadata?.review_mode ? <>{' · '}<span className="status-pill status-pill-inline status-review">{REVIEW_MODE_LABELS[selectedTaskView.metadata.review_mode as ReviewMode] || humanizeLabel(String(selectedTaskView.metadata.review_mode))}</span></> : null}{(() => { const ch = selectedTaskView.execution_summary?.steps?.map(s => s.commit).filter(Boolean).pop(); return ch ? <>{' · '}<span className="execution-step-commit" title={`Click to copy: ${ch}`} onClick={(e) => { e.stopPropagation(); void navigator.clipboard.writeText(ch) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(ch) } }}>{ch.slice(0, 8)}</span></> : null })()}</p>
         {selectedTaskTotalSeconds != null ? (
           <p className="task-meta">
             Total time taken: {formatDuration(selectedTaskTotalSeconds) || '0s'}
@@ -5132,6 +5149,41 @@ export default function App() {
                 </div>
               )
             })() : null}
+            {(() => {
+              const genComments = selectedTaskView.metadata?.generated_review_comments as Array<{path?: string; line?: number; severity?: string; body?: string}> | undefined
+              const postResults = selectedTaskView.metadata?.posted_comments as Array<{success?: boolean; platform_id?: string; error?: string}> | undefined
+              if (!genComments || genComments.length === 0) return null
+              return (
+                <details className="execution-details-collapse" open>
+                  <summary className="execution-details-toggle">
+                    Generated comments ({genComments.length})
+                  </summary>
+                  <div className="generated-comments-list">
+                    {genComments.map((c, i) => {
+                      const result = postResults?.[i]
+                      return (
+                        <div key={i} className="generated-comment-item">
+                          <p className="generated-comment-location">
+                            <code>{c.path || '(general)'}</code>
+                            {c.line ? <span>:{c.line}</span> : null}
+                            {c.severity ? <span className={`status-pill status-pill-inline severity-${c.severity}`}>{c.severity}</span> : null}
+                            {result ? (
+                              <span className={`status-pill status-pill-inline ${result.success ? 'status-done' : 'status-failed'}`}>
+                                {result.success ? (result.platform_id === 'dry_run' ? 'dry-run' : 'posted') : 'failed'}
+                              </span>
+                            ) : null}
+                          </p>
+                          {result && !result.success && result.error ? (
+                            <p className="generated-comment-error">{result.error}</p>
+                          ) : null}
+                          <RenderedMarkdown content={c.body || ''} className="generated-comment-body" />
+                        </div>
+                      )
+                    })}
+                  </div>
+                </details>
+              )
+            })()}
             {Array.isArray(selectedTaskView.human_review_actions) && selectedTaskView.human_review_actions.length > 0 ? (
               <div className="review-history-box">
                 <p className="review-history-header">Review history</p>
@@ -5929,7 +5981,7 @@ export default function App() {
                         }}
                       >
                         <p className="task-title">{task.title}</p>
-                        {!boardCompact && <p className="task-meta">{task.priority} · {task.id.replace(/^task-/, '')}{task.parent_id ? ' · from plan' : ''}</p>}
+                        {!boardCompact && <p className="task-meta">{task.priority} · {task.id.replace(/^task-/, '')}{task.parent_id ? ' · from plan' : ''}{task.metadata?.review_mode ? <>{' · '}<span className="status-pill status-pill-inline status-review">{REVIEW_MODE_LABELS[task.metadata.review_mode as ReviewMode] || humanizeLabel(String(task.metadata.review_mode))}</span></> : null}</p>}
                         {!boardCompact && waitingLabel ? (
                           <p className="task-meta">
                             <span className={`status-pill status-pill-inline status-pill-no-offset ${waitingKind === 'intervention_wait' ? 'status-blocked' : 'status-review'}`}>{waitingLabel}</span>
@@ -7242,6 +7294,12 @@ export default function App() {
                 ) : null}
                 {taskStatus === 'done' && selectedTaskView.execution_summary?.steps.some((s) => s.commit) ? (
                   <button className="button" onClick={() => void reviewCommit(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'review_commit' ? 'Creating...' : 'Review Commit'}</button>
+                ) : null}
+                {selectedTaskView.metadata?.comment_dry_run &&
+                 Array.isArray(selectedTaskView.metadata?.generated_review_comments) &&
+                 (selectedTaskView.metadata.generated_review_comments as unknown[]).length > 0 &&
+                 (taskStatus === 'done' || taskStatus === 'in_review') ? (
+                  <button className="button button-primary" onClick={() => void postReviewComments(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'post_review_comments' ? 'Posting...' : 'Post Comments'}</button>
                 ) : null}
                 {taskSupportsPostCompletionGeneration(selectedTaskView) ? (
                   <button className="button button-primary" onClick={() => void generateFollowUpTasks(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'generate_follow_ups' ? 'Generating...' : 'Generate Follow-Up Tasks'}</button>
