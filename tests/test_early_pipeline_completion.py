@@ -346,6 +346,7 @@ def test_early_complete_steps_membership() -> None:
     assert _EARLY_COMPLETE_STEPS == {
         "commit_review", "pr_review", "mr_review",
         "diagnose", "scan_code", "profile",
+        "pr_review_comment", "pr_review_summarize",
     }
 
 
