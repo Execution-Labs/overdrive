@@ -25,48 +25,26 @@ class TestDomainTypes:
 
 
 class TestCreatePullRequestReviewRequestDefaults:
-    """Default values preserve backward compatibility."""
+    """Default values for the simplified creation request."""
 
     def test_defaults(self) -> None:
         req = CreatePullRequestReviewRequest()
         assert req.guidance == ""
         assert req.review_mode == "fix_only"
-        assert req.review_decision is None
 
-    def test_backward_compat_guidance_only(self) -> None:
+    def test_with_guidance(self) -> None:
         req = CreatePullRequestReviewRequest(guidance="please review carefully")
         assert req.guidance == "please review carefully"
         assert req.review_mode == "fix_only"
-        assert req.review_decision is None
 
 
 class TestValidModes:
-    """All review modes accept without review_decision."""
+    """All review modes are accepted (review_decision moved to gate)."""
 
     @pytest.mark.parametrize("mode", ["review_comment", "summarize", "fix_only", "fix_respond"])
-    def test_valid_mode_no_decision(self, mode: str) -> None:
+    def test_valid_mode(self, mode: str) -> None:
         req = CreatePullRequestReviewRequest(review_mode=mode)
         assert req.review_mode == mode
-        assert req.review_decision is None
-
-
-class TestReviewCommentWithDecision:
-    """review_comment mode accepts all valid decision types."""
-
-    @pytest.mark.parametrize("decision", ["approve", "request_changes", "comment"])
-    def test_review_comment_with_decision(self, decision: str) -> None:
-        req = CreatePullRequestReviewRequest(review_mode="review_comment", review_decision=decision)
-        assert req.review_mode == "review_comment"
-        assert req.review_decision == decision
-
-
-class TestDecisionRejectedForNonReviewComment:
-    """review_decision is rejected when mode is not review_comment."""
-
-    @pytest.mark.parametrize("mode", ["summarize", "fix_only", "fix_respond"])
-    def test_decision_rejected(self, mode: str) -> None:
-        with pytest.raises(ValidationError, match="review_decision is only valid when review_mode is 'review_comment'"):
-            CreatePullRequestReviewRequest(review_mode=mode, review_decision="approve")
 
 
 class TestInvalidValues:
@@ -76,6 +54,11 @@ class TestInvalidValues:
         with pytest.raises(ValidationError):
             CreatePullRequestReviewRequest(review_mode="invalid")
 
-    def test_invalid_review_decision(self) -> None:
-        with pytest.raises(ValidationError):
-            CreatePullRequestReviewRequest(review_mode="review_comment", review_decision="reject")
+    def test_unknown_fields_ignored(self) -> None:
+        """review_decision is no longer a field — extra fields are silently ignored."""
+        req = CreatePullRequestReviewRequest(
+            review_mode="review_comment",
+            review_decision="approve",  # type: ignore[call-arg]
+        )
+        assert req.review_mode == "review_comment"
+        assert not hasattr(req, "review_decision")

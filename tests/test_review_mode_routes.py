@@ -137,10 +137,7 @@ class TestModeMapping:
             patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
             patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
         ):
-            body: dict[str, Any] = {"review_mode": mode}
-            if mode == "review_comment":
-                body["review_decision"] = "approve"
-            resp = client.post("/api/pull-requests/42/review", json=body)
+            resp = client.post("/api/pull-requests/42/review", json={"review_mode": mode})
 
         assert resp.status_code == 200
         task_data = resp.json()["task"]
@@ -157,7 +154,11 @@ class TestModeMapping:
 
 
 class TestMetadataStorage:
-    """Verify review_mode, comment_dry_run, review_decision, and final_pipeline_id are stored."""
+    """Verify review_mode, comment_dry_run, and final_pipeline_id are stored.
+
+    review_decision is no longer set at creation time — it's set at the
+    before_post_review gate after the LLM completes its review.
+    """
 
     def test_metadata_stored_for_fix_only(self, tmp_path: Path):
         client, container = _client_and_container(tmp_path)
@@ -176,7 +177,8 @@ class TestMetadataStorage:
         assert stored.metadata["final_pipeline_id"] == "pr_review_fix_only"
         assert "review_decision" not in stored.metadata
 
-    def test_review_decision_stored_for_review_comment(self, tmp_path: Path):
+    def test_review_comment_no_decision_at_creation(self, tmp_path: Path):
+        """review_comment mode no longer accepts review_decision at creation."""
         client, container = _client_and_container(tmp_path)
         with (
             patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
@@ -184,15 +186,15 @@ class TestMetadataStorage:
         ):
             resp = client.post("/api/pull-requests/42/review", json={
                 "review_mode": "review_comment",
-                "review_decision": "approve",
             })
 
         assert resp.status_code == 200
         stored = container.tasks.get(resp.json()["task"]["id"])
         assert stored is not None
         assert isinstance(stored.metadata, dict)
-        assert stored.metadata["review_decision"] == "approve"
         assert stored.metadata["review_mode"] == "review_comment"
+        assert stored.metadata["comment_dry_run"] is True
+        assert "review_decision" not in stored.metadata
 
     def test_default_review_mode_is_fix_only(self, tmp_path: Path):
         """Calling without review_mode defaults to fix_only."""
@@ -216,19 +218,24 @@ class TestMetadataStorage:
 
 
 class TestValidation:
-    """Pydantic validation for review_decision + review_mode combinations."""
+    """Pydantic validation for creation request."""
 
-    def test_review_decision_with_non_review_comment_mode_rejected(self, tmp_path: Path):
-        client, _ = _client_and_container(tmp_path)
+    def test_unknown_field_ignored(self, tmp_path: Path):
+        """review_decision is silently ignored — Pydantic drops extra fields."""
+        client, container = _client_and_container(tmp_path)
         with (
             patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
             patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
         ):
             resp = client.post("/api/pull-requests/42/review", json={
-                "review_mode": "fix_only",
+                "review_mode": "review_comment",
                 "review_decision": "approve",
             })
-        assert resp.status_code == 422
+        assert resp.status_code == 200
+        stored = container.tasks.get(resp.json()["task"]["id"])
+        assert stored is not None
+        # review_decision should NOT be stored at creation time
+        assert "review_decision" not in (stored.metadata or {})
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +254,6 @@ class TestCommentFetching:
         ):
             resp = client.post("/api/pull-requests/42/review", json={
                 "review_mode": "review_comment",
-                "review_decision": "comment",
             })
 
         assert resp.status_code == 200
@@ -315,15 +321,11 @@ class TestCommentFetching:
     @pytest.mark.parametrize("mode", sorted(_MODES_NEEDING_COMMENTS))
     def test_all_comment_modes_store_source_comments(self, tmp_path: Path, mode: str):
         client, container = _client_and_container(tmp_path)
-        body: dict[str, Any] = {"review_mode": mode}
-        if mode == "review_comment":
-            body["review_decision"] = "comment"
-
         with (
             patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
             patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
         ):
-            resp = client.post("/api/pull-requests/42/review", json=body)
+            resp = client.post("/api/pull-requests/42/review", json={"review_mode": mode})
 
         assert resp.status_code == 200
         stored = container.tasks.get(resp.json()["task"]["id"])
@@ -355,15 +357,11 @@ class TestGitLabModeRestriction:
     @pytest.mark.parametrize("mode", ["review_comment", "summarize", "fix_respond"])
     def test_gitlab_non_fix_only_returns_400(self, tmp_path: Path, mode: str):
         client, _ = _client_and_container(tmp_path)
-        body: dict[str, Any] = {"review_mode": mode}
-        if mode == "review_comment":
-            body["review_decision"] = "comment"
-
         with (
             patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/glab"),
             patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_gitlab),
         ):
-            resp = client.post("/api/pull-requests/15/review", json=body)
+            resp = client.post("/api/pull-requests/15/review", json={"review_mode": mode})
 
         assert resp.status_code == 400
         assert "not yet supported" in resp.json()["detail"]
@@ -390,7 +388,6 @@ class TestDuplicateCheckModeSpecific:
 
             resp2 = client.post("/api/pull-requests/42/review", json={
                 "review_mode": "review_comment",
-                "review_decision": "comment",
             })
             assert resp2.status_code == 200
 
