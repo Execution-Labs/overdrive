@@ -943,6 +943,15 @@ class TaskExecutor:
                     task.metadata.pop("worktree_dir", None)
                     task.metadata.pop("task_context", None)
                     svc._run_summarize_step(task, run, gate_context="pre_commit")
+                    # Ensure a summary step exists so the frontend doesn't
+                    # fall back to the stale plan-gate summary.
+                    if not (run.steps and isinstance(run.steps[-1], dict) and run.steps[-1].get("step") == "summary"):
+                        run.steps.append({
+                            "step": "summary",
+                            "status": "ok",
+                            "ts": now_iso(),
+                            "summary": "Implementation completed. Awaiting pre-commit approval.",
+                        })
                     task.status = "in_review"
                     task.current_step = "review"
                     task.metadata["pipeline_phase"] = "review"
