@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Optional, cast
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from ...collaboration.modes import normalize_hitl_mode
 from ...pipelines.registry import PipelineRegistry
@@ -25,6 +25,8 @@ from ..orchestrator.human_guidance import (
 from ..domain.models import (
     DependencyPolicy,
     Priority,
+    ReviewDecisionType,
+    ReviewMode,
     Task,
     TaskStatus,
     now_iso,
@@ -71,6 +73,16 @@ class CreatePullRequestReviewRequest(BaseModel):
     """Request body for creating a pull request review task."""
 
     guidance: str = ""
+    review_mode: ReviewMode = "fix_only"
+    review_decision: Optional[ReviewDecisionType] = None
+
+    @model_validator(mode="after")
+    def _validate_review_decision(self) -> "CreatePullRequestReviewRequest":
+        if self.review_decision is not None and self.review_mode != "review_comment":
+            raise ValueError(
+                "review_decision is only valid when review_mode is 'review_comment'"
+            )
+        return self
 
 
 _CHANGES_TELEMETRY_RECENT: dict[tuple[str, str, str, str], float] = {}

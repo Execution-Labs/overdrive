@@ -32,6 +32,11 @@ _VALID_PLAN_REVISION_SOURCES = {"worker_plan", "worker_refine", "human_edit", "i
 _VALID_PLAN_REVISION_STATUSES = {"draft", "committed"}
 _VALID_PLAN_REFINE_JOB_STATUSES = {"queued", "running", "completed", "failed", "cancelled"}
 
+ReviewMode = Literal["review_comment", "summarize", "fix_only", "fix_respond"]
+ReviewDecisionType = Literal["approve", "request_changes", "comment"]
+_VALID_REVIEW_MODES = {"review_comment", "summarize", "fix_only", "fix_respond"}
+_VALID_REVIEW_DECISION_TYPES = {"approve", "request_changes", "comment"}
+
 
 def now_iso() -> str:
     """Get the current UTC timestamp formatted as ISO-8601 text.
