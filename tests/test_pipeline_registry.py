@@ -17,6 +17,8 @@ class TestPipelineTemplate:
             "feature", "bug_fix", "refactor", "research", "docs",
             "test", "repo_review", "security_audit", "review", "commit_review",
             "pr_review", "mr_review",
+            "pr_review_comment", "pr_review_summarize",
+            "pr_review_fix_only", "pr_review_fix_respond",
             "performance", "hotfix", "spike", "chore", "plan_only", "verify_only",
         }
         assert expected == set(BUILTIN_TEMPLATES.keys())
@@ -76,6 +78,50 @@ class TestPipelineTemplate:
         assert tmpl.task_types == ("mr_review",)
         assert tmpl.metadata.get("supports_skip_to_precommit") is True
 
+    def test_pr_review_comment_pipeline_steps(self):
+        """Test that PR review comment pipeline has fetch, review, post sequence."""
+        tmpl = BUILTIN_TEMPLATES["pr_review_comment"]
+        assert tmpl.step_names() == ["fetch_comments", "pr_review_comment", "post_comments"]
+        assert tmpl.task_types == ("pr_review_comment",)
+
+    def test_pr_review_summarize_pipeline_steps(self):
+        """Test that PR review summarize pipeline has fetch and summarize steps."""
+        tmpl = BUILTIN_TEMPLATES["pr_review_summarize"]
+        assert tmpl.step_names() == ["fetch_comments", "pr_review_summarize"]
+        assert tmpl.task_types == ("pr_review_summarize",)
+
+    def test_pr_review_fix_only_pipeline_steps(self):
+        """Test that PR review fix-only pipeline matches the fix_only step sequence."""
+        tmpl = BUILTIN_TEMPLATES["pr_review_fix_only"]
+        assert tmpl.step_names() == ["pr_review", "implement", "verify", "review", "commit"]
+        assert tmpl.task_types == ("pr_review_fix_only",)
+        assert tmpl.metadata.get("supports_skip_to_precommit") is True
+
+    def test_pr_review_fix_respond_pipeline_steps(self):
+        """Test that PR review fix-and-respond pipeline has the full 7-step sequence."""
+        tmpl = BUILTIN_TEMPLATES["pr_review_fix_respond"]
+        assert tmpl.step_names() == [
+            "fetch_comments", "pr_review_fix_respond", "implement",
+            "verify", "review", "post_comment_responses", "commit",
+        ]
+        assert tmpl.task_types == ("pr_review_fix_respond",)
+        assert tmpl.metadata.get("supports_skip_to_precommit") is True
+
+    def test_pr_review_alias_matches_fix_only(self):
+        """Test that existing pr_review pipeline has same steps as pr_review_fix_only."""
+        assert (
+            BUILTIN_TEMPLATES["pr_review"].step_names()
+            == BUILTIN_TEMPLATES["pr_review_fix_only"].step_names()
+        )
+
+    def test_mr_review_alias_matches_fix_only_pattern(self):
+        """Test that mr_review follows the same fix_only pattern (steps 2-5 identical)."""
+        mr_steps = BUILTIN_TEMPLATES["mr_review"].step_names()
+        fix_only_steps = BUILTIN_TEMPLATES["pr_review_fix_only"].step_names()
+        # First step differs (mr_review vs pr_review), but remaining steps are identical
+        assert mr_steps[1:] == fix_only_steps[1:]
+        assert len(mr_steps) == len(fix_only_steps)
+
     def test_security_audit_maps_security_type(self):
         """Test that security audit maps security type."""
         tmpl = BUILTIN_TEMPLATES["security_audit"]
@@ -103,7 +149,7 @@ class TestPipelineRegistry:
         """Test that list templates."""
         reg = PipelineRegistry()
         templates = reg.list_templates()
-        assert len(templates) == 18
+        assert len(templates) == 22
 
     def test_get_template(self):
         """Test that get template."""
@@ -133,6 +179,14 @@ class TestPipelineRegistry:
         assert reg.resolve_for_task_type("decompose").id == "plan_only"
         assert reg.resolve_for_task_type("pr_review").id == "pr_review"
         assert reg.resolve_for_task_type("mr_review").id == "mr_review"
+
+    def test_resolve_new_review_task_types(self):
+        """Test that all 4 new review task types resolve correctly."""
+        reg = PipelineRegistry()
+        assert reg.resolve_for_task_type("pr_review_comment").id == "pr_review_comment"
+        assert reg.resolve_for_task_type("pr_review_summarize").id == "pr_review_summarize"
+        assert reg.resolve_for_task_type("pr_review_fix_only").id == "pr_review_fix_only"
+        assert reg.resolve_for_task_type("pr_review_fix_respond").id == "pr_review_fix_respond"
 
     def test_resolve_unknown_type_defaults_to_feature(self):
         """Test that resolve unknown type defaults to feature."""
