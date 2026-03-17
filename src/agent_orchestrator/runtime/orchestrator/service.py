@@ -133,6 +133,7 @@ class OrchestratorService:
     }
     _BEFORE_DONE_RESUME_STEP = "__before_done__"
     _DECOMPOSITION_PIPELINES = {"plan_only", "repo_review", "security_audit"}
+    _POST_COMPLETION_GENERATION_PIPELINES = {"research", "review", "spike", "verify_only"}
     _GATE_RESUME_STEP: dict[str, str] = {
         "before_plan": "plan",
         "before_implement": "implement",
@@ -1578,6 +1579,13 @@ class OrchestratorService:
         else:
             steps = []
         return "generate_tasks" in steps
+
+    def supports_post_completion_generation(self, task: Task) -> bool:
+        """Return whether a done task can generate follow-up tasks post-completion."""
+        if task.status != "done":
+            return False
+        pipeline_id = self._pipeline_id_for_task(task)
+        return pipeline_id in self._POST_COMPLETION_GENERATION_PIPELINES
 
     def resolve_task_generation_policy(
         self,
