@@ -3135,8 +3135,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        if not orchestrator.supports_task_generation(task):
-            raise HTTPException(status_code=400, detail="Task pipeline does not include generate_tasks")
+        if not orchestrator.supports_task_generation(task) and not orchestrator.supports_post_completion_generation(task):
+            raise HTTPException(status_code=400, detail="Task does not support task generation")
         source = body.source
         if source is None:
             # Backward compatibility: previous API accepted only optional plan_override.

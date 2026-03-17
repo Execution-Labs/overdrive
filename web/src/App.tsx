@@ -24,7 +24,7 @@ type PullRequestItem = {
   review_task_id: string | null
 }
 type TaskDetailTab = 'overview' | 'plan' | 'workdoc' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
-type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate' | 'review_commit' | 'queue-backlog'
+type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate' | 'review_commit' | 'queue-backlog' | 'generate_follow_ups'
 type GeneratedTaskStatus = 'backlog' | 'queued'
 type GeneratedTaskHitlSelection = 'inherit_parent' | 'autopilot' | 'supervised' | 'review_only'
 
@@ -512,6 +512,16 @@ function taskSupportsGenerateTasks(task: TaskRecord | null | undefined): boolean
   }
   const taskType = String(task.task_type || '').trim()
   return new Set(['initiative_plan', 'plan_only', 'plan', 'decompose', 'repo_review', 'security', 'security_audit']).has(taskType)
+}
+
+const POST_COMPLETION_GENERATION_PIPELINES = new Set(['research', 'review', 'spike', 'verify_only'])
+
+function taskSupportsPostCompletionGeneration(task: TaskRecord | null | undefined): boolean {
+  if (!task) return false
+  if (task.status !== 'done') return false
+  if ((task.children_ids?.length ?? 0) > 0) return false
+  const taskType = String(task.task_type || '').trim()
+  return POST_COMPLETION_GENERATION_PIPELINES.has(taskType)
 }
 
 function resolveTaskGenerationDefaults(
@@ -4502,6 +4512,26 @@ export default function App() {
     )
   }
 
+  async function generateFollowUpTasks(taskId: string): Promise<void> {
+    await runTaskMutation(
+      'generate_follow_ups',
+      async () => {
+        await requestJson<{ task: TaskRecord; created_task_ids: string[]; children: TaskRecord[] }>(
+          buildApiUrl(`/api/tasks/${taskId}/generate-tasks`, projectDir),
+          { method: 'POST', body: JSON.stringify({ source: 'latest' }) },
+        )
+        await reloadAll()
+        if (selectedTaskId === taskId) {
+          await loadTaskDetail(taskId)
+        }
+      },
+      {
+        successMessage: 'Follow-up tasks generated.',
+        errorPrefix: 'Failed to generate follow-up tasks',
+      },
+    )
+  }
+
   async function skipToPrecommit(taskId: string): Promise<void> {
     await runTaskMutation(
       'transition',
@@ -7213,6 +7243,9 @@ export default function App() {
                 {taskStatus === 'done' && selectedTaskView.execution_summary?.steps.some((s) => s.commit) ? (
                   <button className="button" onClick={() => void reviewCommit(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'review_commit' ? 'Creating...' : 'Review Commit'}</button>
                 ) : null}
+                {taskSupportsPostCompletionGeneration(selectedTaskView) ? (
+                  <button className="button button-primary" onClick={() => void generateFollowUpTasks(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'generate_follow_ups' ? 'Generating...' : 'Generate Follow-Up Tasks'}</button>
+                ) : null}
                 {taskStatus === 'done' ? (
                   <button className="button button-danger" onClick={() => void deleteTask(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'delete' ? 'Deleting...' : 'Delete'}</button>
                 ) : null}
@@ -7227,6 +7260,9 @@ export default function App() {
       {contextMenu ? (
         <div className="context-menu" role="menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
           <button role="menuitem" disabled={isTaskActionBusy} onClick={() => { setContextMenu(null); void reviewCommit(contextMenu.taskId) }}>Review Commit</button>
+          {taskSupportsPostCompletionGeneration(taskIndex.get(contextMenu.taskId)) ? (
+            <button role="menuitem" disabled={isTaskActionBusy} onClick={() => { setContextMenu(null); void generateFollowUpTasks(contextMenu.taskId) }}>Generate Follow-Up Tasks</button>
+          ) : null}
         </div>
       ) : null}
 

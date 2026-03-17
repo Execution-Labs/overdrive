@@ -4617,7 +4617,7 @@ def test_generate_tasks_endpoint_rejects_incompatible_pipeline(tmp_path: Path) -
 
         resp = client.post(f"/api/tasks/{task['id']}/generate-tasks", json={"source": "latest"})
         assert resp.status_code == 400
-        assert "pipeline does not include generate_tasks" in resp.json()["detail"]
+        assert "does not support task generation" in resp.json()["detail"]
 
 
 def test_generate_tasks_endpoint_returns_400_when_worker_outputs_no_tasks(tmp_path: Path) -> None:
