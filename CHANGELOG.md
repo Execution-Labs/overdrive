@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.2] - 2026-03-19
+
+### Added
+- **PyPI publishing**: `pip install overdrive-ai` installs everything — no Node required
+- Built frontend bundled in Python wheel, served by FastAPI on a single port
+- Makefile with `setup`, `dev`, `test`, `check`, `build-wheel` targets
+- One-liner install script (`scripts/install.sh`)
+- GitHub Actions publish workflow (builds frontend + wheel on release)
+- Pre-push hook blocks direct pushes to `main`
+
+### Changed
+- Server dependencies (FastAPI, uvicorn, etc.) moved to default — no more `[server]` extra
+- README Quick Start simplified to three commands
+
 ## [0.3.1] - 2026-03-18
 
 ### Changed
