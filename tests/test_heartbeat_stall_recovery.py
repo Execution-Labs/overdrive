@@ -12,19 +12,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_orchestrator.runtime.domain.models import RunRecord, Task
-from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
+from overdrive.runtime.domain.models import RunRecord, Task
+from overdrive.runtime.orchestrator.live_worker_adapter import (
     LiveWorkerAdapter,
     _DEFAULT_HEARTBEAT_GRACE_SECONDS,
     _HEARTBEAT_STALL_RETRY_GRACE_MULTIPLIER,
 )
-from agent_orchestrator.runtime.events.bus import EventBus
-from agent_orchestrator.runtime.orchestrator.reconciler import OrchestratorReconciler
-from agent_orchestrator.runtime.orchestrator.service import OrchestratorService
-from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter
-from agent_orchestrator.runtime.storage.container import Container
-from agent_orchestrator.runtime.storage.task_helpers import is_retry_backoff_elapsed
-from agent_orchestrator.worker import _has_live_children
+from overdrive.runtime.events.bus import EventBus
+from overdrive.runtime.orchestrator.reconciler import OrchestratorReconciler
+from overdrive.runtime.orchestrator.service import OrchestratorService
+from overdrive.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter
+from overdrive.runtime.storage.container import Container
+from overdrive.runtime.storage.task_helpers import is_retry_backoff_elapsed
+from overdrive.worker import _has_live_children
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ class TestHasLiveChildren:
             stdout=b"456\n789\n",
             stderr=b"",
         )
-        with patch("agent_orchestrator.worker.subprocess.run", return_value=mock_result):
+        with patch("overdrive.worker.subprocess.run", return_value=mock_result):
             assert _has_live_children(123) is True
 
     def test_returns_false_when_no_children(self) -> None:
@@ -79,26 +79,26 @@ class TestHasLiveChildren:
             stdout=b"",
             stderr=b"",
         )
-        with patch("agent_orchestrator.worker.subprocess.run", return_value=mock_result):
+        with patch("overdrive.worker.subprocess.run", return_value=mock_result):
             assert _has_live_children(123) is False
 
     def test_returns_false_when_pgrep_unavailable(self) -> None:
         with patch(
-            "agent_orchestrator.worker.subprocess.run",
+            "overdrive.worker.subprocess.run",
             side_effect=FileNotFoundError("pgrep not found"),
         ):
             assert _has_live_children(123) is False
 
     def test_returns_false_on_timeout(self) -> None:
         with patch(
-            "agent_orchestrator.worker.subprocess.run",
+            "overdrive.worker.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd="pgrep", timeout=2),
         ):
             assert _has_live_children(123) is False
 
     def test_returns_false_on_os_error(self) -> None:
         with patch(
-            "agent_orchestrator.worker.subprocess.run",
+            "overdrive.worker.subprocess.run",
             side_effect=OSError("something went wrong"),
         ):
             assert _has_live_children(123) is False
@@ -110,7 +110,7 @@ class TestHasLiveChildren:
             stdout=b"",
             stderr=b"",
         )
-        with patch("agent_orchestrator.worker.subprocess.run", return_value=mock_result):
+        with patch("overdrive.worker.subprocess.run", return_value=mock_result):
             assert _has_live_children(123) is False
 
 
@@ -125,8 +125,8 @@ class TestHeartbeatLoopChildCheck:
         import json
         import sys
 
-        from agent_orchestrator.utils import _now_iso
-        from agent_orchestrator.worker import _run_codex_worker
+        from overdrive.utils import _now_iso
+        from overdrive.worker import _run_codex_worker
 
         project_dir = tmp_path / "repo"
         project_dir.mkdir()
@@ -169,8 +169,8 @@ class TestHeartbeatLoopChildCheck:
         import json
         import sys
 
-        from agent_orchestrator.utils import _now_iso
-        from agent_orchestrator.worker import _run_codex_worker
+        from overdrive.utils import _now_iso
+        from overdrive.worker import _run_codex_worker
 
         project_dir = tmp_path / "repo"
         project_dir.mkdir()

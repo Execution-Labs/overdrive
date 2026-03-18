@@ -3,7 +3,7 @@
 Base path: `/api`
 
 This document describes the HTTP and WebSocket contract exposed by the local
-Agent Orchestrator server (`agent-orchestrator server`).
+Overdrive server (`overdrive server`).
 
 ## Conventions
 

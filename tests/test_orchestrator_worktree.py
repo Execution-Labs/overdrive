@@ -8,13 +8,13 @@ from pathlib import Path
 from typing import Optional
 from unittest.mock import patch
 
-from agent_orchestrator.runtime.domain.models import RunRecord, Task, now_iso
-from agent_orchestrator.runtime.events import EventBus
-from agent_orchestrator.runtime.orchestrator import OrchestratorService
-from agent_orchestrator.runtime.orchestrator.live_worker_adapter import build_step_prompt
-from agent_orchestrator.runtime.orchestrator.worktree_manager import WorktreeManager
-from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
-from agent_orchestrator.runtime.storage.container import Container
+from overdrive.runtime.domain.models import RunRecord, Task, now_iso
+from overdrive.runtime.events import EventBus
+from overdrive.runtime.orchestrator import OrchestratorService
+from overdrive.runtime.orchestrator.live_worker_adapter import build_step_prompt
+from overdrive.runtime.orchestrator.worktree_manager import WorktreeManager
+from overdrive.runtime.orchestrator.worker_adapter import StepResult
+from overdrive.runtime.storage.container import Container
 
 
 def _git_init(path: Path) -> None:
@@ -1842,7 +1842,7 @@ def test_retry_from_preserved_branch_no_new_uncommitted_changes(tmp_path: Path) 
     """When retrying from a preserved branch and retry_from_step causes
     implement to be skipped, the 'No file changes' check must not block —
     the branch already carries committed work ahead of the run branch."""
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult as SR
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult as SR
 
     class NoopAdapter:
         def run_step(self, *, task: Task, step: str, attempt: int) -> SR:

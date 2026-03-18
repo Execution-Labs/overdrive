@@ -30,7 +30,7 @@ jobs:
         run: uv run ruff check .
 
       - name: Type check (mypy)
-        run: uv run mypy -p agent_orchestrator
+        run: uv run mypy -p overdrive
 
       - name: Test (pytest)
         run: uv run pytest -q

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from agent_orchestrator.comments.formatter import format_comments_for_prompt
-from agent_orchestrator.comments.models import PRComment
+from overdrive.comments.formatter import format_comments_for_prompt
+from overdrive.comments.models import PRComment
 
 
 def _make_comment(
@@ -221,6 +221,6 @@ class TestTruncation:
 
 class TestImport:
     def test_import_from_package(self) -> None:
-        from agent_orchestrator.comments import format_comments_for_prompt as fn
+        from overdrive.comments import format_comments_for_prompt as fn
 
         assert callable(fn)

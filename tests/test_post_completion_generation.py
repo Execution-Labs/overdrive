@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_orchestrator.runtime.domain.models import Task
-from agent_orchestrator.runtime.events.bus import EventBus
-from agent_orchestrator.runtime.orchestrator.service import OrchestratorService
-from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter
-from agent_orchestrator.runtime.storage.container import Container
+from overdrive.runtime.domain.models import Task
+from overdrive.runtime.events.bus import EventBus
+from overdrive.runtime.orchestrator.service import OrchestratorService
+from overdrive.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter
+from overdrive.runtime.storage.container import Container
 
 
 def _make_service(tmp_path: Path) -> OrchestratorService:
@@ -78,7 +78,7 @@ def test_generate_tasks_endpoint_rejects_done_task_with_children(tmp_path: Path)
     """The generate-tasks endpoint should return 400 for a done research task that already has children."""
     from starlette.testclient import TestClient
 
-    from agent_orchestrator.server.api import create_app
+    from overdrive.server.api import create_app
 
     container = Container(tmp_path)
     task = Task(title="Research done", task_type="research", status="done", children_ids=["child-1"])

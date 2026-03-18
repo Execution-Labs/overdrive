@@ -6,10 +6,10 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from agent_orchestrator.runtime.domain.models import Task, now_iso
-from agent_orchestrator.runtime.events import EventBus
-from agent_orchestrator.runtime.orchestrator import OrchestratorService
-from agent_orchestrator.runtime.storage.container import Container
+from overdrive.runtime.domain.models import Task, now_iso
+from overdrive.runtime.events import EventBus
+from overdrive.runtime.orchestrator import OrchestratorService
+from overdrive.runtime.storage.container import Container
 
 
 def _service(tmp_path: Path) -> tuple[Container, OrchestratorService, EventBus]:
@@ -320,7 +320,7 @@ def test_gate_approve_api(tmp_path: Path) -> None:
     """POST approve-gate clears pending_gate."""
     from fastapi.testclient import TestClient
 
-    from agent_orchestrator.runtime.api.router import create_router
+    from overdrive.runtime.api.router import create_router
 
     container = Container(tmp_path)
 
@@ -362,7 +362,7 @@ def test_gate_approve_api_no_pending(tmp_path: Path) -> None:
     """400 when no pending gate on the task."""
     from fastapi.testclient import TestClient
 
-    from agent_orchestrator.runtime.api.router import create_router
+    from overdrive.runtime.api.router import create_router
 
     container = Container(tmp_path)
 
@@ -394,7 +394,7 @@ def test_gate_approve_api_mismatch(tmp_path: Path) -> None:
     """400 when gate name doesn't match the pending gate."""
     from fastapi.testclient import TestClient
 
-    from agent_orchestrator.runtime.api.router import create_router
+    from overdrive.runtime.api.router import create_router
 
     container = Container(tmp_path)
 
@@ -427,7 +427,7 @@ def test_gate_request_changes_api_requeues_from_prior_step(tmp_path: Path) -> No
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from agent_orchestrator.runtime.api.router import create_router
+    from overdrive.runtime.api.router import create_router
 
     container = Container(tmp_path)
 
@@ -478,7 +478,7 @@ def test_gate_request_changes_rerun_does_not_fail_missing_context(tmp_path: Path
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from agent_orchestrator.runtime.api.router import create_router
+    from overdrive.runtime.api.router import create_router
 
     container = Container(tmp_path)
 
@@ -533,7 +533,7 @@ def test_plan_gate_request_changes_git_rerun_preserves_active_worktree_context(t
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from agent_orchestrator.runtime.api.router import create_router
+    from overdrive.runtime.api.router import create_router
 
     _git_init(tmp_path)
     container = Container(tmp_path)
@@ -598,7 +598,7 @@ def test_retry_without_guidance_clears_active_human_guidance(tmp_path: Path) -> 
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from agent_orchestrator.runtime.api.router import create_router
+    from overdrive.runtime.api.router import create_router
 
     container = Container(tmp_path)
 
@@ -647,7 +647,7 @@ def test_gate_approve_human_intervention_keeps_blocked_status(tmp_path: Path) ->
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from agent_orchestrator.runtime.api.router import create_router
+    from overdrive.runtime.api.router import create_router
 
     container = Container(tmp_path)
 
@@ -700,8 +700,8 @@ def test_modes_endpoint_uses_modes_py(tmp_path: Path) -> None:
     """GET /collaboration/modes returns data from MODE_CONFIGS."""
     from fastapi.testclient import TestClient
 
-    from agent_orchestrator.collaboration.modes import MODE_CONFIGS
-    from agent_orchestrator.runtime.api.router import create_router
+    from overdrive.collaboration.modes import MODE_CONFIGS
+    from overdrive.runtime.api.router import create_router
 
     container = Container(tmp_path)
 

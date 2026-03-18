@@ -8,9 +8,9 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from agent_orchestrator.runtime.domain.models import Task
-from agent_orchestrator.runtime.storage.container import Container
-from agent_orchestrator.server.api import create_app
+from overdrive.runtime.domain.models import Task
+from overdrive.runtime.storage.container import Container
+from overdrive.server.api import create_app
 
 
 def _git_init(path: Path) -> None:
@@ -71,7 +71,7 @@ def test_queue_backlog_emits_events(tmp_path: Path) -> None:
     emitted: list[dict] = []
 
     with patch(
-        "agent_orchestrator.runtime.events.bus.EventBus.emit",
+        "overdrive.runtime.events.bus.EventBus.emit",
         side_effect=lambda **kw: emitted.append(kw),
     ):
         resp = client.post("/api/tasks/queue-backlog")
@@ -98,7 +98,7 @@ def test_queue_backlog_empty_is_noop(tmp_path: Path) -> None:
     emitted: list[dict] = []
 
     with patch(
-        "agent_orchestrator.runtime.events.bus.EventBus.emit",
+        "overdrive.runtime.events.bus.EventBus.emit",
         side_effect=lambda **kw: emitted.append(kw),
     ):
         resp = client.post("/api/tasks/queue-backlog")

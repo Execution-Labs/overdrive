@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_orchestrator.runtime.domain.models import Task
-from agent_orchestrator.runtime.orchestrator.env_resolver import (
+from overdrive.runtime.domain.models import Task
+from overdrive.runtime.orchestrator.env_resolver import (
     _detect_compose_env_vars,
     _detect_prisma_required_vars,
     _extract_env_vars_from_config,
@@ -20,7 +20,7 @@ from agent_orchestrator.runtime.orchestrator.env_resolver import (
     resolve_env_vars,
     resolved_env_vars_view,
 )
-from agent_orchestrator.runtime.api.router_impl import (
+from overdrive.runtime.api.router_impl import (
     _mask_settings_env_vars,
     _normalize_workers_environment,
     _settings_payload,
@@ -41,7 +41,7 @@ def test_run_codex_worker_passes_env_to_popen(tmp_path: Path) -> None:
 
     custom_env = {**os.environ, "MY_CUSTOM_VAR": "hello"}
 
-    with patch("agent_orchestrator.worker.subprocess.Popen") as mock_popen:
+    with patch("overdrive.worker.subprocess.Popen") as mock_popen:
         mock_proc = MagicMock()
         mock_proc.stdout = MagicMock()
         mock_proc.stderr = MagicMock()
@@ -52,7 +52,7 @@ def test_run_codex_worker_passes_env_to_popen(tmp_path: Path) -> None:
         mock_proc.wait.return_value = 0
         mock_popen.return_value = mock_proc
 
-        from agent_orchestrator.worker import _run_codex_worker
+        from overdrive.worker import _run_codex_worker
 
         _run_codex_worker(
             command="echo test",
@@ -77,7 +77,7 @@ def test_run_codex_worker_none_env_inherits(tmp_path: Path) -> None:
     run_dir.mkdir()
     progress = run_dir / "progress.json"
 
-    with patch("agent_orchestrator.worker.subprocess.Popen") as mock_popen:
+    with patch("overdrive.worker.subprocess.Popen") as mock_popen:
         mock_proc = MagicMock()
         mock_proc.stdout = MagicMock()
         mock_proc.stderr = MagicMock()
@@ -88,7 +88,7 @@ def test_run_codex_worker_none_env_inherits(tmp_path: Path) -> None:
         mock_proc.wait.return_value = 0
         mock_popen.return_value = mock_proc
 
-        from agent_orchestrator.worker import _run_codex_worker
+        from overdrive.worker import _run_codex_worker
 
         _run_codex_worker(
             command="echo test",
@@ -109,7 +109,7 @@ def test_run_worker_forwards_env(tmp_path: Path) -> None:
     """Verify that run_worker threads env through to _run_codex_worker."""
     custom_env = {**os.environ, "FORWARDED": "yes"}
 
-    with patch("agent_orchestrator.workers.run._run_codex_worker") as mock_codex:
+    with patch("overdrive.workers.run._run_codex_worker") as mock_codex:
         mock_codex.return_value = {
             "prompt_path": "",
             "stdout_path": "",
@@ -123,8 +123,8 @@ def test_run_worker_forwards_env(tmp_path: Path) -> None:
             "last_heartbeat": None,
         }
 
-        from agent_orchestrator.workers.config import WorkerProviderSpec
-        from agent_orchestrator.workers.run import run_worker
+        from overdrive.workers.config import WorkerProviderSpec
+        from overdrive.workers.run import run_worker
 
         run_worker(
             spec=WorkerProviderSpec(name="codex", type="codex", command="echo"),

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_orchestrator.comments.writer import (
+from overdrive.comments.writer import (
     CommentPostResult,
     _extract_id_from_response,
     _run_gh_api_post,
@@ -83,7 +83,7 @@ class TestExtractIdFromResponse:
 
 
 class TestRunGhApiPost:
-    @patch("agent_orchestrator.comments.writer.subprocess.run")
+    @patch("overdrive.comments.writer.subprocess.run")
     def test_success(self, mock_run: object) -> None:
         from unittest.mock import MagicMock
         mock_run_fn = mock_run  # type: ignore[assignment]
@@ -92,7 +92,7 @@ class TestRunGhApiPost:
         assert ok is True
         assert '"id": 1' in resp
 
-    @patch("agent_orchestrator.comments.writer.subprocess.run")
+    @patch("overdrive.comments.writer.subprocess.run")
     def test_failure(self, mock_run: object) -> None:
         from unittest.mock import MagicMock
         mock_run_fn = mock_run  # type: ignore[assignment]
@@ -101,7 +101,7 @@ class TestRunGhApiPost:
         assert ok is False
         assert "Not Found" in resp
 
-    @patch("agent_orchestrator.comments.writer.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=60))
+    @patch("overdrive.comments.writer.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=60))
     def test_timeout(self, mock_run: object) -> None:
         ok, resp = _run_gh_api_post("repos/o/r/issues/1/comments", {"body": "hi"}, GIT_DIR)
         assert ok is False
@@ -109,7 +109,7 @@ class TestRunGhApiPost:
 
 
 class TestRunGlabApiPost:
-    @patch("agent_orchestrator.comments.writer.subprocess.run")
+    @patch("overdrive.comments.writer.subprocess.run")
     def test_success(self, mock_run: object) -> None:
         from unittest.mock import MagicMock
         mock_run_fn = mock_run  # type: ignore[assignment]
@@ -117,7 +117,7 @@ class TestRunGlabApiPost:
         ok, resp = _run_glab_api_post("projects/1/merge_requests/1/notes", {"body": "hi"}, GIT_DIR)
         assert ok is True
 
-    @patch("agent_orchestrator.comments.writer.subprocess.run")
+    @patch("overdrive.comments.writer.subprocess.run")
     def test_failure(self, mock_run: object) -> None:
         from unittest.mock import MagicMock
         mock_run_fn = mock_run  # type: ignore[assignment]
@@ -132,7 +132,7 @@ class TestRunGlabApiPost:
 
 
 class TestPostPrComment:
-    @patch("agent_orchestrator.comments.writer._run_gh_api_post")
+    @patch("overdrive.comments.writer._run_gh_api_post")
     def test_general_comment(self, mock_post: object) -> None:
         from unittest.mock import MagicMock
         mock_post_fn = mock_post  # type: ignore[assignment]
@@ -144,7 +144,7 @@ class TestPostPrComment:
         call_args = mock_post_fn.call_args
         assert "issues/1/comments" in call_args[0][0]
 
-    @patch("agent_orchestrator.comments.writer._run_gh_api_post")
+    @patch("overdrive.comments.writer._run_gh_api_post")
     def test_inline_comment(self, mock_post: object) -> None:
         from unittest.mock import MagicMock
         mock_post_fn = mock_post  # type: ignore[assignment]
@@ -155,7 +155,7 @@ class TestPostPrComment:
         call_args = mock_post_fn.call_args
         assert "pulls/1/reviews" in call_args[0][0]
 
-    @patch("agent_orchestrator.comments.writer._run_gh_api_post")
+    @patch("overdrive.comments.writer._run_gh_api_post")
     def test_reply_comment(self, mock_post: object) -> None:
         from unittest.mock import MagicMock
         mock_post_fn = mock_post  # type: ignore[assignment]
@@ -165,7 +165,7 @@ class TestPostPrComment:
         call_args = mock_post_fn.call_args
         assert "comments/50/replies" in call_args[0][0]
 
-    @patch("agent_orchestrator.comments.writer._run_gh_api_post")
+    @patch("overdrive.comments.writer._run_gh_api_post")
     def test_failure(self, mock_post: object) -> None:
         from unittest.mock import MagicMock
         mock_post_fn = mock_post  # type: ignore[assignment]
@@ -181,7 +181,7 @@ class TestPostPrComment:
 
 
 class TestPostPrReviewDecision:
-    @patch("agent_orchestrator.comments.writer._run_gh_api_post")
+    @patch("overdrive.comments.writer._run_gh_api_post")
     def test_approve(self, mock_post: object) -> None:
         from unittest.mock import MagicMock
         mock_post_fn = mock_post  # type: ignore[assignment]
@@ -191,7 +191,7 @@ class TestPostPrReviewDecision:
         payload = mock_post_fn.call_args[0][1]
         assert payload["event"] == "APPROVE"
 
-    @patch("agent_orchestrator.comments.writer._run_gh_api_post")
+    @patch("overdrive.comments.writer._run_gh_api_post")
     def test_request_changes(self, mock_post: object) -> None:
         from unittest.mock import MagicMock
         mock_post_fn = mock_post  # type: ignore[assignment]
@@ -208,7 +208,7 @@ class TestPostPrReviewDecision:
 
 
 class TestPostMrComment:
-    @patch("agent_orchestrator.comments.writer._run_glab_api_post")
+    @patch("overdrive.comments.writer._run_glab_api_post")
     def test_general_note(self, mock_post: object) -> None:
         from unittest.mock import MagicMock
         mock_post_fn = mock_post  # type: ignore[assignment]
@@ -218,7 +218,7 @@ class TestPostMrComment:
         call_args = mock_post_fn.call_args
         assert "/notes" in call_args[0][0]
 
-    @patch("agent_orchestrator.comments.writer._run_glab_api_post")
+    @patch("overdrive.comments.writer._run_glab_api_post")
     def test_inline_discussion(self, mock_post: object) -> None:
         from unittest.mock import MagicMock
         mock_post_fn = mock_post  # type: ignore[assignment]
@@ -235,7 +235,7 @@ class TestPostMrComment:
 
 
 class TestPostMrReviewDecision:
-    @patch("agent_orchestrator.comments.writer._run_glab_api_post")
+    @patch("overdrive.comments.writer._run_glab_api_post")
     def test_approve(self, mock_post: object) -> None:
         from unittest.mock import MagicMock
         mock_post_fn = mock_post  # type: ignore[assignment]
@@ -252,8 +252,8 @@ class TestPostMrReviewDecision:
 
 
 class TestPostCommentsBatch:
-    @patch("agent_orchestrator.comments.writer.post_pr_comment")
-    @patch("agent_orchestrator.comments.writer.time.sleep")
+    @patch("overdrive.comments.writer.post_pr_comment")
+    @patch("overdrive.comments.writer.time.sleep")
     def test_batch_github(self, mock_sleep: object, mock_post: object) -> None:
         from unittest.mock import MagicMock
         mock_post_fn = mock_post  # type: ignore[assignment]
@@ -269,8 +269,8 @@ class TestPostCommentsBatch:
         # Sleep called between comments.
         assert mock_sleep.call_count == 1  # type: ignore[union-attr]
 
-    @patch("agent_orchestrator.comments.writer.post_mr_comment")
-    @patch("agent_orchestrator.comments.writer.time.sleep")
+    @patch("overdrive.comments.writer.post_mr_comment")
+    @patch("overdrive.comments.writer.time.sleep")
     def test_batch_gitlab(self, mock_sleep: object, mock_post: object) -> None:
         from unittest.mock import MagicMock
         mock_post_fn = mock_post  # type: ignore[assignment]

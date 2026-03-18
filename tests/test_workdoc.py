@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from agent_orchestrator.runtime.domain.models import ReviewCycle, ReviewFinding, RunRecord, Task, now_iso
-from agent_orchestrator.runtime.events.bus import EventBus
-from agent_orchestrator.runtime.orchestrator.service import OrchestratorService
-from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
-from agent_orchestrator.runtime.storage.bootstrap import ensure_state_root
-from agent_orchestrator.runtime.storage.container import Container
-from agent_orchestrator.pipelines.registry import BUILTIN_TEMPLATES
+from overdrive.runtime.domain.models import ReviewCycle, ReviewFinding, RunRecord, Task, now_iso
+from overdrive.runtime.events.bus import EventBus
+from overdrive.runtime.orchestrator.service import OrchestratorService
+from overdrive.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
+from overdrive.runtime.storage.bootstrap import ensure_state_root
+from overdrive.runtime.storage.container import Container
+from overdrive.pipelines.registry import BUILTIN_TEMPLATES
 
 
 @pytest.fixture()
@@ -445,7 +445,7 @@ def test_bootstrap_adds_workdoc_gitignore_entry(project_dir: Path) -> None:
 
 def test_bootstrap_gitignore_idempotent(project_dir: Path) -> None:
     """Running ensure_state_root twice should not duplicate .gitignore entries."""
-    from agent_orchestrator.runtime.storage.bootstrap import ensure_state_root
+    from overdrive.runtime.storage.bootstrap import ensure_state_root
     ensure_state_root(project_dir)  # second call (first was in fixture)
     gitignore = project_dir / ".gitignore"
     content = gitignore.read_text()
@@ -454,7 +454,7 @@ def test_bootstrap_gitignore_idempotent(project_dir: Path) -> None:
 
 def test_bootstrap_gitignore_preserves_existing(tmp_path: Path) -> None:
     """Existing .gitignore content should be preserved."""
-    from agent_orchestrator.runtime.storage.bootstrap import ensure_state_root
+    from overdrive.runtime.storage.bootstrap import ensure_state_root
     gitignore = tmp_path / ".gitignore"
     gitignore.write_text("node_modules/\n.env\n", encoding="utf-8")
     ensure_state_root(tmp_path)

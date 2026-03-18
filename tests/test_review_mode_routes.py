@@ -11,14 +11,14 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_orchestrator.pipelines.registry import PipelineRegistry
-from agent_orchestrator.runtime.api.routes_tasks import (
+from overdrive.pipelines.registry import PipelineRegistry
+from overdrive.runtime.api.routes_tasks import (
     _MODES_NEEDING_COMMENTS,
     _REVIEW_MODE_TO_PIPELINE,
 )
-from agent_orchestrator.runtime.domain.models import Task
-from agent_orchestrator.runtime.storage.container import Container
-from agent_orchestrator.server.api import create_app
+from overdrive.runtime.domain.models import Task
+from overdrive.runtime.storage.container import Container
+from overdrive.server.api import create_app
 
 
 def _git_init(path: Path) -> None:
@@ -134,8 +134,8 @@ class TestModeMapping:
         expected_steps = registry.get(expected_pipeline_id).step_names()
 
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
         ):
             resp = client.post("/api/pull-requests/42/review", json={"review_mode": mode})
 
@@ -163,8 +163,8 @@ class TestMetadataStorage:
     def test_metadata_stored_for_fix_only(self, tmp_path: Path):
         client, container = _client_and_container(tmp_path)
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
         ):
             resp = client.post("/api/pull-requests/42/review", json={"review_mode": "fix_only"})
 
@@ -181,8 +181,8 @@ class TestMetadataStorage:
         """review_comment mode no longer accepts review_decision at creation."""
         client, container = _client_and_container(tmp_path)
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
         ):
             resp = client.post("/api/pull-requests/42/review", json={
                 "review_mode": "review_comment",
@@ -200,8 +200,8 @@ class TestMetadataStorage:
         """Calling without review_mode defaults to fix_only."""
         client, container = _client_and_container(tmp_path)
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
         ):
             resp = client.post("/api/pull-requests/42/review", json={})
 
@@ -224,8 +224,8 @@ class TestValidation:
         """review_decision is silently ignored — Pydantic drops extra fields."""
         client, container = _client_and_container(tmp_path)
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
         ):
             resp = client.post("/api/pull-requests/42/review", json={
                 "review_mode": "review_comment",
@@ -249,8 +249,8 @@ class TestCommentFetching:
     def test_review_comment_mode_fetches_and_stores_comments(self, tmp_path: Path):
         client, container = _client_and_container(tmp_path)
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
         ):
             resp = client.post("/api/pull-requests/42/review", json={
                 "review_mode": "review_comment",
@@ -271,8 +271,8 @@ class TestCommentFetching:
     def test_fix_only_mode_does_not_fetch_comments(self, tmp_path: Path):
         client, container = _client_and_container(tmp_path)
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
         ):
             resp = client.post("/api/pull-requests/42/review", json={"review_mode": "fix_only"})
 
@@ -305,8 +305,8 @@ class TestCommentFetching:
             return r
 
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=mock_run),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=mock_run),
         ):
             resp = client.post("/api/pull-requests/42/review", json={
                 "review_mode": "summarize",
@@ -322,8 +322,8 @@ class TestCommentFetching:
     def test_all_comment_modes_store_source_comments(self, tmp_path: Path, mode: str):
         client, container = _client_and_container(tmp_path)
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
         ):
             resp = client.post("/api/pull-requests/42/review", json={"review_mode": mode})
 
@@ -345,8 +345,8 @@ class TestGitLabModeRestriction:
     def test_gitlab_fix_only_succeeds(self, tmp_path: Path):
         client, container = _client_and_container(tmp_path)
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/glab"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_gitlab),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/glab"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_gitlab),
         ):
             resp = client.post("/api/pull-requests/15/review", json={"review_mode": "fix_only"})
 
@@ -358,8 +358,8 @@ class TestGitLabModeRestriction:
     def test_gitlab_non_fix_only_returns_400(self, tmp_path: Path, mode: str):
         client, _ = _client_and_container(tmp_path)
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/glab"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_gitlab),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/glab"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_gitlab),
         ):
             resp = client.post("/api/pull-requests/15/review", json={"review_mode": mode})
 
@@ -380,8 +380,8 @@ class TestDuplicateCheckModeSpecific:
         client, container = _client_and_container(tmp_path)
 
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
         ):
             resp1 = client.post("/api/pull-requests/42/review", json={"review_mode": "fix_only"})
             assert resp1.status_code == 200
@@ -401,8 +401,8 @@ class TestDuplicateCheckModeSpecific:
         client, _ = _client_and_container(tmp_path)
 
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
         ):
             resp1 = client.post("/api/pull-requests/42/review", json={"review_mode": "fix_only"})
             assert resp1.status_code == 200
@@ -425,8 +425,8 @@ class TestLegacyEndpointCompat:
         container.tasks.upsert(task)
 
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_github),
         ):
             resp = client.post(f"/api/tasks/{task.id}/review-pr?pr_number=42")
 
@@ -446,8 +446,8 @@ class TestLegacyEndpointCompat:
         container.tasks.upsert(task)
 
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/glab"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_gitlab),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/glab"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=_mock_subprocess_run_gitlab),
         ):
             resp = client.post(f"/api/tasks/{task.id}/review-mr?mr_number=15")
 

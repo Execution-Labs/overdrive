@@ -25,13 +25,13 @@ from typing import Any
 
 import pytest
 
-from agent_orchestrator.comments.models import CommentPostResult, PRComment
-from agent_orchestrator.comments.reader import (
+from overdrive.comments.models import CommentPostResult, PRComment
+from overdrive.comments.reader import (
     CommentFetchError,
     fetch_mr_comments,
     fetch_pr_comments,
 )
-from agent_orchestrator.comments.writer import (
+from overdrive.comments.writer import (
     parse_source_url,
     post_comments_batch,
     post_pr_review_decision,

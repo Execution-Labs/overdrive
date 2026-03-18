@@ -11,9 +11,9 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 import pytest
 
-from agent_orchestrator.server.api import create_app
-from agent_orchestrator.runtime.orchestrator import DefaultWorkerAdapter
-from agent_orchestrator.runtime.domain.models import (
+from overdrive.server.api import create_app
+from overdrive.runtime.orchestrator import DefaultWorkerAdapter
+from overdrive.runtime.domain.models import (
     AgentRecord,
     PlanRefineJob,
     PlanRevision,
@@ -23,10 +23,10 @@ from agent_orchestrator.runtime.domain.models import (
     TerminalSession,
     now_iso,
 )
-from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
-from agent_orchestrator.runtime.storage.bootstrap import ensure_state_root
-from agent_orchestrator.runtime.storage.container import Container
-from agent_orchestrator.runtime.storage.file_repos import (
+from overdrive.runtime.orchestrator.worker_adapter import StepResult
+from overdrive.runtime.storage.bootstrap import ensure_state_root
+from overdrive.runtime.storage.container import Container
+from overdrive.runtime.storage.file_repos import (
     FileAgentRepository,
     FileConfigRepository,
     FileEventRepository,
@@ -37,7 +37,7 @@ from agent_orchestrator.runtime.storage.file_repos import (
     FileTaskRepository,
     FileTerminalSessionRepository,
 )
-from agent_orchestrator.runtime.storage.sqlite_db import SQLiteDB
+from overdrive.runtime.storage.sqlite_db import SQLiteDB
 
 
 def _patch_task_record(container: Container, task_id: str, fields: dict[str, object]) -> None:
@@ -136,38 +136,38 @@ def _git(args: list[str], cwd: Path) -> None:
 
 
 def test_cutover_archives_legacy_state(tmp_path: Path) -> None:
-    legacy_root = tmp_path / ".agent_orchestrator"
+    legacy_root = tmp_path / ".overdrive"
     legacy_root.mkdir(parents=True)
     (legacy_root / "task_queue.yaml").write_text("tasks: []\n", encoding="utf-8")
     (legacy_root / "run_state.yaml").write_text("{}\n", encoding="utf-8")
 
     state_root = ensure_state_root(tmp_path)
 
-    assert state_root == tmp_path / ".agent_orchestrator"
+    assert state_root == tmp_path / ".overdrive"
     assert (state_root / "runtime.db").exists()
     config = Container(tmp_path).config.load()
     assert int(config.get("schema_version") or 0) == 4
     assert str(config.get("storage_backend") or "") == "sqlite"
 
-    archives = sorted(tmp_path.glob(".agent_orchestrator_legacy_*"))
+    archives = sorted(tmp_path.glob(".overdrive_legacy_*"))
     assert len(archives) == 1
     assert (archives[0] / "task_queue.yaml").exists()
 
 
 def test_cutover_archives_any_non_runtime_state(tmp_path: Path) -> None:
-    legacy_root = tmp_path / ".agent_orchestrator"
+    legacy_root = tmp_path / ".overdrive"
     legacy_root.mkdir(parents=True)
     (legacy_root / "custom_legacy_blob.yaml").write_text("legacy: true\n", encoding="utf-8")
 
     ensure_state_root(tmp_path)
 
-    archives = sorted(tmp_path.glob(".agent_orchestrator_legacy_*"))
+    archives = sorted(tmp_path.glob(".overdrive_legacy_*"))
     assert len(archives) == 1
     assert (archives[0] / "custom_legacy_blob.yaml").exists()
 
 
 def test_cutover_forces_schema_version_4(tmp_path: Path) -> None:
-    state_root = tmp_path / ".agent_orchestrator"
+    state_root = tmp_path / ".overdrive"
     state_root.mkdir(parents=True)
     (state_root / "config.yaml").write_text("schema_version: 2\n", encoding="utf-8")
 
@@ -179,7 +179,7 @@ def test_cutover_forces_schema_version_4(tmp_path: Path) -> None:
 
 
 def test_yaml_cutover_migrates_all_collections_with_parity(tmp_path: Path) -> None:
-    state_root = tmp_path / ".agent_orchestrator"
+    state_root = tmp_path / ".overdrive"
     state_root.mkdir(parents=True)
 
     task = Task(title="Legacy task", status="queued")
@@ -245,7 +245,7 @@ def test_yaml_cutover_migrates_all_collections_with_parity(tmp_path: Path) -> No
 
 
 def test_yaml_cutover_rolls_back_on_migration_failure(tmp_path: Path) -> None:
-    state_root = tmp_path / ".agent_orchestrator"
+    state_root = tmp_path / ".overdrive"
     state_root.mkdir(parents=True)
 
     FileTaskRepository(state_root / "tasks.yaml", state_root / "tasks.lock").upsert(Task(title="Rollback task"))
@@ -2138,7 +2138,7 @@ def test_delete_non_terminal_task_rejected(tmp_path: Path) -> None:
 def test_delete_terminal_task_archives_context_manifest(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     container = Container(tmp_path)
-    retained_dir = tmp_path / ".agent_orchestrator" / "worktrees" / "task-delete-context"
+    retained_dir = tmp_path / ".overdrive" / "worktrees" / "task-delete-context"
     task = Task(
         title="Delete context task",
         status="done",
@@ -2185,7 +2185,7 @@ def test_clear_tasks_archives_state_and_reinitializes_board(tmp_path: Path) -> N
 
         archived_path = Path(archived_to)
         assert archived_path.exists()
-        assert archived_path.parent == tmp_path / ".agent_orchestrator_archive"
+        assert archived_path.parent == tmp_path / ".overdrive_archive"
         archived_db = archived_path / "runtime.db"
         assert archived_db.exists()
         with sqlite3.connect(archived_db) as conn:
@@ -2206,7 +2206,7 @@ def test_clear_tasks_archives_state_and_reinitializes_board(tmp_path: Path) -> N
 
         fresh_container = Container(tmp_path)
         assert fresh_container.tasks.get(created["id"]) is None
-        assert (tmp_path / ".agent_orchestrator" / "runtime.db").exists()
+        assert (tmp_path / ".overdrive" / "runtime.db").exists()
 
         status_resp = client.get("/api/orchestrator/status")
         assert status_resp.status_code == 200
@@ -2216,7 +2216,7 @@ def test_clear_tasks_archives_state_and_reinitializes_board(tmp_path: Path) -> N
 def test_clear_tasks_archives_context_manifest_when_present(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     container = Container(tmp_path)
-    retained_dir = tmp_path / ".agent_orchestrator" / "worktrees" / "task-retained"
+    retained_dir = tmp_path / ".overdrive" / "worktrees" / "task-retained"
     task = Task(
         title="Retained blocked task",
         status="blocked",
@@ -3813,7 +3813,7 @@ def test_task_changes_endpoint_prefers_blocked_retained_worktree_over_commit_dif
 def test_task_changes_endpoint_uses_preserved_branch_when_worktree_is_empty(tmp_path: Path) -> None:
     _git(["init"], tmp_path)
     (tmp_path / ".gitignore").write_text(
-        ".agent_orchestrator/\n\n# Agent Orchestrator runtime data\n.agent_orchestrator_archive/\n.workdoc.md\n",
+        ".overdrive/\n\n# Overdrive runtime data\n.overdrive_archive/\n.workdoc.md\n",
         encoding="utf-8",
     )
     (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
@@ -3887,7 +3887,7 @@ def test_task_changes_endpoint_uses_preserved_branch_when_worktree_is_empty(tmp_
 def test_task_changes_endpoint_prefers_preserved_branch_without_task_worktree_context(tmp_path: Path) -> None:
     _git(["init"], tmp_path)
     (tmp_path / ".gitignore").write_text(
-        ".agent_orchestrator/\n\n# Agent Orchestrator runtime data\n.agent_orchestrator_archive/\n.workdoc.md\n",
+        ".overdrive/\n\n# Overdrive runtime data\n.overdrive_archive/\n.workdoc.md\n",
         encoding="utf-8",
     )
     (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
@@ -4891,7 +4891,7 @@ def test_plan_refine_failure_path(tmp_path: Path) -> None:
 
 
 def test_plan_refine_emit_error_does_not_mark_job_failed(tmp_path: Path, monkeypatch) -> None:
-    from agent_orchestrator.runtime.events.bus import EventBus
+    from overdrive.runtime.events.bus import EventBus
 
     original_emit = EventBus.emit
 
@@ -5001,9 +5001,9 @@ def test_get_workdoc_returns_content(tmp_path: Path) -> None:
         task_id = task["id"]
 
         # Manually init the workdoc via the orchestrator service
-        from agent_orchestrator.runtime.orchestrator.service import OrchestratorService
-        from agent_orchestrator.runtime.events.bus import EventBus
-        from agent_orchestrator.runtime.storage.container import Container
+        from overdrive.runtime.orchestrator.service import OrchestratorService
+        from overdrive.runtime.events.bus import EventBus
+        from overdrive.runtime.storage.container import Container
 
         container = Container(tmp_path)
         bus = EventBus(container.events, container.project_id)
@@ -5037,9 +5037,9 @@ def test_get_workdoc_returns_409_when_invalid_encoding(tmp_path: Path) -> None:
         task = client.post("/api/tasks", json={"title": "Bad encoding workdoc", "status": "backlog"}).json()["task"]
         task_id = task["id"]
 
-        from agent_orchestrator.runtime.orchestrator.service import OrchestratorService
-        from agent_orchestrator.runtime.events.bus import EventBus
-        from agent_orchestrator.runtime.storage.container import Container
+        from overdrive.runtime.orchestrator.service import OrchestratorService
+        from overdrive.runtime.events.bus import EventBus
+        from overdrive.runtime.storage.container import Container
 
         container = Container(tmp_path)
         bus = EventBus(container.events, container.project_id)
@@ -5128,7 +5128,7 @@ def test_patch_task_worker_provider(tmp_path: Path) -> None:
 # provider_spec_to_dict / normalization consolidation tests
 # ---------------------------------------------------------------------------
 
-from agent_orchestrator.workers.config import (
+from overdrive.workers.config import (
     WorkerProviderSpec,
     provider_spec_to_dict,
     get_workers_runtime_config,
@@ -5301,7 +5301,7 @@ def test_settings_payload_default_worker_fallback(tmp_path: Path) -> None:
     """Default worker falls back to codex when configured default is unknown."""
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     # Write a config with a non-existent default worker
-    config_dir = tmp_path / ".agent_orchestrator"
+    config_dir = tmp_path / ".overdrive"
     config_dir.mkdir(exist_ok=True)
     config_file = config_dir / "config.yaml"
     config_file.write_text("workers:\n  default: nonexistent\n")

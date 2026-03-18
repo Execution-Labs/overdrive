@@ -61,7 +61,7 @@ def create_app(
             app.state.terminal_services = {}
 
     app = FastAPI(
-        title="Agent Orchestrator",
+        title="Overdrive",
         description="Orchestrator-first AI engineering control center",
         version="3.0.0",
         lifespan=_lifespan,
@@ -130,7 +130,7 @@ def create_app(
             schema = 4
         storage_backend = str(cfg.get("storage_backend") or "sqlite")
         return {
-            "name": "Agent Orchestrator",
+            "name": "Overdrive",
             "version": "3.0.0",
             "project": str(container.project_dir),
             "project_id": container.project_id,

@@ -1,4 +1,4 @@
-# Agent Orchestrator Example
+# Overdrive Example
 
 This example is intentionally small and deterministic so you can validate the
 v3 task + PRD workflows locally. It includes a tiny Python module, a PRD sample,
@@ -12,7 +12,7 @@ and a small unittest suite.
 ## Run With Web UI
 
 ```bash
-agent-orchestrator server --project-dir ./example/project
+overdrive server --project-dir ./example/project
 npm --prefix web run dev
 ```
 
@@ -23,8 +23,8 @@ In the dashboard, use:
 ## Run With CLI
 
 ```bash
-agent-orchestrator --project-dir ./example/project task create "Smoke test example project"
-agent-orchestrator --project-dir ./example/project task list
+overdrive --project-dir ./example/project task create "Smoke test example project"
+overdrive --project-dir ./example/project task list
 ```
 
-After running flows, inspect `.agent_orchestrator/` inside `example/project/` for state and events.
+After running flows, inspect `.overdrive/` inside `example/project/` for state and events.

@@ -4,14 +4,14 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from agent_orchestrator.runtime.domain.models import Task
-from agent_orchestrator.runtime.events import EventBus
-from agent_orchestrator.runtime.orchestrator import OrchestratorService
-from agent_orchestrator.runtime.orchestrator.worker_adapter import (
+from overdrive.runtime.domain.models import Task
+from overdrive.runtime.events import EventBus
+from overdrive.runtime.orchestrator import OrchestratorService
+from overdrive.runtime.orchestrator.worker_adapter import (
     DefaultWorkerAdapter,
     StepResult,
 )
-from agent_orchestrator.runtime.storage.container import Container
+from overdrive.runtime.storage.container import Container
 
 
 def _service(
@@ -72,7 +72,7 @@ def test_step_result_no_action_needed_true() -> None:
 
 
 def test_no_action_needed_detection_commit_review_no_issues() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
+    from overdrive.runtime.orchestrator.live_worker_adapter import (
         _is_no_action_needed,
     )
 
@@ -80,7 +80,7 @@ def test_no_action_needed_detection_commit_review_no_issues() -> None:
 
 
 def test_no_action_needed_detection_case_insensitive() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
+    from overdrive.runtime.orchestrator.live_worker_adapter import (
         _is_no_action_needed,
     )
 
@@ -88,7 +88,7 @@ def test_no_action_needed_detection_case_insensitive() -> None:
 
 
 def test_no_action_needed_detection_with_issues() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
+    from overdrive.runtime.orchestrator.live_worker_adapter import (
         _is_no_action_needed,
     )
 
@@ -96,7 +96,7 @@ def test_no_action_needed_detection_with_issues() -> None:
 
 
 def test_no_action_needed_detection_none_summary() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
+    from overdrive.runtime.orchestrator.live_worker_adapter import (
         _is_no_action_needed,
     )
 
@@ -105,7 +105,7 @@ def test_no_action_needed_detection_none_summary() -> None:
 
 def test_no_action_needed_detection_non_early_complete_step() -> None:
     """Steps not in _EARLY_COMPLETE_STEPS should never trigger no_action_needed."""
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
+    from overdrive.runtime.orchestrator.live_worker_adapter import (
         _is_no_action_needed,
     )
 
@@ -281,68 +281,68 @@ def test_early_complete_run_log(tmp_path: Path) -> None:
 
 
 def test_no_action_needed_diagnose_no_issues() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    from overdrive.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
     assert _is_no_action_needed("diagnose", "No issues found — behavior is expected.") is True
 
 
 def test_no_action_needed_diagnose_no_bug_found() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    from overdrive.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
     assert _is_no_action_needed("diagnose", "No bug found after investigation.") is True
 
 
 def test_no_action_needed_diagnose_no_bug_identified() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    from overdrive.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
     assert _is_no_action_needed("diagnose", "No bug identified in the codebase.") is True
 
 
 def test_no_action_needed_diagnose_with_root_cause() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    from overdrive.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
     assert _is_no_action_needed("diagnose", "Root cause: null pointer in parser.py") is False
 
 
 def test_no_action_needed_diagnose_none_summary() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    from overdrive.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
     assert _is_no_action_needed("diagnose", None) is False
 
 
 def test_no_action_needed_diagnose_empty_summary() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    from overdrive.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
     assert _is_no_action_needed("diagnose", "") is False
 
 
 def test_no_action_needed_scan_code_no_issues() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    from overdrive.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
     assert _is_no_action_needed("scan_code", "No issues found — codebase is clean.") is True
 
 
 def test_no_action_needed_scan_code_with_issues() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    from overdrive.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
     assert _is_no_action_needed("scan_code", "Found 3 vulnerabilities") is False
 
 
 def test_no_action_needed_scan_deps_excluded() -> None:
     """scan_deps is intentionally NOT in _EARLY_COMPLETE_STEPS."""
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    from overdrive.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
     assert _is_no_action_needed("scan_deps", "No issues found") is False
 
 
 def test_no_action_needed_profile_no_issues() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    from overdrive.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
     assert _is_no_action_needed("profile", "No performance issues detected.") is True
 
 
 def test_no_action_needed_profile_generic_no_issues() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    from overdrive.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
     assert _is_no_action_needed("profile", "No issues found — within acceptable thresholds.") is True
 
 
 def test_no_action_needed_profile_with_bottleneck() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
+    from overdrive.runtime.orchestrator.live_worker_adapter import _is_no_action_needed
     assert _is_no_action_needed("profile", "Bottleneck: database query in get_users") is False
 
 
 def test_early_complete_steps_membership() -> None:
-    from agent_orchestrator.runtime.orchestrator.live_worker_adapter import _EARLY_COMPLETE_STEPS
+    from overdrive.runtime.orchestrator.live_worker_adapter import _EARLY_COMPLETE_STEPS
     assert _EARLY_COMPLETE_STEPS == {
         "commit_review", "pr_review", "mr_review",
         "diagnose", "scan_code", "profile",
@@ -419,7 +419,7 @@ def test_bug_fix_no_issues_supervised(tmp_path: Path) -> None:
 def test_request_changes_before_done_early_complete() -> None:
     """When requesting changes at before_done for an early-completed task,
     retry from the triggering step (current_step), not steps[-1]."""
-    from agent_orchestrator.runtime.api.routes_tasks import _request_changes_step_for_gate
+    from overdrive.runtime.api.routes_tasks import _request_changes_step_for_gate
     task = Task(
         title="test",
         task_type="bug",
@@ -435,7 +435,7 @@ def test_request_changes_before_done_early_complete() -> None:
 def test_request_changes_before_done_non_early_complete() -> None:
     """When requesting changes at before_done for a non-early-completed task,
     behavior unchanged: returns steps[-1]."""
-    from agent_orchestrator.runtime.api.routes_tasks import _request_changes_step_for_gate
+    from overdrive.runtime.api.routes_tasks import _request_changes_step_for_gate
     task = Task(
         title="test",
         task_type="review",
@@ -449,7 +449,7 @@ def test_request_changes_before_done_non_early_complete() -> None:
 
 def test_request_changes_before_done_existing_commit_review_early_complete() -> None:
     """Regression: commit_review early-complete + request changes → retry from commit_review."""
-    from agent_orchestrator.runtime.api.routes_tasks import _request_changes_step_for_gate
+    from overdrive.runtime.api.routes_tasks import _request_changes_step_for_gate
     task = Task(
         title="test",
         task_type="commit_review",

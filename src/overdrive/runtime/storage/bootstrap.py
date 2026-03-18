@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from .file_repos import (
     FileAgentRepository,
@@ -46,7 +49,7 @@ LEGACY_LOCK_FILES = {
     "config.lock",
 }
 SQLITE_DB_FILE = "runtime.db"
-ARCHIVE_DIR_NAME = ".agent_orchestrator_archive"
+ARCHIVE_DIR_NAME = ".overdrive_archive"
 
 
 def _utc_stamp() -> str:
@@ -68,7 +71,7 @@ def _legacy_yaml_state_exists(state_root: Path) -> bool:
 
 
 def _archive_non_runtime_state(project_dir: Path, state_root: Path) -> None:
-    archive_target = _next_archive_path(project_dir, ".agent_orchestrator_legacy")
+    archive_target = _next_archive_path(project_dir, ".overdrive_legacy")
     state_root.rename(archive_target)
 
 
@@ -359,7 +362,7 @@ def _migrate_yaml_state_to_sqlite(project_dir: Path, state_root: Path) -> None:
 def _ensure_gitignored(project_dir: Path) -> None:
     """Add runtime files to project `.gitignore` if not already present."""
     gitignore = project_dir / ".gitignore"
-    entries = [".agent_orchestrator/", f"{ARCHIVE_DIR_NAME}/", ".workdoc.md"]
+    entries = [".overdrive/", f"{ARCHIVE_DIR_NAME}/", ".workdoc.md"]
     if gitignore.exists():
         content = gitignore.read_text(encoding="utf-8")
         existing_stripped = {line.strip() for line in content.splitlines()}
@@ -368,13 +371,13 @@ def _ensure_gitignored(project_dir: Path) -> None:
             return
         if content and not content.endswith("\n"):
             content += "\n"
-        if "# Agent Orchestrator runtime data" not in content:
-            content += "\n# Agent Orchestrator runtime data\n"
+        if "# Overdrive runtime data" not in content:
+            content += "\n# Overdrive runtime data\n"
         for entry in missing:
             content += f"{entry}\n"
         gitignore.write_text(content, encoding="utf-8")
     else:
-        lines = "# Agent Orchestrator runtime data\n"
+        lines = "# Overdrive runtime data\n"
         for entry in entries:
             lines += f"{entry}\n"
         gitignore.write_text(lines, encoding="utf-8")
@@ -397,9 +400,24 @@ def archive_task_context_manifest(project_dir: Path, entries: list[dict[str, Any
     return manifest_path
 
 
+def _migrate_from_agent_orchestrator(project_dir: Path) -> None:
+    """One-time migration: rename .agent_orchestrator/ to .overdrive/ if needed."""
+    old_root = project_dir / ".agent_orchestrator"
+    new_root = project_dir / ".overdrive"
+    if old_root.exists() and not new_root.exists():
+        old_root.rename(new_root)
+        logger.info("Migrated %s → %s", old_root, new_root)
+    old_archive = project_dir / ".agent_orchestrator_archive"
+    new_archive = project_dir / ".overdrive_archive"
+    if old_archive.exists() and not new_archive.exists():
+        old_archive.rename(new_archive)
+        logger.info("Migrated %s → %s", old_archive, new_archive)
+
+
 def ensure_state_root(project_dir: Path) -> Path:
     """Ensure runtime state root exists and is initialized with SQLite storage."""
-    state_root = project_dir / ".agent_orchestrator"
+    _migrate_from_agent_orchestrator(project_dir)
+    state_root = project_dir / ".overdrive"
 
     if state_root.exists() and not (state_root / SQLITE_DB_FILE).exists() and not _legacy_yaml_state_exists(state_root):
         _archive_non_runtime_state(project_dir, state_root)
@@ -491,7 +509,7 @@ def ensure_state_root(project_dir: Path) -> Path:
 
 def archive_state_root(project_dir: Path) -> Path | None:
     """Archive the current runtime state root under a timestamped folder."""
-    state_root = project_dir / ".agent_orchestrator"
+    state_root = project_dir / ".overdrive"
     if not state_root.exists():
         return None
 

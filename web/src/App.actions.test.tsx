@@ -183,8 +183,8 @@ function installFetchMock(options?: {
       boardCleared = true
       return jsonResponse({
         cleared: true,
-        archived_to: '/tmp/repo-alpha/.agent_orchestrator_archive/state_20260221T120000Z',
-        message: 'Cleared all tasks. Archived previous runtime state to /tmp/repo-alpha/.agent_orchestrator_archive/state_20260221T120000Z.',
+        archived_to: '/tmp/repo-alpha/.overdrive_archive/state_20260221T120000Z',
+        message: 'Cleared all tasks. Archived previous runtime state to /tmp/repo-alpha/.overdrive_archive/state_20260221T120000Z.',
       })
     }
     if (u.includes('/api/tasks/task-1') && method === 'PATCH') return jsonResponse({ task })

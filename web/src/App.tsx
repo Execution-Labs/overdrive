@@ -421,8 +421,8 @@ type TaskWorkdocDocument = {
   exists: boolean
 }
 
-const STORAGE_PROJECT = 'agent-orchestrator-project'
-const STORAGE_ROUTE = 'agent-orchestrator-route'
+const STORAGE_PROJECT = 'overdrive-project'
+const STORAGE_ROUTE = 'overdrive-route'
 const ADD_REPO_VALUE = '__add_new_repo__'
 const WS_RELOAD_CHANNELS = new Set(['tasks', 'queue', 'agents', 'review', 'terminal', 'notifications'])
 const LOG_CHUNK_CHARS = 200_000
@@ -6654,7 +6654,7 @@ export default function App() {
                   <label
                     className="field-label"
                     htmlFor="settings-worker-providers"
-                    title="Configure reasoning effort in your CLI setup first (Codex/Claude profile or config). Agent Orchestrator only passes flags supported by your installed CLI version."
+                    title="Configure reasoning effort in your CLI setup first (Codex/Claude profile or config). Overdrive only passes flags supported by your installed CLI version."
                   >
                     Worker providers (JSON object, optional advanced overrides)
                   </label>
@@ -7225,7 +7225,7 @@ export default function App() {
       <div className="bg-layer" aria-hidden="true" />
       <header className="topbar">
         <div>
-          <h1>Agent Orchestrator</h1>
+          <h1>Overdrive</h1>
         </div>
         <div className="topbar-actions">
           <select
