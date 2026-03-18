@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "overdrive-ai"
-version = "0.3.2"
+version = "0.3.3"
 description = "Deterministic orchestration for AI-assisted software delivery."
 readme = "README.md"
 requires-python = ">=3.10"
