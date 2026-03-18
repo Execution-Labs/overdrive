@@ -70,9 +70,9 @@ When you need:
 
 ```bash
 pip install overdrive-ai
-cd /path/to/your/project
-overdrive server                          # UI + API on http://localhost:8080
-overdrive server --host 0.0.0.0 --port 9000  # custom host/port
+overdrive server                                        # UI + API on http://localhost:8080
+overdrive server --project-dir /path/to/repo            # specific project
+overdrive server --host 0.0.0.0 --port 9000             # custom host/port
 ```
 
 ### One-liner install
