@@ -71,7 +71,8 @@ When you need:
 ```bash
 pip install overdrive-ai
 cd /path/to/your/project
-overdrive server                  # UI + API on :8080
+overdrive server                          # UI + API on http://localhost:8080
+overdrive server --host 0.0.0.0 --port 9000  # custom host/port
 ```
 
 ### One-liner install
