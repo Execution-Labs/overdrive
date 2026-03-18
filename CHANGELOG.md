@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1] - 2026-03-18
+
+### Changed
+- Full rebrand from agent-orchestrator to **Overdrive**: package name, CLI command, data directories, imports, docs, and frontend
+- New README with clearer value proposition and feature overview
+- Auto-migration shim renames existing `.agent_orchestrator/` directories on startup
+
 ## [0.3.0] - 2026-03-18
 
 ### Added
