@@ -6,7 +6,6 @@ set -euo pipefail
 
 REPO="https://github.com/Execution-Labs/overdrive.git"
 MIN_PYTHON="3.10"
-INSTALL_DIR="${OVERDRIVE_INSTALL_DIR:-$HOME/.overdrive}"
 
 # --- Helpers ---
 
@@ -41,44 +40,22 @@ done
 [ -n "$PYTHON" ] || die "Python $MIN_PYTHON+ is required. Install it from https://python.org"
 ok "Python found: $PYTHON ($ver)"
 
-# Node/npm (for frontend)
-if check_command npm; then
-    npm_ver=$(npm --version 2>/dev/null || echo "unknown")
-    ok "npm found: $npm_ver"
-else
-    err "npm not found — frontend won't be available. Install Node.js from https://nodejs.org"
-fi
-
 # Git
 check_command git || die "git is required"
 ok "git found"
 
 # --- Install ---
 
-if [ -d "$INSTALL_DIR" ]; then
-    info "Updating existing installation at $INSTALL_DIR..."
-    git -C "$INSTALL_DIR" pull --ff-only || die "Failed to update. Try: rm -rf $INSTALL_DIR && re-run"
-else
-    info "Cloning Overdrive to $INSTALL_DIR..."
-    git clone "$REPO" "$INSTALL_DIR" || die "Failed to clone repository"
-fi
-
-cd "$INSTALL_DIR"
-
 info "Creating virtual environment..."
-"$PYTHON" -m venv .venv
+VENV_DIR="${OVERDRIVE_VENV_DIR:-$HOME/.overdrive-venv}"
+"$PYTHON" -m venv "$VENV_DIR"
 
-info "Installing Overdrive..."
-.venv/bin/pip install -q -e ".[server]"
-
-if check_command npm; then
-    info "Installing frontend dependencies..."
-    npm --prefix web install --silent
-fi
+info "Installing Overdrive from PyPI..."
+"$VENV_DIR/bin/pip" install -q "overdrive[server]"
 
 # --- Shell setup ---
 
-OVERDRIVE_BIN="$INSTALL_DIR/.venv/bin"
+OVERDRIVE_BIN="$VENV_DIR/bin"
 
 # Check if already in PATH
 if echo "$PATH" | tr ':' '\n' | grep -qx "$OVERDRIVE_BIN"; then
@@ -104,9 +81,9 @@ ok "Overdrive installed successfully!"
 echo ""
 echo "  Get started:"
 echo "    cd /path/to/your/project"
-echo "    overdrive server                  # start backend on :8080"
-echo "    npm --prefix $INSTALL_DIR/web run dev   # start frontend on :3000"
+echo "    overdrive server          # UI + API on :8080"
 echo ""
-echo "  Or use make:"
-echo "    cd $INSTALL_DIR && make dev"
+echo "  For development (clone + frontend):"
+echo "    git clone $REPO && cd overdrive"
+echo "    make setup && make dev    # backend :8080 + frontend :3000"
 echo ""

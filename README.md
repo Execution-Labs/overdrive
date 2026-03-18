@@ -66,27 +66,27 @@ When you need:
 
 ## Quick Start
 
+### pip install (recommended)
+
+```bash
+pip install overdrive[server]
+cd /path/to/your/project
+overdrive server                  # UI + API on :8080
+```
+
 ### One-liner install
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/Execution-Labs/overdrive/main/scripts/install.sh | bash
 ```
 
-### Or clone and use Make
+### Development setup
 
 ```bash
 git clone https://github.com/Execution-Labs/overdrive.git
 cd overdrive
 make setup   # create venv, install backend + frontend
 make dev     # start backend on :8080 + frontend on :3000
-```
-
-### Manual setup
-
-```bash
-python -m pip install -e ".[server]"
-overdrive server                  # backend on :8080
-npm --prefix web install && npm --prefix web run dev   # frontend on :3000
 ```
 
 ## Navigation

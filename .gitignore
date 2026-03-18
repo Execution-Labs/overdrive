@@ -53,6 +53,9 @@ node_modules/
 # Generated reports
 web/lighthouse/
 
+# Bundled frontend (built artifact, not committed)
+src/overdrive/web_dist/
+
 # Overdrive runtime data
 .workdoc.md
 .overdrive_archive/

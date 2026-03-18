@@ -1,4 +1,4 @@
-.PHONY: setup setup-backend setup-frontend dev backend frontend test test-backend test-frontend check lint build clean
+.PHONY: setup setup-backend setup-frontend dev backend frontend test test-backend test-frontend check lint build build-wheel clean
 
 # --- Setup ---
 
@@ -48,6 +48,11 @@ lint: ## Lint backend
 
 build: ## Build frontend for production
 	npm --prefix web run build
+
+build-wheel: build ## Build Python wheel with bundled frontend
+	rm -rf src/overdrive/web_dist
+	cp -r web/dist src/overdrive/web_dist
+	.venv/bin/python -m build
 
 # --- Utilities ---
 
