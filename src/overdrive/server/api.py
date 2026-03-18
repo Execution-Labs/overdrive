@@ -167,7 +167,7 @@ def create_app(
         @app.get("/{path:path}", include_in_schema=False)
         async def spa_fallback(path: str) -> FileResponse:
             # Serve actual static files (favicon, images, etc.)
-            candidate = _frontend_dist / path  # type: ignore[operator]
+            candidate = _frontend_dist / path
             if path and candidate.is_file() and ".." not in path:
                 return FileResponse(str(candidate))
             # Everything else gets index.html (SPA client-side routing)
