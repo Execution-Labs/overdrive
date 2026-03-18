@@ -49,7 +49,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-overdrive = ["web_dist/**/*"]
+overdrive = ["prompts/**/*.md", "web_dist/**/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
