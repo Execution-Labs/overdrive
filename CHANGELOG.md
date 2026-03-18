@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.3.0] - 2026-03-18
+
+### Added
+- **PR review system** with 4 modes: `review_comment`, `summarize`, `fix_only`, `fix_respond`
+- GitHub PR and GitLab MR comment reader for context-aware reviews
+- Inline review comment posting with dry-run staging support
+- `before_post_review` gate: inspect LLM findings and choose review decision before posting
+- Diff-anchored comment validation: prompt hardening + executor-side filter drops comments outside the diff
+- Queue all backlog tasks action from board toolbar
+- Pipeline completion: selected pipelines can be marked "Done" without running every step
+- Task-level worker provider override for summary and recommended-action generation
+
+### Changed
+- README reframed from team/enterprise to individual developer language
+- Heartbeat stall detection improved with lower latency and reconciler safety net
+- Non-blocking pipeline classification with gate label cleanup
+- Prompt improvements: context instructions added to diagnose, fix, profile, scan_code, scan_deps steps
+- Docs refreshed: USER_GUIDE.md rewritten, API/CLI reference updated, stale design docs removed
+
+### Fixed
+- Summary generation failure when retrying tasks with a different worker provider
+- Summary not generated at second review gate
+- False "no changes" block when retrying from commit step
+- Workdoc sync diagnostics persisting after successful fallback recovery
+- PR review comments targeting files/lines outside the diff silently dropped instead of causing API errors
+
 ## [0.2.2] - 2026-03-16
 
 ### Added
