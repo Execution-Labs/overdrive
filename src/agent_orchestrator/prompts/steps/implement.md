@@ -23,7 +23,8 @@ Validation (targeted scope only):
 - The full test suite will be run in a separate verification step after implementation.
 
 Documentation:
-- If behavior, API, CLI, configuration, or setup changes, update relevant documentation in the same step, including `README.md`.
+- If behavior, API, CLI, configuration, or setup changes, identify and update all affected documentation in the same step.
+- Check for docs beyond `README.md`: look for `docs/`, `doc/`, `wiki/`, API reference files, architecture docs, configuration guides, and any other markdown or text documentation in the repository.
 - If the repository maintains a changelog, update it for user-visible behavior changes.
 
 Completion output:

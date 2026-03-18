@@ -11,15 +11,21 @@ import pytest
 from agent_orchestrator.runtime.domain.models import RunRecord, Task
 from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
     LiveWorkerAdapter,
+    _EARLY_COMPLETE_STEPS,
+    _SETTINGS_PROMPT_STEPS,
     _detect_required_verify_commands,
     _filter_npm_commands_by_scripts,
     _inject_required_verify_commands,
     _extract_json,
     _extract_json_value,
+    _is_no_action_needed,
     _normalize_planning_text,
+    _sanitize_stderr,
+    _step_category,
     build_step_prompt,
     detect_project_languages,
 )
+from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 from agent_orchestrator.runtime.orchestrator.environment_preflight import (
     EnvironmentIssue,
     EnvironmentPreflightResult,
@@ -496,8 +502,8 @@ def test_heartbeat_defaults_are_forwarded(adapter: LiveWorkerAdapter) -> None:
 
     assert result.status == "ok"
     assert run_worker_mock.call_args.kwargs["heartbeat_seconds"] == 60
-    # No global config set, so implement step uses built-in per-step default of 600s
-    assert run_worker_mock.call_args.kwargs["heartbeat_grace_seconds"] == 600
+    # No global config set, so implement step uses built-in per-step default of 300s
+    assert run_worker_mock.call_args.kwargs["heartbeat_grace_seconds"] == 300
 
 
 def test_heartbeat_settings_from_workers_config(container: Container, adapter: LiveWorkerAdapter) -> None:
@@ -2542,9 +2548,9 @@ class TestWorkdocPromptInstructions:
             metadata={"classification_allowed_pipelines": ["feature", "docs"]},
         )
         prompt = build_step_prompt(task=task, step="pipeline_classify", attempt=1)
-        assert "Allowed pipeline IDs" in prompt
-        assert "- feature" in prompt
-        assert "- docs" in prompt
+        assert "Allowed pipelines" in prompt
+        assert "`feature`" in prompt
+        assert "`docs`" in prompt
 
     def test_prompt_no_workdoc_for_plan_refine(self) -> None:
         """plan_refine doesn't go through _run_non_review_step so should not get workdoc instructions."""
@@ -2688,3 +2694,274 @@ def test_filter_npm_commands_keeps_compound_with_npm_fallback(tmp_path: Path) ->
     filtered = _filter_npm_commands_by_scripts(commands, tmp_path)
     # npm test is a fallback after ||, not the primary command — should be kept.
     assert "test" in filtered
+
+
+# ---------------------------------------------------------------------------
+# Comment-aware PR review steps
+# ---------------------------------------------------------------------------
+
+
+class TestCommentAwareStepCategorization:
+    """Phase 2: Step categorization for new comment-aware steps."""
+
+    def test_pr_review_comment_is_planning(self) -> None:
+        assert _step_category("pr_review_comment") == "planning"
+
+    def test_pr_review_summarize_is_reporting(self) -> None:
+        assert _step_category("pr_review_summarize") == "reporting"
+
+    def test_pr_review_fix_respond_is_planning(self) -> None:
+        assert _step_category("pr_review_fix_respond") == "planning"
+
+
+class TestCommentAwarePromptMapping:
+    """Phase 3: Prompt template mapping for new comment-aware steps."""
+
+    def test_pr_review_comment_prompt(self) -> None:
+        prompt = build_step_prompt(
+            task=_make_task(task_type="pr_review_comment"),
+            step="pr_review_comment",
+            attempt=1,
+            project_languages=[],
+        )
+        assert prompt  # non-empty
+
+    def test_pr_review_summarize_prompt(self) -> None:
+        prompt = build_step_prompt(
+            task=_make_task(task_type="pr_review_summarize"),
+            step="pr_review_summarize",
+            attempt=1,
+            project_languages=[],
+        )
+        assert prompt
+
+    def test_pr_review_fix_respond_prompt(self) -> None:
+        prompt = build_step_prompt(
+            task=_make_task(task_type="pr_review_fix_respond"),
+            step="pr_review_fix_respond",
+            attempt=1,
+            project_languages=[],
+        )
+        assert prompt
+
+
+class TestCommentAwareSettingsPromptSteps:
+    """Phase 3: All three new steps appear in _SETTINGS_PROMPT_STEPS."""
+
+    def test_pr_review_comment_in_settings(self) -> None:
+        assert "pr_review_comment" in _SETTINGS_PROMPT_STEPS
+
+    def test_pr_review_summarize_in_settings(self) -> None:
+        assert "pr_review_summarize" in _SETTINGS_PROMPT_STEPS
+
+    def test_pr_review_fix_respond_in_settings(self) -> None:
+        assert "pr_review_fix_respond" in _SETTINGS_PROMPT_STEPS
+
+
+class TestCommentContextInjection:
+    """Phase 4: Comment and PR context injection in build_step_prompt()."""
+
+    def test_pr_context_injected_for_pr_review_comment(self) -> None:
+        task = _make_task(
+            task_type="pr_review_comment",
+            metadata={
+                "source_description": "Fix widget alignment",
+                "source_diff": "--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new",
+                "source_stat": " file.py | 2 +-",
+            },
+        )
+        prompt = build_step_prompt(task=task, step="pr_review_comment", attempt=1, project_languages=[])
+        assert "PR/MR description" in prompt
+        assert "Fix widget alignment" in prompt
+        assert "Diff stat" in prompt
+        assert "PR/MR diff" in prompt
+
+    def test_comment_context_injected_for_pr_review_comment(self) -> None:
+        task = _make_task(
+            task_type="pr_review_comment",
+            metadata={
+                "source_comments_formatted": "- @alice: Please fix the typo on line 42\n- @bob: LGTM",
+            },
+        )
+        prompt = build_step_prompt(task=task, step="pr_review_comment", attempt=1, project_languages=[])
+        assert "## Existing review comments" in prompt
+        assert "@alice: Please fix the typo on line 42" in prompt
+
+    def test_comment_context_injected_for_pr_review_summarize(self) -> None:
+        task = _make_task(
+            task_type="pr_review_summarize",
+            metadata={
+                "source_comments_formatted": "- @reviewer: Need tests",
+            },
+        )
+        prompt = build_step_prompt(task=task, step="pr_review_summarize", attempt=1, project_languages=[])
+        assert "## Existing review comments" in prompt
+        assert "@reviewer: Need tests" in prompt
+
+    def test_comment_context_injected_for_pr_review_fix_respond(self) -> None:
+        task = _make_task(
+            task_type="pr_review_fix_respond",
+            metadata={
+                "source_comments_formatted": "- @lead: Refactor this method",
+            },
+        )
+        prompt = build_step_prompt(task=task, step="pr_review_fix_respond", attempt=1, project_languages=[])
+        assert "## Existing review comments" in prompt
+        assert "@lead: Refactor this method" in prompt
+
+    def test_comment_context_omitted_when_empty(self) -> None:
+        task = _make_task(
+            task_type="pr_review_comment",
+            metadata={"source_comments_formatted": ""},
+        )
+        prompt = build_step_prompt(task=task, step="pr_review_comment", attempt=1, project_languages=[])
+        assert "## Existing review comments" not in prompt
+
+    def test_comment_context_omitted_when_missing(self) -> None:
+        task = _make_task(
+            task_type="pr_review_comment",
+            metadata={},
+        )
+        prompt = build_step_prompt(task=task, step="pr_review_comment", attempt=1, project_languages=[])
+        assert "## Existing review comments" not in prompt
+
+    def test_comment_context_not_injected_for_pr_review(self) -> None:
+        """The original pr_review step should NOT get comment context."""
+        task = _make_task(
+            task_type="pr_review",
+            metadata={
+                "source_comments_formatted": "- @alice: some comment",
+            },
+        )
+        prompt = build_step_prompt(task=task, step="pr_review", attempt=1, project_languages=[])
+        assert "## Existing review comments" not in prompt
+
+
+class TestCommentAwareEarlyCompletion:
+    """Phase 6: Early completion support for new steps."""
+
+    def test_pr_review_comment_no_issues_found(self) -> None:
+        assert _is_no_action_needed("pr_review_comment", "No issues found") is True
+
+    def test_pr_review_summarize_no_issues_found(self) -> None:
+        assert _is_no_action_needed("pr_review_summarize", "No issues found") is True
+
+    def test_pr_review_fix_respond_no_early_completion(self) -> None:
+        assert _is_no_action_needed("pr_review_fix_respond", "No issues found") is False
+
+    def test_pr_review_comment_in_early_complete_steps(self) -> None:
+        assert "pr_review_comment" in _EARLY_COMPLETE_STEPS
+
+    def test_pr_review_summarize_in_early_complete_steps(self) -> None:
+        assert "pr_review_summarize" in _EARLY_COMPLETE_STEPS
+
+    def test_pr_review_fix_respond_not_in_early_complete_steps(self) -> None:
+        assert "pr_review_fix_respond" not in _EARLY_COMPLETE_STEPS
+
+
+class TestStepResultCommentActions:
+    """Phase 1: StepResult comment_actions field."""
+
+    def test_comment_actions_default_none(self) -> None:
+        result = StepResult()
+        assert result.comment_actions is None
+
+    def test_comment_actions_populated(self) -> None:
+        actions = [{"path": "a.py", "line": 1, "body": "fix", "severity": "high"}]
+        result = StepResult(comment_actions=actions)
+        assert result.comment_actions == actions
+        assert len(result.comment_actions) == 1
+        assert result.comment_actions[0]["path"] == "a.py"
+
+
+class TestCommentAwareMapResult:
+    """Phase 5: pr_review_comment JSON parsing in _map_result."""
+
+    def test_pr_review_comment_json_parsed_directly(self, adapter: LiveWorkerAdapter) -> None:
+        """When pr_review_comment returns JSON with comments field, parse directly."""
+        json_output = '{"comments": [{"path": "x.py", "line": 10, "body": "Fix this", "severity": "high"}], "summary": "One issue"}'
+        result = _make_run_result(response_text=json_output)
+
+        with patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step", return_value=_CODEX_SPEC), \
+             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config") as mock_cfg, \
+             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker", return_value=(True, "")), \
+             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker", return_value=result), \
+             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight") as mock_pf:
+            mock_cfg.return_value = SimpleNamespace(providers={"codex": _CODEX_SPEC}, default_model="")
+            mock_pf.return_value = EnvironmentPreflightResult(ok=True, issues=[], required_capabilities=set(), attempted_remediation=False, remediation_log="")
+            task = _make_task(task_type="pr_review_comment")
+            step_result = adapter.run_step(task=task, step="pr_review_comment", attempt=1)
+        assert step_result.status == "ok"
+        assert step_result.comment_actions is not None
+        assert len(step_result.comment_actions) == 1
+        assert step_result.comment_actions[0]["path"] == "x.py"
+        assert step_result.summary == "One issue"
+
+    def test_pr_review_comment_freeform_triggers_formatter(self, adapter: LiveWorkerAdapter) -> None:
+        """When pr_review_comment returns freeform text, the formatter is invoked."""
+        freeform_output = "I found a bug in file.py at line 5: the variable is unused."
+        formatter_json = '{"comments": [{"path": "file.py", "line": 5, "body": "unused variable", "severity": "medium"}], "summary": "One finding"}'
+        primary_result = _make_run_result(response_text=freeform_output)
+        formatter_result = _make_run_result(response_text=formatter_json)
+
+        call_count = 0
+
+        def mock_run_worker(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return primary_result
+            return formatter_result
+
+        with patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step", return_value=_CODEX_SPEC), \
+             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config") as mock_cfg, \
+             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker", return_value=(True, "")), \
+             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker", side_effect=mock_run_worker), \
+             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight") as mock_pf:
+            mock_cfg.return_value = SimpleNamespace(providers={"codex": _CODEX_SPEC}, default_model="")
+            mock_pf.return_value = EnvironmentPreflightResult(ok=True, issues=[], required_capabilities=set(), attempted_remediation=False, remediation_log="")
+            task = _make_task(task_type="pr_review_comment")
+            step_result = adapter.run_step(task=task, step="pr_review_comment", attempt=1)
+        assert call_count == 2  # primary + formatter
+        assert step_result.status == "ok"
+        assert step_result.comment_actions is not None
+        assert len(step_result.comment_actions) == 1
+        assert step_result.comment_actions[0]["path"] == "file.py"
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_stderr
+# ---------------------------------------------------------------------------
+
+class TestSanitizeStderr:
+    def test_takes_tail_past_startup_noise(self) -> None:
+        raw = (
+            "- Do NOT suppress or down-rank review findings.\n"
+            "- Prefer fixing issues over escalating; escalate only when truly stuck.\n"
+            "- Be explicit about risks, uncertainty, and assumptions.\n"
+            "mcp startup: no servers\n"
+            "ERROR: You've hit your usage limit.\n"
+        )
+        result = _sanitize_stderr(raw)
+        assert "ERROR: You've hit your usage limit." in result
+
+    def test_strips_tool_error_xml_tags(self) -> None:
+        raw = "Tool error: <tool_use_error>File has been modified</tool_use_error>"
+        result = _sanitize_stderr(raw)
+        assert "<tool_use_error>" not in result
+        assert "File has been modified" in result
+
+    def test_preserves_meaningful_errors(self) -> None:
+        raw = "ERROR: compilation failed\nsrc/main.rs:12: expected `;`"
+        result = _sanitize_stderr(raw)
+        assert "compilation failed" in result
+        assert "expected `;`" in result
+
+    def test_respects_max_length(self) -> None:
+        raw = "ERROR: " + "x" * 600
+        result = _sanitize_stderr(raw, max_length=100)
+        assert len(result) <= 100
+
+    def test_empty_input(self) -> None:
+        assert _sanitize_stderr("") == ""
+        assert _sanitize_stderr("   \n  ") == ""

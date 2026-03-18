@@ -23,3 +23,8 @@ Output requirements:
   - file/location (manifest/lockfile),
   - evidence (advisory ID/source or observed version/range mismatch),
   - uncertainty notes when applicable.
+
+## No-issue case
+If no dependency security issues are identified:
+- Write "No issues found" as the first line of your response.
+- Follow with a brief summary of what was scanned and why it is clean.

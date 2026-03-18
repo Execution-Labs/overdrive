@@ -35,6 +35,13 @@ class WorkdocManager:
         "verify": ("## Verification Results", "verify"),
         "benchmark": ("## Verification Results", "verify"),
         "report": ("## Final Report", "report"),
+        # PR review pipelines
+        "fetch_comments": ("## Fetched Comments", "fetch_comments"),
+        "pr_review_comment": ("## Review Comments", "pr_review_comment"),
+        "pr_review_summarize": ("## Review Summary", "pr_review_summarize"),
+        "pr_review_fix_respond": ("## Review & Fix Plan", "pr_review_fix_respond"),
+        "post_comments": ("## Posted Comments", "post_comments"),
+        "post_comment_responses": ("## Comment Responses", "post_comment_responses"),
     }
     _WORKDOC_SENTINEL_ID_MAP: dict[str, str] = {
         "plan": "plan",
@@ -55,6 +62,12 @@ class WorkdocManager:
         "benchmark": "verification_results",
         "report": "final_report",
         "review": "review_findings",
+        "fetch_comments": "fetched_comments",
+        "pr_review_comment": "review_comments",
+        "pr_review_summarize": "review_summary",
+        "pr_review_fix_respond": "review_fix_plan",
+        "post_comments": "posted_comments",
+        "post_comment_responses": "comment_responses",
     }
     _WORKDOC_HEADING_SENTINEL_MAP: dict[str, str] = {
         "## Plan": "plan",
@@ -91,6 +104,12 @@ class WorkdocManager:
         "## Security Report": "final_report",
         "## Review Findings": "review_findings",
         "## Initiative Context": "initiative_context",
+        "## Fetched Comments": "fetched_comments",
+        "## Review Comments": "review_comments",
+        "## Review Summary": "review_summary",
+        "## Review & Fix Plan": "review_fix_plan",
+        "## Posted Comments": "posted_comments",
+        "## Comment Responses": "comment_responses",
     }
     _WORKDOC_SCHEMA_MARKER = "<!-- WORKDOC:SCHEMA v1 -->"
     _SYNC_DIAGNOSTIC_KEYS = (
@@ -334,6 +353,98 @@ _Pending: will be populated by the review step._
 ## Fix Log
 
 _Pending: will be populated as needed._
+"""
+
+    _PR_REVIEW_COMMENT_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Fetched Comments
+
+_Pending: will be populated by the fetch comments step._
+
+## Review Comments
+
+_Pending: will be populated by the review & comment step._
+
+## Posted Comments
+
+_Pending: will be populated by the post comments step._
+"""
+
+    _PR_REVIEW_SUMMARIZE_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Fetched Comments
+
+_Pending: will be populated by the fetch comments step._
+
+## Review Summary
+
+_Pending: will be populated by the summarize step._
+"""
+
+    _PR_REVIEW_FIX_RESPOND_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Fetched Comments
+
+_Pending: will be populated by the fetch comments step._
+
+## Review & Fix Plan
+
+_Pending: will be populated by the review & plan fixes step._
+
+## Implementation Log
+
+_Pending: will be populated by the implement step._
+
+## Verification Results
+
+_Pending: will be populated by the verify step._
+
+## Review Findings
+
+_Pending: will be populated by the review step._
+
+## Comment Responses
+
+_Pending: will be populated by the post comment responses step._
 """
 
     _BUG_FIX_WORKDOC_TEMPLATE = """\
@@ -664,6 +775,10 @@ _Pending: will be populated by the generate_tasks step._
             "commit_review": self._COMMIT_REVIEW_WORKDOC_TEMPLATE,
             "pr_review": self._COMMIT_REVIEW_WORKDOC_TEMPLATE,
             "mr_review": self._COMMIT_REVIEW_WORKDOC_TEMPLATE,
+            "pr_review_comment": self._PR_REVIEW_COMMENT_WORKDOC_TEMPLATE,
+            "pr_review_summarize": self._PR_REVIEW_SUMMARIZE_WORKDOC_TEMPLATE,
+            "pr_review_fix_only": self._COMMIT_REVIEW_WORKDOC_TEMPLATE,
+            "pr_review_fix_respond": self._PR_REVIEW_FIX_RESPOND_WORKDOC_TEMPLATE,
             "performance": self._PERFORMANCE_WORKDOC_TEMPLATE,
             "hotfix": self._HOTFIX_WORKDOC_TEMPLATE,
             "spike": self._SPIKE_WORKDOC_TEMPLATE,
@@ -1063,9 +1178,7 @@ _Pending: will be populated by the generate_tasks step._
             sync_mode = "fallback_append"
             sync_reason = "orchestrator_summary"
 
-        if changed and sync_mode in {"sentinel_merge", "legacy_heading_merge"}:
-            self.clear_sync_diagnostics(task)
-        elif changed and sync_reason == "orchestrator_summary":
+        if changed:
             self.clear_sync_diagnostics(task)
 
         if changed:

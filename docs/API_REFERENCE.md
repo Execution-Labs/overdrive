@@ -150,6 +150,17 @@ Notes:
 - `done` recency is based on task `updated_at`.
 - Missing or malformed timestamps are sorted last with deterministic ID tie-breakers.
 
+### `POST /api/tasks/queue-backlog`
+Transition all backlog tasks to queued status in a single bulk operation.
+
+Query parameters:
+- `project_dir` (optional): project directory to resolve runtime state.
+
+Response:
+- `queued_count` (number of tasks transitioned)
+- `task_ids` (list of transitioned task IDs)
+- `message` (user-facing summary)
+
 ### `POST /api/tasks/clear`
 Clear all board tasks by archiving runtime state and reinitializing empty state.
 
@@ -228,6 +239,14 @@ Notes:
 
 ### `POST /api/tasks/{task_id}/run`
 Queue/execute a task through the orchestrator.
+
+### `POST /api/tasks/{task_id}/select-pipeline`
+Manually select a pipeline for a task awaiting classification.
+
+Request:
+- `pipeline_id` — the pipeline to assign.
+
+Returns 400 if `pending_gate` is not `select_pipeline` or `pipeline_id` is invalid.
 
 ### `POST /api/tasks/{task_id}/retry`
 Reset task for another run.
@@ -378,6 +397,16 @@ Request:
 - `content` (required)
 - `parent_revision_id` (optional)
 - `feedback_note` (optional)
+
+### `POST /api/tasks/{task_id}/post-review-comments`
+Post dry-run review comments for a task.
+
+Validates task is a dry-run with generated comments. Posts comments via the configured platform and updates metadata.
+
+Response:
+- `posted_count`, `failed_count`, `results[]`, `task`
+
+Errors: 404 (not found), 409 (not dry-run or no generated comments).
 
 ### `POST /api/tasks/{task_id}/generate-tasks`
 Generate child tasks from plan content.

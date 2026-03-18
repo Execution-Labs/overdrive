@@ -40,7 +40,7 @@ Consistency and convergence:
 - After the first cycle, do not introduce new cosmetic/low-value findings unless they stem from newly changed code.
 
 Documentation check:
-- If changed code affects user-facing behavior, CLI, configuration, setup, or API surface, verify documentation updates (including `README.md`).
+- If changed code affects user-facing behavior, CLI, configuration, setup, or API surface, verify that all affected documentation has been updated — not just `README.md`, but also `docs/`, `doc/`, changelogs, API references, architecture docs, and any other documentation files in the repository.
 - Raise at least a medium-severity finding when required documentation is missing or stale.
 
 Output requirements:

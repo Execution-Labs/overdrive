@@ -16,6 +16,8 @@ class StepResult:
     summary: str | None = None
     findings: list[dict[str, Any]] | None = None
     generated_tasks: list[dict[str, Any]] | None = None
+    comment_actions: list[dict[str, Any]] | None = None
+    proposed_decision: str | None = None
     dependency_edges: list[dict[str, str]] | None = None
     human_blocking_issues: list[dict[str, str]] | None = None
     token_usage: dict[str, Any] | None = None

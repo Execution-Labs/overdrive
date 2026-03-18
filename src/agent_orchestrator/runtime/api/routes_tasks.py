@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -12,7 +14,7 @@ from pathlib import Path
 from typing import Any, Optional, cast
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from ...collaboration.modes import normalize_hitl_mode
 from ...pipelines.registry import PipelineRegistry
@@ -23,6 +25,7 @@ from ..orchestrator.human_guidance import (
 from ..domain.models import (
     DependencyPolicy,
     Priority,
+    ReviewMode,
     Task,
     TaskStatus,
     now_iso,
@@ -69,7 +72,25 @@ class CreatePullRequestReviewRequest(BaseModel):
     """Request body for creating a pull request review task."""
 
     guidance: str = ""
+    review_mode: ReviewMode = "fix_only"
 
+
+# ---------------------------------------------------------------------------
+# Review mode → pipeline mapping
+# ---------------------------------------------------------------------------
+
+_REVIEW_MODE_TO_PIPELINE: dict[str, tuple[str, str]] = {
+    # review_mode → (task_type, pipeline_id)
+    "fix_only": ("pr_review_fix_only", "pr_review_fix_only"),
+    "review_comment": ("pr_review_comment", "pr_review_comment"),
+    "summarize": ("pr_review_summarize", "pr_review_summarize"),
+    "fix_respond": ("pr_review_fix_respond", "pr_review_fix_respond"),
+}
+
+_MODES_NEEDING_COMMENTS: set[str] = {"review_comment", "summarize", "fix_respond"}
+
+_MAX_FETCHED_COMMENTS = 200
+_MAX_COMMENT_BODY_CHARS = 4000
 
 _CHANGES_TELEMETRY_RECENT: dict[tuple[str, str, str, str], float] = {}
 _CHANGES_TELEMETRY_TTL_SECONDS = 900.0
@@ -128,10 +149,10 @@ def _gate_approved_message(gate: str | None, *, will_resume: bool) -> str:
             return "Task generation approved. Task will resume shortly."
         if normalized == "before_done":
             return "Marked done. Task will finalize shortly."
-        if normalized == "after_implement":
-            return "Implementation approved. Task will resume shortly."
         if normalized == "before_commit":
             return "Approved. Task will resume shortly."
+        if normalized == "before_post_review":
+            return "Review approved. Proceeding to post."
         if normalized == "human_intervention":
             return "Intervention acknowledged. Task will resume shortly."
         gate_label = _gate_display_label(normalized)
@@ -155,6 +176,8 @@ def _gate_changes_requested_message(gate: str | None, *, start_from_step: str | 
         return "Changes requested. Task resumed before task generation."
     if normalized == "before_done":
         return "Refinement requested. Task will re-run analysis."
+    if normalized == "before_post_review":
+        return "Review refinement requested. Task will re-run the review step."
     if start_from_step:
         return f"Changes requested. Task resumed from {start_from_step}."
     return "Changes requested. Task resumed."
@@ -166,8 +189,8 @@ def _resume_step_for_gate(gate: str | None) -> str | None:
         "before_implement": "implement",
         "before_generate_tasks": "generate_tasks",
         "before_done": "__before_done__",
-        "after_implement": "review",
         "before_commit": "commit",
+        "before_post_review": "post_comments",
     }
     return mapping.get(str(gate or "").strip())
 
@@ -265,13 +288,23 @@ def _request_changes_step_for_gate(task: Task, gate: str | None) -> str | None:
     if normalized == "before_generate_tasks":
         return _previous_step(steps, "generate_tasks")
     if normalized == "before_done":
+        # For early-completed tasks, retry from the step that triggered
+        # early completion (stored in task.current_step by the executor).
+        # For non-early-completed tasks, retry from the last pipeline step.
+        if isinstance(task.metadata, dict) and task.metadata.get("early_complete"):
+            return task.current_step or (steps[0] if steps else None)
         return steps[-1] if steps else task.current_step
     if normalized == "before_commit":
         return _previous_step(steps, "commit") or "implement"
-    if normalized == "after_implement":
-        return "implement"
     if normalized == "before_plan":
         return _previous_step(steps, "plan") or "plan"
+    if normalized == "before_post_review":
+        # Re-run from the review step that precedes the posting step.
+        for posting_step in ("post_comments", "post_comment_responses"):
+            prev = _previous_step(steps, posting_step)
+            if prev and prev != posting_step:
+                return prev
+        return task.current_step or None
     return task.current_step or None
 
 
@@ -981,10 +1014,19 @@ def _detect_git_platform(project_dir: Path) -> str | None:
         return None
 
 
-def _fetch_github_pr_context(git_dir: Path, pr_number: int) -> dict[str, Any]:
+def _fetch_github_pr_context(
+    git_dir: Path, pr_number: int, *, fetch_comments: bool = False,
+) -> dict[str, Any]:
     """Fetch GitHub PR metadata, diff, and stat via the ``gh`` CLI.
 
-    Returns a dict with keys: title, body, head_ref, base_ref, url, diff, stat.
+    Args:
+        git_dir: Path to the git repository.
+        pr_number: GitHub pull request number.
+        fetch_comments: When True, also fetch PR comments and review comments.
+
+    Returns:
+        A dict with keys: title, body, head_ref, base_ref, url, diff, stat,
+        and optionally ``comments`` (list of dicts) when *fetch_comments* is True.
 
     Raises:
         HTTPException: If metadata fetch fails.
@@ -1037,7 +1079,7 @@ def _fetch_github_pr_context(git_dir: Path, pr_number: int) -> dict[str, Any]:
         except (subprocess.TimeoutExpired, OSError):
             pass
 
-    return {
+    result: dict[str, Any] = {
         "title": title,
         "body": body,
         "head_ref": head_ref,
@@ -1047,11 +1089,69 @@ def _fetch_github_pr_context(git_dir: Path, pr_number: int) -> dict[str, Any]:
         "stat": stat_text,
     }
 
+    if fetch_comments:
+        result["comments"] = _fetch_github_pr_comments(git_dir, pr_number)
 
-def _fetch_gitlab_mr_context(git_dir: Path, mr_number: int) -> dict[str, Any]:
+    return result
+
+
+def _fetch_github_pr_comments(git_dir: Path, pr_number: int) -> list[dict[str, Any]]:
+    """Fetch PR comments and review comments via the ``gh`` CLI.
+
+    Returns a list of comment dicts, each with keys: id, author, body,
+    created_at, type ("comment" or "review"), path (str | None),
+    line (int | None).  On failure returns an empty list (non-fatal).
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "comments,reviews"],
+            cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
+        )
+        data = json.loads(result.stdout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        return []
+
+    comments: list[dict[str, Any]] = []
+
+    for c in data.get("comments", []):
+        comments.append({
+            "id": str(c.get("id", "")),
+            "author": str((c.get("author") or {}).get("login", "")),
+            "body": str(c.get("body", ""))[:_MAX_COMMENT_BODY_CHARS],
+            "created_at": str(c.get("createdAt", "")),
+            "type": "comment",
+            "path": None,
+            "line": None,
+        })
+
+    for r in data.get("reviews", []):
+        comments.append({
+            "id": str(r.get("id", "")),
+            "author": str((r.get("author") or {}).get("login", "")),
+            "body": str(r.get("body", ""))[:_MAX_COMMENT_BODY_CHARS],
+            "created_at": str(r.get("submittedAt", "")),
+            "type": "review",
+            "path": None,
+            "line": None,
+        })
+
+    return comments[:_MAX_FETCHED_COMMENTS]
+
+
+def _fetch_gitlab_mr_context(
+    git_dir: Path, mr_number: int, *, fetch_comments: bool = False,
+) -> dict[str, Any]:
     """Fetch GitLab MR metadata, diff, and stat via the ``glab`` CLI.
 
-    Returns a dict with keys: title, body, head_ref, base_ref, url, diff, stat.
+    Args:
+        git_dir: Path to the git repository.
+        mr_number: GitLab merge request number.
+        fetch_comments: When True, include an empty ``comments`` list (GitLab
+            comment fetching for non-fix_only modes is not yet implemented).
+
+    Returns:
+        A dict with keys: title, body, head_ref, base_ref, url, diff, stat,
+        and optionally ``comments`` when *fetch_comments* is True.
 
     Raises:
         HTTPException: If metadata fetch fails.
@@ -1095,7 +1195,7 @@ def _fetch_gitlab_mr_context(git_dir: Path, mr_number: int) -> dict[str, Any]:
         except (subprocess.TimeoutExpired, OSError):
             pass
 
-    return {
+    result: dict[str, Any] = {
         "title": title,
         "body": body,
         "head_ref": head_ref,
@@ -1104,6 +1204,105 @@ def _fetch_gitlab_mr_context(git_dir: Path, mr_number: int) -> dict[str, Any]:
         "diff": diff_text,
         "stat": stat_text,
     }
+
+    if fetch_comments:
+        # GitLab comment fetching for non-fix_only modes is not yet implemented.
+        result["comments"] = []
+
+    return result
+
+
+SelectPipelineRequest = impl.SelectPipelineRequest
+
+_bg_classify_logger = logging.getLogger(__name__ + ".bg_classify")
+
+
+async def _run_background_classification(
+    task_id: str,
+    project_dir: str | None,
+    allowed_pipelines: list[str],
+    deps: RouteDeps,
+) -> None:
+    """Classify a task's pipeline in the background and update the gate."""
+    try:
+        container, bus, orchestrator = deps.ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task or task.pending_gate != "pipeline_classify":
+            return
+        registry = PipelineRegistry()
+        synthetic = Task(
+            title=task.title,
+            description=task.description,
+            task_type="feature",
+            status="queued",
+            metadata={"classification_allowed_pipelines": allowed_pipelines},
+        )
+        try:
+            result = await asyncio.to_thread(
+                orchestrator.worker_adapter.run_step_ephemeral,
+                task=synthetic, step="pipeline_classify", attempt=1,
+            )
+        except Exception:
+            _bg_classify_logger.warning("Background classification failed for %s", task_id, exc_info=True)
+            result = None
+
+        # Re-fetch task to avoid overwriting concurrent edits
+        task = container.tasks.get(task_id)
+        if not task:
+            return
+        if task.pending_gate != "pipeline_classify":
+            return  # Gate was already resolved manually
+
+        if result and result.status == "ok":
+            classified = _normalize_pipeline_classification_output(
+                summary=result.summary,
+                allowed_pipelines=allowed_pipelines,
+                registry=registry,
+            )
+            if classified.confidence == "high":
+                resolved_type = _canonical_task_type_for_pipeline(registry, classified.pipeline_id)
+                template = registry.resolve_for_task_type(resolved_type)
+                task.task_type = resolved_type
+                task.pipeline_template = template.step_names()
+                task.pending_gate = None
+                task.metadata["classifier_pipeline_id"] = classified.pipeline_id
+                task.metadata["classifier_confidence"] = "high"
+                task.metadata["classifier_reason"] = classified.reason
+                task.metadata["final_pipeline_id"] = template.id
+            else:
+                task.pending_gate = "select_pipeline"
+                task.metadata["classifier_pipeline_id"] = classified.pipeline_id
+                task.metadata["classifier_confidence"] = "low"
+                task.metadata["classifier_reason"] = classified.reason
+                task.metadata["classification_allowed_pipelines"] = allowed_pipelines
+        else:
+            task.pending_gate = "select_pipeline"
+            task.metadata["classifier_confidence"] = "failed"
+            task.metadata["classifier_reason"] = "Auto-classification failed."
+            task.metadata["classification_allowed_pipelines"] = allowed_pipelines
+
+        container.tasks.upsert(task)
+        bus.emit(
+            channel="tasks", event_type="task.updated",
+            entity_id=task.id, payload={"status": task.status},
+        )
+    except Exception:
+        _bg_classify_logger.error("Unhandled error in background classification for %s", task_id, exc_info=True)
+        try:
+            container, bus, _ = deps.ctx(project_dir)
+            task = container.tasks.get(task_id)
+            if task and task.pending_gate == "pipeline_classify":
+                task.pending_gate = "select_pipeline"
+                task.metadata["classifier_confidence"] = "failed"
+                task.metadata["classifier_reason"] = "Auto-classification failed."
+                task.metadata["classification_allowed_pipelines"] = allowed_pipelines
+                container.tasks.upsert(task)
+                bus.emit(
+                    channel="tasks", event_type="task.updated",
+                    entity_id=task.id, payload={"status": task.status},
+                )
+        except Exception:
+            _bg_classify_logger.error("Failed to recover task %s after classification error", task_id, exc_info=True)
 
 
 def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
@@ -1132,13 +1331,14 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         classifier_confidence_valid = classifier_confidence in {"high", "low"}
         requested_task_type = str(body.task_type or "feature").strip() or "feature"
 
+        needs_background_classification = False
         if requested_task_type == "auto":
-            if classifier_confidence != "high" or not classifier_pipeline_valid:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Auto task type requires a high-confidence classifier result.",
-                )
-            resolved_task_type = _canonical_task_type_for_pipeline(registry, classifier_pipeline_id)
+            if classifier_confidence == "high" and classifier_pipeline_valid:
+                resolved_task_type = _canonical_task_type_for_pipeline(registry, classifier_pipeline_id)
+            else:
+                # Defer classification to background — use feature as placeholder
+                resolved_task_type = "feature"
+                needs_background_classification = True
         else:
             resolved_task_type = requested_task_type
 
@@ -1185,6 +1385,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             task.metadata["classifier_reason"] = classifier_reason
             task.metadata["was_user_override"] = bool(body.was_user_override)
         task.metadata["final_pipeline_id"] = final_pipeline_id
+        if needs_background_classification:
+            task.pending_gate = "pipeline_classify"
         requested_status = str(body.status or "").strip()
         valid_statuses = {"backlog", "queued", "in_progress", "in_review", "done", "blocked", "cancelled"}
         if requested_status in valid_statuses:
@@ -1200,6 +1402,10 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 container.tasks.upsert(parent)
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.created", entity_id=task.id, payload={"status": task.status})
+        if needs_background_classification:
+            asyncio.ensure_future(_run_background_classification(
+                task.id, project_dir, allowed_pipelines, deps,
+            ))
         return {"task": _task_payload(task, orchestrator=orchestrator)}
 
     @router.post("/tasks/classify-pipeline", response_model=PipelineClassificationResponse)
@@ -1247,6 +1453,38 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             registry=registry,
         )
 
+    @router.post("/tasks/{task_id}/select-pipeline")
+    async def select_pipeline(
+        task_id: str,
+        body: SelectPipelineRequest,
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        """Manually select a pipeline for a task awaiting classification."""
+        container, bus, orchestrator = deps.ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if task.pending_gate != "select_pipeline":
+            raise HTTPException(400, "Task is not awaiting pipeline selection")
+        registry = PipelineRegistry()
+        allowed = sorted(t.id for t in registry.list_templates())
+        if body.pipeline_id not in allowed:
+            raise HTTPException(400, f"Unknown pipeline: {body.pipeline_id}")
+        resolved_type = _canonical_task_type_for_pipeline(registry, body.pipeline_id)
+        template = registry.resolve_for_task_type(resolved_type)
+        task.task_type = resolved_type
+        task.pipeline_template = template.step_names()
+        task.pending_gate = None
+        task.metadata["final_pipeline_id"] = template.id
+        task.metadata["was_user_override"] = True
+        task.metadata.pop("classification_allowed_pipelines", None)
+        container.tasks.upsert(task)
+        bus.emit(
+            channel="tasks", event_type="task.updated",
+            entity_id=task.id, payload={"status": task.status},
+        )
+        return {"task": _task_payload(task, orchestrator=orchestrator)}
+
     @router.get("/tasks")
     async def list_tasks(
         project_dir: Optional[str] = Query(None),
@@ -1255,7 +1493,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         priority: Optional[str] = Query(None),
     ) -> dict[str, Any]:
         """List tasks filtered by lifecycle, type, or priority.
-        
+
         Args:
             project_dir: Optional project directory used to resolve runtime state.
             status: Optional status filter.
@@ -1301,6 +1539,49 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         for status, items in columns.items():
             items.sort(key=lambda item: _board_item_sort_key(status, item))
         return {"columns": columns}
+
+    @router.post("/tasks/queue-backlog")
+    async def queue_backlog(
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        """Transition all backlog tasks to queued status.
+
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+
+        Returns:
+            A payload with the count of queued tasks and their IDs.
+        """
+        container, bus, _orchestrator = deps.ctx(project_dir)
+        tasks = container.tasks.list()
+        backlog_tasks = [t for t in tasks if t.status == "backlog"]
+
+        queued_ids: list[str] = []
+        for task in backlog_tasks:
+            task.status = "queued"
+            task.updated_at = now_iso()
+            container.tasks.upsert(task)
+            queued_ids.append(task.id)
+            bus.emit(
+                channel="tasks",
+                event_type="task.updated",
+                entity_id=task.id,
+                payload={"status": "queued"},
+            )
+
+        if queued_ids:
+            bus.emit(
+                channel="queue",
+                event_type="queue.changed",
+                entity_id="",
+                payload={"queued_count": len(queued_ids)},
+            )
+
+        return {
+            "queued_count": len(queued_ids),
+            "task_ids": queued_ids,
+            "message": f"Queued {len(queued_ids)} backlog task(s)." if queued_ids else "No backlog tasks to queue.",
+        }
 
     @router.post("/tasks/clear")
     async def clear_tasks(
@@ -2558,6 +2839,26 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                     effective_policy=effective_generation_policy,
                 )
 
+        # Carry review-specific choices from gate approval into task metadata
+        # so that the post_comments / post_comment_responses steps pick them up.
+        _VALID_REVIEW_DECISIONS = {"approve", "request_changes", "comment"}
+        if cleared_gate == "before_post_review":
+            review_decision = getattr(body, "review_decision", None)
+            post_comments_flag = getattr(body, "post_comments", None)
+            if review_decision and review_decision not in _VALID_REVIEW_DECISIONS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid review_decision '{review_decision}'. Must be one of: {', '.join(sorted(_VALID_REVIEW_DECISIONS))}",
+                )
+            # Fall back to LLM's proposal when user didn't choose.
+            if not review_decision:
+                review_decision = task.metadata.get("proposed_review_decision", "comment")
+            task.metadata["review_decision"] = {
+                "decision": review_decision,
+                "body": task.metadata.get("review_summary", ""),
+            }
+            task.metadata["comment_dry_run"] = not post_comments_flag if post_comments_flag is not None else True
+
         if should_resume:
             checkpoint = task.metadata.get("execution_checkpoint")
             checkpoint_payload = dict(checkpoint) if isinstance(checkpoint, dict) else {}
@@ -2946,8 +3247,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        if not orchestrator.supports_task_generation(task):
-            raise HTTPException(status_code=400, detail="Task pipeline does not include generate_tasks")
+        if not orchestrator.supports_task_generation(task) and not orchestrator.supports_post_completion_generation(task):
+            raise HTTPException(status_code=400, detail="Task does not support task generation")
         source = body.source
         if source is None:
             # Backward compatibility: previous API accepted only optional plan_override.
@@ -3101,12 +3402,16 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         return {"task": _task_payload(review_task, orchestrator=orchestrator)}
 
     # ------------------------------------------------------------------
-    # POST /tasks/{task_id}/review-pr
+    # POST /tasks/{task_id}/review-pr  (legacy — uses pr_review pipeline)
     # ------------------------------------------------------------------
 
     @router.post("/tasks/{task_id}/review-pr")
     async def review_pr(task_id: str, pr_number: int = Query(...), project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         """Create a PR-review task from a GitHub pull request.
+
+        Legacy endpoint that uses the original ``pr_review`` pipeline
+        (review → implement → verify → review → commit), distinct from the
+        mode-specific pipelines in ``POST /pull-requests/{number}/review``.
 
         Fetches the PR diff and metadata via the ``gh`` CLI and creates a
         ``pr_review`` task pre-loaded with that context.
@@ -3167,12 +3472,16 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         return {"task": _task_payload(review_task, orchestrator=orchestrator)}
 
     # ------------------------------------------------------------------
-    # POST /tasks/{task_id}/review-mr
+    # POST /tasks/{task_id}/review-mr  (legacy — uses mr_review pipeline)
     # ------------------------------------------------------------------
 
     @router.post("/tasks/{task_id}/review-mr")
     async def review_mr(task_id: str, mr_number: int = Query(...), project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         """Create an MR-review task from a GitLab merge request.
+
+        Legacy endpoint that uses the original ``mr_review`` pipeline
+        (review → implement → verify → review → commit), distinct from the
+        mode-specific pipelines in ``POST /pull-requests/{number}/review``.
 
         Fetches the MR diff and metadata via the ``glab`` CLI and creates an
         ``mr_review`` task pre-loaded with that context.
@@ -3340,20 +3649,22 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
     async def create_pull_request_review(number: int, body: CreatePullRequestReviewRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         """Create a review task for a pull request or merge request.
 
-        Detects the git platform, fetches PR/MR context, and creates a
+        Detects the git platform, fetches PR/MR context, maps the selected
+        ``review_mode`` to the appropriate pipeline template, and creates a
         review task queued for execution.
 
         Args:
             number: Pull request or merge request number.
-            body: Optional review guidance.
+            body: Review mode, optional decision, and guidance.
             project_dir: Optional project directory for runtime state resolution.
 
         Returns:
             A payload containing the newly created review task.
 
         Raises:
-            HTTPException: 400 if platform detection or CLI check fails,
-                409 if a review task already exists for this PR/MR number.
+            HTTPException: 400 if platform detection, CLI check, or unsupported
+                mode for the detected platform; 409 if a review task already
+                exists for this PR/MR number and mode.
         """
         container, bus, orchestrator = deps.ctx(project_dir)
         git_dir = container.project_dir
@@ -3367,9 +3678,21 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if platform == "gitlab" and not shutil.which("glab"):
             raise HTTPException(status_code=400, detail="GitLab CLI (glab) is not installed. Install it from https://gitlab.com/gitlab-org/cli")
 
-        # Duplicate check.
-        task_type_key = "pr_review" if platform == "github" else "mr_review"
+        # Resolve task_type and pipeline_id from the selected review mode.
+        if platform == "gitlab":
+            if body.review_mode != "fix_only":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Review mode '{body.review_mode}' is not yet supported for GitLab merge requests. Only 'fix_only' is available.",
+                )
+            task_type_key = "mr_review"
+            pipeline_id = "mr_review"
+        else:
+            task_type_key, pipeline_id = _REVIEW_MODE_TO_PIPELINE[body.review_mode]
+
         meta_number_key = "source_pr_number" if platform == "github" else "source_mr_number"
+
+        # Duplicate check using the mode-specific task_type.
         for existing in container.tasks.list():
             if (
                 existing.task_type == task_type_key
@@ -3379,11 +3702,16 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             ):
                 raise HTTPException(status_code=409, detail=f"A review task already exists: {existing.id}")
 
-        # Fetch context.
+        # Fetch context, optionally including comments.
+        needs_comments = body.review_mode in _MODES_NEEDING_COMMENTS
         if platform == "github":
-            ctx = _fetch_github_pr_context(git_dir, number)
+            ctx = _fetch_github_pr_context(git_dir, number, fetch_comments=needs_comments)
         else:
-            ctx = _fetch_gitlab_mr_context(git_dir, number)
+            ctx = _fetch_gitlab_mr_context(git_dir, number, fetch_comments=needs_comments)
+
+        # Resolve pipeline template and set step names on the task.
+        registry = PipelineRegistry()
+        template = registry.get(pipeline_id)
 
         # Build metadata.
         metadata: dict[str, Any] = {
@@ -3394,9 +3722,14 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             "source_url": ctx["url"],
             "source_ref": ctx["head_ref"],
             "source_base_ref": ctx["base_ref"],
+            "review_mode": body.review_mode,
+            "comment_dry_run": True,
+            "final_pipeline_id": pipeline_id,
         }
         if body.guidance:
             metadata["review_guidance"] = body.guidance
+        if needs_comments and ctx.get("comments") is not None:
+            metadata["source_comments"] = ctx["comments"]
 
         if platform == "github":
             title = f"PR Review: #{number} — {ctx['title']}" if ctx["title"] else f"PR Review: #{number}"
@@ -3411,8 +3744,119 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             task_type=task_type_key,
             status="queued",
             source=task_type_key,
+            pipeline_template=template.step_names(),
             metadata=metadata,
         )
         container.tasks.upsert(review_task)
         bus.emit(channel="tasks", event_type="task.created", entity_id=review_task.id, payload={"status": review_task.status})
         return {"task": _task_payload(review_task, orchestrator=orchestrator)}
+
+    @router.post("/tasks/{task_id}/post-review-comments")
+    async def post_review_comments(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Publish review comments that were previously generated in dry-run mode.
+
+        Args:
+            task_id: ID of the task whose dry-run comments should be posted.
+            project_dir: Optional project directory used to resolve runtime state.
+
+        Returns:
+            Summary of posted/failed counts and per-comment results.
+
+        Raises:
+            HTTPException: 404 if task not found, 409 if not a dry-run task or
+                no generated comments exist.
+        """
+        from ...comments.models import CommentPostResult
+        from ...comments.writer import (
+            post_comments_batch,
+            post_mr_review_decision,
+            post_pr_review_decision,
+        )
+
+        container, bus, orchestrator = deps.ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        meta = task.metadata if isinstance(task.metadata, dict) else {}
+        if not meta.get("comment_dry_run"):
+            raise HTTPException(status_code=409, detail="Task is not a dry-run review task")
+
+        generated_comments = meta.get("generated_review_comments")
+        if not isinstance(generated_comments, list) or len(generated_comments) == 0:
+            raise HTTPException(status_code=409, detail="No generated review comments to post")
+
+        platform_info = meta.get("comment_platform")
+        if not isinstance(platform_info, dict) or not platform_info.get("platform"):
+            raise HTTPException(status_code=409, detail="Missing comment platform info")
+
+        git_dir = Path(orchestrator.step_project_dir(task))
+
+        post_results = await asyncio.to_thread(
+            post_comments_batch,
+            platform_info,
+            generated_comments,
+            git_dir=git_dir,
+        )
+
+        results: list[dict[str, Any]] = []
+        posted_count = 0
+        failed_count = 0
+        for r in post_results:
+            results.append(r.to_dict())
+            if r.success:
+                posted_count += 1
+            else:
+                failed_count += 1
+
+        task.metadata["posted_comments"] = results
+        task.metadata["comment_dry_run"] = False
+
+        # Post review decision if present and not yet posted.
+        review_decision_raw = meta.get("review_decision")
+        if isinstance(review_decision_raw, dict):
+            decision_type = str(review_decision_raw.get("decision") or "comment")
+            decision_body = str(review_decision_raw.get("body") or "")
+            platform = str(platform_info.get("platform", ""))
+            try:
+                if platform == "github":
+                    dr = await asyncio.to_thread(
+                        post_pr_review_decision,
+                        str(platform_info["owner"]),
+                        str(platform_info["repo"]),
+                        int(platform_info["number"]),
+                        decision=decision_type,  # type: ignore[arg-type]
+                        body=decision_body,
+                        git_dir=git_dir,
+                    )
+                elif platform == "gitlab":
+                    dr = await asyncio.to_thread(
+                        post_mr_review_decision,
+                        str(platform_info["project_id"]),
+                        int(platform_info["number"]),
+                        decision=decision_type,  # type: ignore[arg-type]
+                        body=decision_body,
+                        cwd=git_dir,
+                    )
+                else:
+                    dr = CommentPostResult(success=False, error=f"Unsupported platform: {platform}")
+                task.metadata["review_decision_result"] = dr.to_dict()
+            except Exception as exc:
+                task.metadata["review_decision_result"] = CommentPostResult(
+                    success=False, error=str(exc),
+                ).to_dict()
+
+        container.tasks.upsert(task)
+        bus.emit(
+            channel="tasks",
+            event_type="task.updated",
+            entity_id=task.id,
+            payload={"posted_count": posted_count, "failed_count": failed_count},
+        )
+
+        return {
+            "posted_count": posted_count,
+            "failed_count": failed_count,
+            "results": results,
+            "task": _task_payload(task, container, orchestrator),
+        }

@@ -8,9 +8,9 @@
 
 Deterministic orchestration for AI-assisted software delivery.
 
-Agent Orchestrator sequences planning, implementation, validation, and review into a controlled execution pipeline. It runs multi-step AI workflows with dependency awareness, governance gates, and full traceability.
+Agent Orchestrator sequences planning, implementation, validation, and review into a controlled execution pipeline. It runs multi-step AI workflows with dependency awareness, quality gates, and full traceability.
 
-Designed for teams building controlled, repeatable AI-driven development systems — not single-pass code generation.
+Designed for developers who want controlled, repeatable AI-driven workflows — not single-pass code generation.
 
 ## Core Principles
 
@@ -31,12 +31,12 @@ Select pipeline template (feature / bug_fix / refactor / docs / test / research 
   ↓
 Execute staged steps (template-defined)
   ↓
-Apply governance gates (approvals, severity thresholds, retry limits)
+Apply quality gates (approvals, severity thresholds, retry limits)
   ↓
 Outcome (commit, report, or task generation)
 ```
 
-Pipeline templates define step flow; governance policies determine how and when work progresses.
+Pipeline templates define step flow; quality policies determine how and when work progresses.
 
 ### Reference Pipeline: `feature`
 
@@ -58,12 +58,12 @@ It includes structured planning, automated verification, severity-scored review 
 Choose Agent Orchestrator when you need:
 
 - Multi-step AI-driven feature delivery with review loops
-- Governance controls over automated code changes
-- Cross-repository task coordination
-- Auditable, policy-controlled execution pipelines
+- Quality controls over automated code changes
+- Coordinating work across multiple repositories
+- Traceable, structured execution pipelines
 - Structured decomposition of large PRDs into executable tasks
 
-Not designed for lightweight or single-pass code generation workflows.
+Not designed for single-pass code generation.
 
 ## What You Can Do
 
@@ -74,21 +74,21 @@ Not designed for lightweight or single-pass code generation workflows.
 - Pipelines iterate review-and-fix loops until findings meet configured tolerance thresholds.
 - Full PRDs can be imported and automatically decomposed into dependency-aware execution batches.
 
-### Enforce quality and governance
+### Enforce quality controls
 - Choose a Human-in-the-Loop mode per task: **Autopilot**, **Supervised**, or **Review Only**.
   - **Autopilot**: runs end-to-end without approvals.
-  - **Supervised**: requires approval before implementation and human review before commit.
+  - **Supervised**: pauses for your approval before implementation and review before commit.
   - **Review Only**: pauses before commit and adds a final completion gate.
 - Configure severity thresholds (`critical`, `high`, `medium`, `low`) globally or per task to control pass/fail tolerance.
 - Draft, refine, and commit plan revisions with full lineage before implementation.
 
-### Scale execution across repositories
+### Run tasks in parallel across repositories
 - Run independent tasks in parallel, with automatic isolated git worktree provisioning for same-repo execution.
 - Automatically integrate branches and trigger conflict-resolution flows when collisions occur.
 - Route pipeline steps across providers (Codex, Claude, Ollama) with configurable step-to-provider mapping.
 - Use the embedded interactive terminal to intervene manually without leaving the orchestrator UI.
 
-### Audit and trace every task
+### Trace every task
 - Track full task history from prompt to completion: task state transitions, plan/workdoc revisions, review decisions, and gate approvals.
 - Every task produces a persistent workdoc, plus per-step runtime evidence (`stdout.log`, `stderr.log`, `progress.json`) and event timeline.
 - Inspect execution summaries, step outcomes, review findings, total runtime, and commit SHAs in task detail.

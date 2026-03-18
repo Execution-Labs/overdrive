@@ -15,7 +15,7 @@ from typing import Any, Sequence
 
 from ...pipelines.registry import PipelineRegistry
 from ...prompts import load as load_prompt
-from ...workers.config import get_workers_runtime_config, resolve_worker_for_step
+from ...workers.config import WorkerProviderSpec, get_workers_runtime_config, resolve_worker_for_step
 from ...workers.diagnostics import test_worker
 from ...worker import WorkerCancelledError
 from ...workers.run import WorkerRunResult, run_worker
@@ -36,12 +36,12 @@ from .worker_adapter import StepResult
 logger = logging.getLogger(__name__)
 
 # Step category mapping
-_PLANNING_STEPS = {"plan", "analyze", "plan_refine", "initiative_plan", "initiative_plan_refine", "commit_review", "pr_review", "mr_review"}
+_PLANNING_STEPS = {"plan", "analyze", "plan_refine", "initiative_plan", "initiative_plan_refine", "commit_review", "pr_review", "mr_review", "pr_review_comment", "pr_review_fix_respond"}
 _IMPL_STEPS = {"implement", "prototype"}
 _FIX_STEPS = {"implement_fix"}
 _VERIFY_STEPS = {"verify", "benchmark"}
 _REVIEW_STEPS = {"review"}
-_REPORT_STEPS = {"report", "summarize"}
+_REPORT_STEPS = {"report", "summarize", "pr_review_summarize"}
 _SCAN_STEPS = {"scan_deps", "scan_code"}
 _TASK_GEN_STEPS = {"generate_tasks"}
 _DIAGNOSIS_STEPS = {"diagnose"}
@@ -67,8 +67,8 @@ _DEFAULT_STEP_TIMEOUT_SECONDS = 0  # 0 = no timeout
 _DEFAULT_HEARTBEAT_SECONDS = 60
 _DEFAULT_HEARTBEAT_GRACE_SECONDS = 240
 _DEFAULT_HEARTBEAT_GRACE_BY_STEP: dict[str, int] = {
-    "implement": 600,
-    "implement_fix": 600,
+    "implement": 300,
+    "implement_fix": 300,
 }
 _HEARTBEAT_STALL_RETRY_GRACE_MULTIPLIER = 1.5
 
@@ -109,6 +109,9 @@ _SETTINGS_PROMPT_STEPS: tuple[str, ...] = (
     "plan",
     "plan_refine",
     "pr_review",
+    "pr_review_comment",
+    "pr_review_fix_respond",
+    "pr_review_summarize",
     "profile",
     "prototype",
     "report",
@@ -212,6 +215,12 @@ def _instruction_prompt_name(step: str, task_type: str) -> str:
         return "steps/pr_review.md"
     if step == "mr_review":
         return "steps/mr_review.md"
+    if step == "pr_review_comment":
+        return "steps/pr_review_comment.md"
+    if step == "pr_review_summarize":
+        return "steps/pr_review_summarize.md"
+    if step == "pr_review_fix_respond":
+        return "steps/pr_review_fix_respond.md"
     if step == "plan_refine":
         return "steps/plan_refine.md"
     if step == "initiative_plan_refine":
@@ -491,16 +500,21 @@ def _step_category(step: str) -> str:
 
 
 # Steps that support early pipeline completion when no action is needed.
-_EARLY_COMPLETE_STEPS = {"commit_review", "pr_review", "mr_review"}
+_EARLY_COMPLETE_STEPS = {
+    "commit_review", "pr_review", "mr_review",    # review pipelines
+    "pr_review_comment", "pr_review_summarize",   # comment-aware review pipelines
+    "diagnose",                                    # bug_fix: no bug found
+    "scan_code",                                   # security_audit: both scans clean
+    "profile",                                     # performance: no bottlenecks
+}
 
 
 def _is_no_action_needed(step: str, summary: str | None) -> bool:
     """Detect whether a step's output indicates no further action is required.
 
-    Applies to review steps listed in ``_EARLY_COMPLETE_STEPS``
-    (``commit_review``, ``pr_review``, ``mr_review``).  The review prompts
-    instruct the worker to output "No issues found" when the changeset is
-    clean.
+    Applies to steps listed in ``_EARLY_COMPLETE_STEPS``.  The step prompts
+    instruct the worker to output "No issues found" when the analysis
+    determines no downstream work is needed.
 
     Args:
         step: Pipeline step name that produced the output.
@@ -513,7 +527,14 @@ def _is_no_action_needed(step: str, summary: str | None) -> bool:
         return False
     if not summary:
         return False
-    return "no issues found" in summary.lower()
+    lower = summary.lower()
+    if "no issues found" in lower:
+        return True
+    if step == "diagnose" and ("no bug found" in lower or "no bug identified" in lower):
+        return True
+    if step == "profile" and "no performance issues" in lower:
+        return True
+    return False
 
 
 _WORKDOC_STEP_INSTRUCTIONS: dict[str, str] = {
@@ -595,6 +616,27 @@ _WORKDOC_STEP_INSTRUCTIONS_BY_STEP: dict[str, str] = {
         "Read it for final context (plan, implementation, verification, review).\n"
         "Do NOT modify `.workdoc.md` in this step — the orchestrator writes\n"
         "the report output into `## Final Report`."
+    ),
+    "pr_review_comment": (
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read it for task context and any fetched comments. When done,\n"
+        "**replace** the `## Review Comments` section with your review output.\n"
+        "Write the file back when done."
+    ),
+    "pr_review_summarize": (
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read it for task context and any fetched comments. When done,\n"
+        "**replace** the `## Review Summary` section with your summary.\n"
+        "Write the file back when done."
+    ),
+    "pr_review_fix_respond": (
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read it for task context and fetched comments. When done,\n"
+        "**replace** the `## Review & Fix Plan` section with your review\n"
+        "and fix plan. Write the file back when done."
     ),
 }
 
@@ -1235,10 +1277,16 @@ def build_step_prompt(
         if isinstance(allowed, list) and allowed:
             cleaned = [str(item).strip() for item in allowed if str(item).strip()]
             if cleaned:
+                registry = PipelineRegistry()
+                templates_by_id = {t.id: t for t in registry.list_templates()}
                 parts.append("")
-                parts.append("## Allowed pipeline IDs")
-                for pipeline_id in cleaned:
-                    parts.append(f"- {pipeline_id}")
+                parts.append("## Allowed pipelines")
+                for pid in cleaned:
+                    tmpl = templates_by_id.get(pid)
+                    if tmpl:
+                        parts.append(f"- `{pid}` — {tmpl.description}")
+                    else:
+                        parts.append(f"- `{pid}`")
         parts.append("")
         parts.append(guardrails)
         return "\n".join(parts)
@@ -1282,8 +1330,9 @@ def build_step_prompt(
             parts.append(f"## Commit diff to review ({_cr_sha[:12]})" if _cr_sha else "## Commit diff to review")
             parts.append(f"```diff\n{_cr_diff}\n```")
 
-    # Inject source context for pr_review / mr_review steps.
-    if step in ("pr_review", "mr_review") and isinstance(task.metadata, dict):
+    # Inject source context for pr_review / mr_review and comment-aware review steps.
+    _PR_CONTEXT_STEPS = {"pr_review", "mr_review", "pr_review_comment", "pr_review_summarize", "pr_review_fix_respond"}
+    if step in _PR_CONTEXT_STEPS and isinstance(task.metadata, dict):
         _pr_desc = str(task.metadata.get("source_description") or "").strip()
         _pr_url = str(task.metadata.get("source_url") or "").strip()
         _pr_diff = str(task.metadata.get("source_diff") or "").strip()
@@ -1307,12 +1356,28 @@ def build_step_prompt(
             base_label = _pr_base or "base"
             label = f"PR/MR diff ({base_label}...{ref_label})"
             parts.append(f"## {label}")
+            # Surface the list of changed files so comment paths can be validated.
+            _diff_files = re.findall(r"^diff --git a/(.+?) b/", _pr_diff, re.MULTILINE)
+            if _diff_files:
+                parts.append("**Files changed in this diff** (only these paths are valid for comments):")
+                for _df in _diff_files:
+                    parts.append(f"- `{_df}`")
+                parts.append("")
             parts.append(f"```diff\n{_pr_diff}\n```")
         _pr_guidance = str(task.metadata.get("review_guidance") or "").strip()
         if _pr_guidance:
             parts.append("")
             parts.append("## Review guidance from the user")
             parts.append(_pr_guidance)
+
+    # Inject formatted comment context for comment-aware review steps.
+    _COMMENT_AWARE_STEPS = {"pr_review_comment", "pr_review_summarize", "pr_review_fix_respond"}
+    if step in _COMMENT_AWARE_STEPS and isinstance(task.metadata, dict):
+        _comments_formatted = str(task.metadata.get("source_comments_formatted") or "").strip()
+        if _comments_formatted:
+            parts.append("")
+            parts.append("## Existing review comments")
+            parts.append(_comments_formatted)
 
     # Inject outputs from prior pipeline steps.
     # For implement/implement_fix, rely on the workdoc as the single source of truth.
@@ -1794,6 +1859,20 @@ def _format_verify_summary(summary: Any, reason_code: str) -> str | None:
     return f"{text} [reason_code={reason_code}]"
 
 
+def _sanitize_stderr(raw: str, *, max_length: int = 500) -> str:
+    """Extract meaningful error lines from worker stderr.
+
+    CLI workers (codex, claude) emit startup noise at the top of stderr
+    (system prompt fragments, MCP startup lines) and actual errors at the
+    bottom.  This helper takes the tail and strips XML tool-error tags.
+    """
+    # Strip XML tool-error wrapper tags that leak from worker internals
+    cleaned = re.sub(r"</?tool_use_error>", "", raw)
+    # Take the last max_length characters — errors are at the end
+    tail = cleaned.strip()[-max_length:]
+    return tail
+
+
 class LiveWorkerAdapter:
     """Worker adapter that dispatches to real Codex/Ollama providers."""
 
@@ -1946,8 +2025,20 @@ class LiveWorkerAdapter:
                 task_provider = str(task.metadata.get("worker_provider") or "").strip()
             if task_provider:
                 if task_provider not in runtime.providers:
-                    available_names = ", ".join(sorted(runtime.providers.keys()))
-                    return StepResult(status="error", summary=f"Task worker_provider '{task_provider}' not found (available: {available_names})")
+                    # Auto-create a transient spec for known CLI provider types
+                    # that aren't explicitly configured (e.g. user picks 'claude'
+                    # from the UI dropdown but hasn't added it to workers config).
+                    _fallback_commands = {"codex": "codex exec", "claude": "claude -p"}
+                    if task_provider in _fallback_commands:
+                        runtime.providers[task_provider] = WorkerProviderSpec(
+                            name=task_provider,
+                            type=task_provider,  # type: ignore[arg-type]
+                            command=_fallback_commands[task_provider],
+                            execution_mode="host_access" if task_provider == "claude" else "sandboxed",
+                        )
+                    else:
+                        available_names = ", ".join(sorted(runtime.providers.keys()))
+                        return StepResult(status="error", summary=f"Task worker_provider '{task_provider}' not found (available: {available_names})")
                 spec = runtime.providers[task_provider]
                 if spec.type in {"codex", "claude"} and not spec.command:
                     return StepResult(status="error", summary=f"Worker '{spec.name}' missing required 'command'")
@@ -2238,6 +2329,24 @@ class LiveWorkerAdapter:
             merged = _merge_token_usage(primary_token_usage, fmt_usage) if (primary_token_usage or fmt_usage) else None
             step_result.token_usage = merged
 
+        # 8b. For pr_review_comment steps that produced freeform output,
+        #     run a lightweight LLM formatter to extract structured comments.
+        if (
+            step == "pr_review_comment"
+            and result.response_text
+            and step_result.status == "ok"
+            and step_result.comment_actions is None
+            and not raw_is_json
+        ):
+            step_result = self._parse_comment_output(
+                spec=spec,
+                response_text=result.response_text,
+                project_dir=project_dir,
+            )
+            fmt_usage = step_result.token_usage or {}
+            merged = _merge_token_usage(primary_token_usage, fmt_usage) if (primary_token_usage or fmt_usage) else None
+            step_result.token_usage = merged
+
         # 9. Check if the step signals that no further pipeline action is needed.
         if step_result.status == "ok" and _is_no_action_needed(step, step_result.summary):
             step_result = replace(step_result, no_action_needed=True)
@@ -2423,6 +2532,56 @@ class LiveWorkerAdapter:
 
         return StepResult(status="error", summary="Task generation output formatter returned no tasks list", token_usage=fmt_token_usage)
 
+    # ------------------------------------------------------------------
+    # Comment-output formatter (codex / claude)
+    # ------------------------------------------------------------------
+
+    def _parse_comment_output(
+        self,
+        *,
+        spec: Any,
+        response_text: str,
+        project_dir: Path,
+    ) -> StepResult:
+        """Use a short LLM call to extract structured comments from freeform pr_review_comment output."""
+        formatter_prompt = load_prompt("formatters/comment_output.md").format(
+            output=response_text[:8000],
+        )
+
+        fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
+        progress_path = fmt_run_dir / "progress.json"
+        try:
+            fmt_result = run_worker(
+                spec=spec,
+                prompt=formatter_prompt,
+                project_dir=project_dir,
+                run_dir=fmt_run_dir,
+                timeout_seconds=0,
+                heartbeat_seconds=30,
+                heartbeat_grace_seconds=60,
+                progress_path=progress_path,
+            )
+        except Exception:
+            logger.debug("Comment formatter call failed; returning error")
+            return StepResult(status="error", summary="Comment output formatter failed")
+        finally:
+            shutil.rmtree(fmt_run_dir, ignore_errors=True)
+
+        fmt_token_usage = fmt_result.token_usage or None
+
+        parsed = _extract_json(fmt_result.response_text or "")
+        if not isinstance(parsed, dict):
+            logger.debug("Comment formatter returned unparseable output")
+            return StepResult(status="error", summary="Comment output formatter returned invalid JSON", token_usage=fmt_token_usage)
+
+        comments = parsed.get("comments")
+        summary = str(parsed.get("summary") or "").strip()
+        proposed = str(parsed["proposed_decision"]).strip() if parsed.get("proposed_decision") else None
+        if isinstance(comments, list):
+            return StepResult(status="ok", comment_actions=comments, proposed_decision=proposed, summary=summary or None, token_usage=fmt_token_usage)
+
+        return StepResult(status="error", summary="Comment output formatter returned no comments field", token_usage=fmt_token_usage)
+
     def _map_result(
         self,
         result: WorkerRunResult,
@@ -2443,8 +2602,7 @@ class LiveWorkerAdapter:
                 try:
                     err_text = Path(result.stderr_path).read_text(errors="replace").strip()
                     if err_text:
-                        tail = err_text[-500:]
-                        summary = f"{summary}\n{tail}"
+                        summary = f"{summary}\n{_sanitize_stderr(err_text)}"
                 except Exception:
                     logger.debug("Failed reading stderr for no-heartbeat worker result", exc_info=True)
             return StepResult(status="error", summary=summary)
@@ -2454,19 +2612,17 @@ class LiveWorkerAdapter:
                 try:
                     err_text = Path(result.stderr_path).read_text(errors="replace").strip()
                     if err_text:
-                        tail = err_text[-500:]
-                        summary = f"{summary}\n{tail}"
+                        summary = f"{summary}\n{_sanitize_stderr(err_text)}"
                 except Exception:
                     logger.debug("Failed reading stderr for timed-out worker result", exc_info=True)
             return StepResult(status="error", summary=summary)
         if result.exit_code != 0:
             summary = f"Worker exited with code {result.exit_code}"
-            # Try to include stderr info
             if result.stderr_path:
                 try:
                     err_text = Path(result.stderr_path).read_text(errors="replace").strip()
                     if err_text:
-                        summary = err_text[:500]
+                        summary = _sanitize_stderr(err_text)
                 except Exception:
                     logger.debug("Failed reading stderr for non-zero worker exit", exc_info=True)
             return StepResult(status="error", summary=summary)
@@ -2528,6 +2684,24 @@ class LiveWorkerAdapter:
             if isinstance(parsed, dict):
                 return StepResult(status="ok", summary=json.dumps(parsed))
             return StepResult(status="error", summary="Pipeline classification output must be valid JSON")
+
+        # pr_review_comment: try to parse structured comment JSON directly.
+        if step == "pr_review_comment" and result.response_text:
+            parsed = _extract_json(result.response_text)
+            if isinstance(parsed, dict) and isinstance(parsed.get("comments"), list):
+                return StepResult(
+                    status="ok",
+                    comment_actions=parsed["comments"],
+                    proposed_decision=str(parsed["proposed_decision"]).strip() if parsed.get("proposed_decision") else None,
+                    summary=str(parsed.get("summary") or "").strip() or None,
+                )
+
+        # pr_review_fix_respond: preserve structured JSON so post_comment_responses can parse it.
+        # Must return before the planning category path which normalizes JSON to plain text.
+        if step == "pr_review_fix_respond" and result.response_text:
+            parsed = _extract_json(result.response_text)
+            if isinstance(parsed, dict) and isinstance(parsed.get("addressed_comments"), list):
+                return StepResult(status="ok", summary=json.dumps(parsed))
 
         if category == "planning" and result.response_text:
             parsed = _extract_json(result.response_text)
@@ -2699,8 +2873,8 @@ class LiveWorkerAdapter:
                 progress_path=progress_path,
             )
         except Exception:
-            logger.debug("Summarize call failed; returning fallback")
-            return "Summary generation failed"
+            logger.warning("Summarize call failed for task %s", task.id, exc_info=True)
+            return ""
         finally:
             shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
@@ -2712,7 +2886,7 @@ class LiveWorkerAdapter:
 
         # Fall back to raw text if JSON parsing failed
         raw = (fmt_result.response_text or "").strip()
-        return raw[:2000] if raw else "Summary generation failed"
+        return raw[:2000] if raw else ""
 
     def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path, gate_context: str | None = None) -> str:
         """Produce a worker-generated summary for a completed run.
@@ -2732,6 +2906,22 @@ class LiveWorkerAdapter:
             cfg = self._container.config.load()
             runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
             spec = resolve_worker_for_step(runtime, "summarize")
+            # Respect task-level provider override so the summarize worker
+            # uses the same provider the task was (re)started with.
+            task_provider = str(getattr(task, "worker_provider", "") or "").strip()
+            if not task_provider and isinstance(task.metadata, dict):
+                task_provider = str(task.metadata.get("worker_provider") or "").strip()
+            if task_provider and task_provider in runtime.providers:
+                spec = runtime.providers[task_provider]
+            elif task_provider:
+                _fallback_commands = {"codex": "codex exec", "claude": "claude -p"}
+                if task_provider in _fallback_commands:
+                    spec = WorkerProviderSpec(
+                        name=task_provider,
+                        type=task_provider,  # type: ignore[arg-type]
+                        command=_fallback_commands[task_provider],
+                        execution_mode="host_access" if task_provider == "claude" else "sandboxed",
+                    )
             available, reason = test_worker(spec)
             if not available:
                 logger.debug("Summary worker not available: %s", reason)
@@ -2767,6 +2957,21 @@ class LiveWorkerAdapter:
             cfg = self._container.config.load()
             runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
             spec = resolve_worker_for_step(runtime, "summarize")
+            # Respect task-level provider override.
+            task_provider = str(getattr(task, "worker_provider", "") or "").strip()
+            if not task_provider and isinstance(task.metadata, dict):
+                task_provider = str(task.metadata.get("worker_provider") or "").strip()
+            if task_provider and task_provider in runtime.providers:
+                spec = runtime.providers[task_provider]
+            elif task_provider:
+                _fallback_commands = {"codex": "codex exec", "claude": "claude -p"}
+                if task_provider in _fallback_commands:
+                    spec = WorkerProviderSpec(
+                        name=task_provider,
+                        type=task_provider,  # type: ignore[arg-type]
+                        command=_fallback_commands[task_provider],
+                        execution_mode="host_access" if task_provider == "claude" else "sandboxed",
+                    )
             available, reason = test_worker(spec)
             if not available:
                 logger.debug("Recommended-action worker not available: %s", reason)

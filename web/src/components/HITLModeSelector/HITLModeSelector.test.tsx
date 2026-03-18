@@ -16,7 +16,7 @@ const MOCK_MODES = [
     approve_before_plan: false,
     approve_before_implement: false,
     approve_before_commit: false,
-    approve_after_implement: false,
+
     allow_unattended: true,
     require_reasoning: false,
   },
@@ -27,7 +27,7 @@ const MOCK_MODES = [
     approve_before_plan: true,
     approve_before_implement: true,
     approve_before_commit: true,
-    approve_after_implement: false,
+
     allow_unattended: false,
     require_reasoning: true,
   },
@@ -38,7 +38,7 @@ const MOCK_MODES = [
     approve_before_plan: false,
     approve_before_implement: false,
     approve_before_commit: true,
-    approve_after_implement: false,
+
     allow_unattended: true,
     require_reasoning: false,
   },
@@ -137,11 +137,11 @@ describe('HITLModeSelector', () => {
     const currentMode = screen.getByText('Supervised').closest('.hitl-current')!
     fireEvent.click(currentMode)
 
-    // Supervised has Plan, Impl, Commit gates
-    // Note: 'Commit' appears in multiple modes so use getAllByText
+    // Supervised has Plan, Impl, Review gates
+    // Note: 'Review' appears in multiple modes so use getAllByText
     expect(screen.getByText('Plan')).toBeInTheDocument()
     expect(screen.getByText('Impl')).toBeInTheDocument()
-    expect(screen.getAllByText('Commit').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('Review').length).toBeGreaterThanOrEqual(1)
   })
 
   it('shows Active badge on the current mode', async () => {

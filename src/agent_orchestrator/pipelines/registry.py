@@ -231,6 +231,61 @@ MR_REVIEW_PIPELINE = PipelineTemplate(
     metadata={"supports_skip_to_precommit": True},
 )
 
+PR_REVIEW_COMMENT_PIPELINE = PipelineTemplate(
+    id="pr_review_comment",
+    display_name="PR Review & Comment",
+    description="Fetch existing comments, review PR changes, and post review comments.",
+    task_types=("pr_review_comment",),
+    steps=(
+        StepDef(name="fetch_comments", display_name="Fetch Comments"),
+        StepDef(name="pr_review_comment", display_name="Review & Comment"),
+        StepDef(name="post_comments", display_name="Post Comments"),
+    ),
+)
+
+PR_REVIEW_SUMMARIZE_PIPELINE = PipelineTemplate(
+    id="pr_review_summarize",
+    display_name="PR Review Summary",
+    description="Fetch existing comments and produce a review summary.",
+    task_types=("pr_review_summarize",),
+    steps=(
+        StepDef(name="fetch_comments", display_name="Fetch Comments"),
+        StepDef(name="pr_review_summarize", display_name="Summarize Review"),
+    ),
+)
+
+PR_REVIEW_FIX_ONLY_PIPELINE = PipelineTemplate(
+    id="pr_review_fix_only",
+    display_name="PR Review & Fix",
+    description="Review PR changes, implement fixes, verify, review, and commit.",
+    task_types=("pr_review_fix_only",),
+    steps=(
+        StepDef(name="pr_review", display_name="Review PR"),
+        StepDef(name="implement", display_name="Implement Fixes"),
+        StepDef(name="verify", display_name="Verify"),
+        StepDef(name="review", display_name="Review"),
+        StepDef(name="commit", display_name="Commit"),
+    ),
+    metadata={"supports_skip_to_precommit": True},
+)
+
+PR_REVIEW_FIX_RESPOND_PIPELINE = PipelineTemplate(
+    id="pr_review_fix_respond",
+    display_name="PR Review, Fix & Respond",
+    description="Fetch comments, review and fix PR changes, then respond to comments.",
+    task_types=("pr_review_fix_respond",),
+    steps=(
+        StepDef(name="fetch_comments", display_name="Fetch Comments"),
+        StepDef(name="pr_review_fix_respond", display_name="Review & Plan Fixes"),
+        StepDef(name="implement", display_name="Implement Fixes"),
+        StepDef(name="verify", display_name="Verify"),
+        StepDef(name="review", display_name="Review"),
+        StepDef(name="post_comment_responses", display_name="Post Comment Responses"),
+        StepDef(name="commit", display_name="Commit"),
+    ),
+    metadata={"supports_skip_to_precommit": True},
+)
+
 PERFORMANCE_PIPELINE = PipelineTemplate(
     id="performance",
     display_name="Performance Optimization",
@@ -324,6 +379,10 @@ BUILTIN_TEMPLATES: dict[str, PipelineTemplate] = {
         COMMIT_REVIEW_PIPELINE,
         PR_REVIEW_PIPELINE,
         MR_REVIEW_PIPELINE,
+        PR_REVIEW_COMMENT_PIPELINE,
+        PR_REVIEW_SUMMARIZE_PIPELINE,
+        PR_REVIEW_FIX_ONLY_PIPELINE,
+        PR_REVIEW_FIX_RESPOND_PIPELINE,
         PERFORMANCE_PIPELINE,
         HOTFIX_PIPELINE,
         SPIKE_PIPELINE,

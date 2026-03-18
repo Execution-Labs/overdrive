@@ -483,15 +483,16 @@ def test_classify_pipeline_endpoint_invalid_output_downgrades_to_low(tmp_path: P
         assert body["pipeline_id"] == "feature"
 
 
-def test_create_task_rejects_auto_without_high_confidence_classification(tmp_path: Path) -> None:
+def test_create_task_auto_without_classifier_sets_pending_gate(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         resp = client.post(
             "/api/tasks",
             json={"title": "Auto create", "task_type": "auto"},
         )
-        assert resp.status_code == 400
-        assert "high-confidence classifier result" in resp.json()["detail"]
+        assert resp.status_code == 200
+        body = resp.json()["task"]
+        assert body["pending_gate"] == "pipeline_classify"
 
 
 def test_create_task_accepts_auto_with_high_confidence_classification(tmp_path: Path) -> None:
@@ -1233,7 +1234,7 @@ def test_task_payload_includes_gate_context(tmp_path: Path) -> None:
         gate_context = loaded.json()["task"]["gate_context"]
         assert gate_context["is_waiting"] is True
         assert gate_context["gate"] == "before_implement"
-        assert gate_context["display"] == "Plan ready."
+        assert gate_context["display"] == "Plan ready"
         assert gate_context["step"] == "plan"
         assert gate_context["status_kind"] == "approval_wait"
 
@@ -4616,7 +4617,7 @@ def test_generate_tasks_endpoint_rejects_incompatible_pipeline(tmp_path: Path) -
 
         resp = client.post(f"/api/tasks/{task['id']}/generate-tasks", json={"source": "latest"})
         assert resp.status_code == 400
-        assert "pipeline does not include generate_tasks" in resp.json()["detail"]
+        assert "does not support task generation" in resp.json()["detail"]
 
 
 def test_generate_tasks_endpoint_returns_400_when_worker_outputs_no_tasks(tmp_path: Path) -> None:

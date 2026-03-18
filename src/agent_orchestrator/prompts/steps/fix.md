@@ -21,6 +21,9 @@ Validation requirements (targeted scope only):
 - Confirm no collateral regressions in touched areas.
 - The full test suite will be run in a separate verification step after this fix.
 
+Documentation:
+- If a fix changes user-visible behavior, CLI output, configuration, or API contracts, update all affected documentation (README, docs/, changelogs, etc.) in the same step.
+
 Output requirements:
 - Return only a concise follow-up summary:
   - which issues were fixed,

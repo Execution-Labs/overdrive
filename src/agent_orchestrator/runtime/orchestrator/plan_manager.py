@@ -412,7 +412,7 @@ class PlanManager:
             updated = self._replace_plan_section_in_workdoc(text, plan_body, manager=svc._workdoc_manager)
             if updated != text:
                 canonical.write_text(updated, encoding="utf-8")
-                step_project_dir = svc._step_project_dir(task)
+                step_project_dir = svc.step_project_dir(task)
                 worktree_copy = svc._workdoc_worktree_path(step_project_dir)
                 if worktree_copy.exists():
                     worktree_copy.write_text(updated, encoding="utf-8")

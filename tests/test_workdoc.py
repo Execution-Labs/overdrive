@@ -416,6 +416,10 @@ def test_builtin_pipelines_use_dedicated_templates(service: OrchestratorService)
         "commit_review": "commit_review",
         "pr_review": "pr_review",
         "mr_review": "mr_review",
+        "pr_review_comment": "pr_review_comment",
+        "pr_review_summarize": "pr_review_summarize",
+        "pr_review_fix_only": "pr_review_fix_only",
+        "pr_review_fix_respond": "pr_review_fix_respond",
         "performance": "performance",
         "hotfix": "hotfix",
         "spike": "spike",
@@ -760,10 +764,10 @@ def test_sync_sentinel_id_mismatch_fallbacks_with_summary(
     updated = canonical.read_text(encoding="utf-8")
     assert "### Attempt 3" in updated
     assert "fallback because section mismatch" in updated
-    assert task.metadata.get("workdoc_sync_error_type") == "section_id_mismatch"
-    assert task.metadata.get("workdoc_sync_mode") == "fallback_append"
-    assert task.metadata.get("workdoc_sync_step") == "plan"
-    assert task.metadata.get("workdoc_sync_attempt") == 3
+    # Diagnostics are cleared after successful fallback_append to avoid
+    # leaving stale error-like metadata on the task.
+    assert task.metadata.get("workdoc_sync_error_type") is None
+    assert task.metadata.get("workdoc_sync_mode") is None
 
     events = service.container.events.list_recent(limit=50)
     matching = [e for e in events if e.get("type") == "workdoc.updated" and e.get("entity_id") == task.id]

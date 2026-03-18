@@ -115,6 +115,8 @@ agent-orchestrator [--project-dir PATH] orchestrator control pause
 agent-orchestrator [--project-dir PATH] orchestrator control resume
 agent-orchestrator [--project-dir PATH] orchestrator control drain
 agent-orchestrator [--project-dir PATH] orchestrator control stop
+agent-orchestrator [--project-dir PATH] orchestrator control reset
+agent-orchestrator [--project-dir PATH] orchestrator control reconcile
 ```
 
 Allowed actions:
@@ -122,6 +124,8 @@ Allowed actions:
 - `resume`
 - `drain`
 - `stop`
+- `reset`
+- `reconcile`
 
 ## Practical Examples
 

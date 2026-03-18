@@ -6,6 +6,7 @@ import HITLModeSelector from './components/HITLModeSelector/HITLModeSelector'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { humanizeLabel } from './ui/labels'
+import { ReviewMode, ReviewDecisionType, REVIEW_MODE_OPTIONS, REVIEW_DECISION_OPTIONS } from './types/review'
 import './styles/orchestrator.css'
 
 type ThemeMode = 'light' | 'dark' | 'system'
@@ -23,7 +24,7 @@ type PullRequestItem = {
   review_task_id: string | null
 }
 type TaskDetailTab = 'overview' | 'plan' | 'workdoc' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
-type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate' | 'review_commit'
+type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate' | 'review_commit' | 'queue-backlog' | 'generate_follow_ups' | 'post_review_comments'
 type GeneratedTaskStatus = 'backlog' | 'queued'
 type GeneratedTaskHitlSelection = 'inherit_parent' | 'autopilot' | 'supervised' | 'review_only'
 
@@ -513,6 +514,16 @@ function taskSupportsGenerateTasks(task: TaskRecord | null | undefined): boolean
   return new Set(['initiative_plan', 'plan_only', 'plan', 'decompose', 'repo_review', 'security', 'security_audit']).has(taskType)
 }
 
+const POST_COMPLETION_GENERATION_PIPELINES = new Set(['research', 'review', 'spike', 'verify_only'])
+
+function taskSupportsPostCompletionGeneration(task: TaskRecord | null | undefined): boolean {
+  if (!task) return false
+  if (task.status !== 'done') return false
+  if ((task.children_ids?.length ?? 0) > 0) return false
+  const taskType = String(task.task_type || '').trim()
+  return POST_COMPLETION_GENERATION_PIPELINES.has(taskType)
+}
+
 function resolveTaskGenerationDefaults(
   task: TaskRecord | null | undefined,
   systemDefaults?: Partial<SystemSettings['defaults']['task_generation']> | null,
@@ -653,12 +664,11 @@ function statusPillClass(status: string): string {
 }
 
 const GATE_DISPLAY_MAP: Record<string, string> = {
-  before_implement: 'Plan ready.',
-  before_generate_tasks: 'Plan ready to generate tasks.',
-  before_done: 'Analysis complete.',
-  after_implement: 'Implementation complete; approval required',
-  before_commit: 'Implementation completed.',
-  human_intervention: 'Human intervention required',
+  before_implement: 'Plan ready',
+  before_generate_tasks: 'Generate tasks',
+  before_done: 'Work complete',
+  before_commit: 'Review implementation',
+  human_intervention: 'Needs intervention',
 }
 
 function normalizeHitlMode(raw: string | null | undefined): 'autopilot' | 'supervised' | 'review_only' {
@@ -681,9 +691,9 @@ function gateApprovalButtonLabel(gate: string | null | undefined): string {
   if (normalized === 'before_implement') return 'Approve plan'
   if (normalized === 'before_generate_tasks') return 'Generate tasks'
   if (normalized === 'before_done') return 'Move to Done'
-  if (normalized === 'after_implement') return 'Approve implementation'
   if (normalized === 'before_commit') return 'Approve'
   if (normalized === 'human_intervention') return 'Acknowledge'
+  if (normalized === 'before_post_review') return 'Post review'
   return 'Approve gate'
 }
 
@@ -704,7 +714,10 @@ function taskWaitingGateKind(task: TaskRecord | null | undefined): WaitingGateKi
 function taskWaitingGateLabel(task: TaskRecord | null | undefined): string | null {
   const kind = taskWaitingGateKind(task)
   if (kind === 'intervention_wait') return 'Needs Intervention'
-  if (kind === 'approval_wait') return 'Awaiting Approval'
+  if (kind === 'approval_wait') {
+    const display = String(task?.gate_context?.display || '').trim()
+    return display || 'Awaiting Approval'
+  }
   return null
 }
 
@@ -1762,6 +1775,7 @@ export default function App() {
   const [prPlatform, setPrPlatform] = useState<string | null>(null)
   const [selectedPrNumber, setSelectedPrNumber] = useState<number | null>(null)
   const [prReviewGuidance, setPrReviewGuidance] = useState('')
+  const [prReviewMode, setPrReviewMode] = useState<ReviewMode>(ReviewMode.FixOnly)
   const [isSubmittingReview, setIsSubmittingReview] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [selectedTaskId, setSelectedTaskId] = useState<string>('')
@@ -1894,12 +1908,9 @@ export default function App() {
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskDescription, setNewTaskDescription] = useState('')
   const [newTaskType, setNewTaskType] = useState('auto')
-  const [autoPipelineNeedsManualSelection, setAutoPipelineNeedsManualSelection] = useState(false)
-  const [pendingPipelineClassification, setPendingPipelineClassification] = useState<{
-    pipeline_id: string
-    confidence: 'high' | 'low'
-    reason: string
-  } | null>(null)
+  const [gatePipelineSelection, setGatePipelineSelection] = useState('')
+  const [gateReviewDecision, setGateReviewDecision] = useState<ReviewDecisionType>(ReviewDecisionType.Comment)
+  const [gatePostComments, setGatePostComments] = useState(false)
   const [newTaskPriority, setNewTaskPriority] = useState('P2')
   const [newTaskLabels, setNewTaskLabels] = useState('')
   const [newTaskBlockedBy, setNewTaskBlockedBy] = useState('')
@@ -2068,6 +2079,19 @@ export default function App() {
   useEffect(() => {
     selectedTaskIdRef.current = selectedTaskId
   }, [selectedTaskId])
+
+  // Sync gate review controls from selected task's metadata when task changes
+  // or when the pending gate becomes before_post_review.
+  const selectedBoardTask = Object.values(board.columns).flat().find((t) => t.id === selectedTaskId)
+  const selectedTaskGate = selectedBoardTask?.pending_gate
+  useEffect(() => {
+    if (selectedTaskGate === 'before_post_review' && selectedBoardTask) {
+      const meta = (selectedBoardTask.metadata || {}) as Record<string, unknown>
+      const proposed = String(meta.proposed_review_decision || 'comment')
+      setGateReviewDecision(proposed as ReviewDecisionType)
+      setGatePostComments(false)
+    }
+  }, [selectedTaskId, selectedTaskGate]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const explicitTab = taskSelectTabRef.current
@@ -3467,70 +3491,6 @@ export default function App() {
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean)
-    let resolvedTaskType = newTaskType
-    let classifierPipelineId: string | undefined
-    let classifierConfidence: 'high' | 'low' | undefined
-    let classifierReason: string | undefined
-    let wasUserOverride = false
-    if (resolvedTaskType === 'auto') {
-      if (autoPipelineNeedsManualSelection) {
-        setError('Auto pipeline selection was low confidence. Please choose a specific pipeline and submit again.')
-        return
-      }
-      try {
-        const classification = await requestJson<{
-          pipeline_id: string
-          task_type: string
-          confidence: 'high' | 'low'
-          reason: string
-        }>(buildApiUrl('/api/tasks/classify-pipeline', projectDir), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            title: newTaskTitle.trim(),
-            description: newTaskDescription,
-            metadata: parsedMetadata,
-          }),
-        })
-        classifierPipelineId = String(classification.pipeline_id || '').trim() || 'feature'
-        classifierConfidence = classification.confidence === 'high' ? 'high' : 'low'
-        classifierReason = String(classification.reason || '').trim()
-        if (classifierConfidence !== 'high') {
-          const suggestedTaskType = String(classification.task_type || '').trim() || 'feature'
-          setPendingPipelineClassification({
-            pipeline_id: classifierPipelineId,
-            confidence: classifierConfidence,
-            reason: classifierReason,
-          })
-          setNewTaskType(suggestedTaskType)
-          setAutoPipelineNeedsManualSelection(true)
-          setError(`Auto classification is low confidence: ${classifierReason || 'please choose a pipeline manually.'}`)
-          return
-        }
-        resolvedTaskType = String(classification.task_type || '').trim() || 'feature'
-      } catch (err) {
-        setError(`Auto classification failed: ${toErrorMessage('Please choose a pipeline manually', err)}`)
-        setNewTaskType('feature')
-        setAutoPipelineNeedsManualSelection(true)
-        setPendingPipelineClassification({
-          pipeline_id: 'feature',
-          confidence: 'low',
-          reason: 'Pipeline auto-classification failed.',
-        })
-        return
-      }
-    } else {
-      if (autoPipelineNeedsManualSelection) {
-        wasUserOverride = true
-      }
-      if (autoPipelineNeedsManualSelection && pendingPipelineClassification) {
-        classifierPipelineId = pendingPipelineClassification.pipeline_id
-        classifierConfidence = pendingPipelineClassification.confidence
-        classifierReason = pendingPipelineClassification.reason
-      } else if (pendingPipelineClassification) {
-        setPendingPipelineClassification(null)
-      }
-    }
     try {
       await requestJson<{ task: TaskRecord }>(buildApiUrl('/api/tasks', projectDir), {
         method: 'POST',
@@ -3538,7 +3498,7 @@ export default function App() {
         body: JSON.stringify({
           title: newTaskTitle.trim(),
           description: newTaskDescription,
-          task_type: resolvedTaskType,
+          task_type: newTaskType,
           priority: newTaskPriority,
           labels: newTaskLabels.split(',').map((item) => item.trim()).filter(Boolean),
           blocked_by: newTaskBlockedBy.split(',').map((item) => item.trim()).filter(Boolean),
@@ -3551,10 +3511,6 @@ export default function App() {
           pipeline_template: parsedPipelineTemplate.length > 0 ? parsedPipelineTemplate : undefined,
           metadata: parsedMetadata,
           project_commands: parsedProjectCommands,
-          classifier_pipeline_id: classifierPipelineId,
-          classifier_confidence: classifierConfidence,
-          classifier_reason: classifierReason,
-          was_user_override: wasUserOverride || undefined,
           status: statusOverride || 'queued',
         }),
       })
@@ -3566,8 +3522,6 @@ export default function App() {
     setNewTaskTitle('')
     setNewTaskDescription('')
     setNewTaskType('auto')
-    setAutoPipelineNeedsManualSelection(false)
-    setPendingPipelineClassification(null)
     setNewTaskPriority('P2')
     setNewTaskLabels('')
     setNewTaskBlockedBy('')
@@ -3617,11 +3571,15 @@ export default function App() {
       await requestJson(buildApiUrl(`/api/pull-requests/${selectedPrNumber}/review`, projectDir), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ guidance: prReviewGuidance }),
+        body: JSON.stringify({
+          guidance: prReviewGuidance,
+          review_mode: prReviewMode,
+        }),
       })
       setWorkOpen(false)
       setSelectedPrNumber(null)
       setPrReviewGuidance('')
+      setPrReviewMode(ReviewMode.FixOnly)
       void reloadAll()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create review')
@@ -3696,7 +3654,7 @@ export default function App() {
   }
 
   async function deleteTask(taskId: string): Promise<void> {
-    if (!window.confirm('Delete this terminal task permanently?')) {
+    if (!window.confirm('Delete this task permanently?')) {
       return
     }
     await runTaskMutation(
@@ -3769,6 +3727,32 @@ export default function App() {
       {
         startMessage: 'Clearing all tasks...',
         errorPrefix: 'Failed to clear tasks',
+      },
+    )
+  }
+
+  async function queueAllBacklog(): Promise<void> {
+    const backlogTasks = board.columns.backlog || []
+    if (backlogTasks.length === 0) {
+      setTaskActionMessage('No backlog tasks to queue.')
+      return
+    }
+    if (!window.confirm(`Queue all ${backlogTasks.length} backlog task(s)?`)) {
+      return
+    }
+    await runTaskMutation(
+      'queue-backlog',
+      async () => {
+        const result = await requestJson<{ queued_count: number; message?: string }>(
+          buildApiUrl('/api/tasks/queue-backlog', projectDir),
+          { method: 'POST' },
+        )
+        await reloadAll()
+        setTaskActionMessage(String(result.message || `Queued ${result.queued_count} task(s).`))
+      },
+      {
+        startMessage: 'Queuing backlog tasks...',
+        errorPrefix: 'Failed to queue backlog tasks',
       },
     )
   }
@@ -3945,7 +3929,7 @@ export default function App() {
     }
   }
 
-  async function approveGate(taskId: string, gate?: string | null): Promise<void> {
+  async function approveGate(taskId: string, gate?: string | null, reviewOpts?: { review_decision?: string; post_comments?: boolean }): Promise<void> {
     const previousBoardTask = Object.values(board.columns || {})
       .flat()
       .find((task) => task.id === taskId) || null
@@ -4000,6 +3984,10 @@ export default function App() {
           save_generation_policy_as_default: gate === 'before_generate_tasks'
             ? planGenerateSaveAsDefault
             : undefined,
+          ...(gate === 'before_post_review' && reviewOpts ? {
+            review_decision: reviewOpts.review_decision,
+            post_comments: reviewOpts.post_comments,
+          } : {}),
         }),
       })
       if (response.message) {
@@ -4142,6 +4130,10 @@ export default function App() {
   }
 
   async function saveTaskEdits(taskId: string): Promise<void> {
+    if (!editTaskTitle.trim()) {
+      setError('Task title cannot be empty')
+      return
+    }
     const parsedStepTimeout = parseOptionalPositiveInt(editTaskStepTimeout)
     if (editTaskStepTimeout.trim() && parsedStepTimeout === null) {
       setError('Task timeout must be a positive number of seconds')
@@ -4535,6 +4527,43 @@ export default function App() {
     )
   }
 
+  async function generateFollowUpTasks(taskId: string): Promise<void> {
+    await runTaskMutation(
+      'generate_follow_ups',
+      async () => {
+        await requestJson<{ task: TaskRecord; created_task_ids: string[]; children: TaskRecord[] }>(
+          buildApiUrl(`/api/tasks/${taskId}/generate-tasks`, projectDir),
+          { method: 'POST', body: JSON.stringify({ source: 'latest' }) },
+        )
+        await reloadAll()
+        if (selectedTaskId === taskId) {
+          await loadTaskDetail(taskId)
+        }
+      },
+      {
+        successMessage: 'Follow-up tasks generated.',
+        errorPrefix: 'Failed to generate follow-up tasks',
+      },
+    )
+  }
+
+  async function postReviewComments(taskId: string): Promise<void> {
+    await runTaskMutation(
+      'post_review_comments',
+      async () => {
+        await requestJson<{ posted_count: number; failed_count: number }>(
+          buildApiUrl(`/api/tasks/${taskId}/post-review-comments`, projectDir),
+          { method: 'POST' },
+        )
+        await loadTaskDetail(taskId)
+      },
+      {
+        successMessage: 'Review comments posted.',
+        errorPrefix: 'Failed to post review comments',
+      },
+    )
+  }
+
   async function skipToPrecommit(taskId: string): Promise<void> {
     await runTaskMutation(
       'transition',
@@ -4798,7 +4827,186 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [selectedTaskId, selectedTaskView?.id, selectedTaskView?.timing_summary?.is_running, selectedTaskView?.timing_summary?.active_run_started_at])
 
-  const renderPendingGateBanner = (task: TaskRecord): JSX.Element => (
+  async function selectPipelineForTask(taskId: string, pipelineId: string): Promise<void> {
+    try {
+      await requestJson(buildApiUrl(`/api/tasks/${taskId}/select-pipeline`, projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pipeline_id: pipelineId }),
+      })
+      setGatePipelineSelection('')
+      await reloadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to select pipeline')
+    }
+  }
+
+  const renderPendingGateBanner = (task: TaskRecord): JSX.Element => {
+    if (task.pending_gate === 'pipeline_classify') {
+      return (
+        <div className="preview-box plan-gate-banner plan-gate-banner-compact">
+          <div className="plan-gate-header-row">
+            <p className="field-label">Classifying pipeline&hellip; The task will become eligible for execution once classification completes.</p>
+          </div>
+        </div>
+      )
+    }
+    if (task.pending_gate === 'select_pipeline') {
+      const allowedPipelines: string[] = (task.metadata as Record<string, unknown>)?.classification_allowed_pipelines as string[] || []
+      const reason = String((task.metadata as Record<string, unknown>)?.classifier_reason || '').trim()
+      return (
+        <div className="preview-box plan-gate-banner plan-gate-banner-compact">
+          <div className="plan-gate-header-row">
+            <p className="field-label">
+              <strong>Select pipeline</strong>
+              {reason ? <> &mdash; {reason}</> : null}
+            </p>
+          </div>
+          <div className="inline-actions plan-gate-actions">
+            <select
+              value={gatePipelineSelection}
+              onChange={(event) => setGatePipelineSelection(event.target.value)}
+            >
+              <option value="">Choose pipeline&hellip;</option>
+              {allowedPipelines.map((pid) => (
+                <option key={pid} value={pid}>{humanizeLabel(pid)}</option>
+              ))}
+            </select>
+            <button
+              className="button button-primary"
+              onClick={() => void selectPipelineForTask(task.id, gatePipelineSelection)}
+              disabled={!gatePipelineSelection}
+            >
+              Confirm
+            </button>
+          </div>
+        </div>
+      )
+    }
+    if (task.pending_gate === 'before_post_review') {
+      const meta = (task.metadata || {}) as Record<string, unknown>
+      const rawProposedDecision = meta.proposed_review_decision as string | undefined
+      const proposedDecision = rawProposedDecision ? String(rawProposedDecision) : null
+      const reviewSummary = String(meta.review_summary || '').trim()
+      const commentsPreview = meta.review_comments_preview
+      const commentsList = Array.isArray(commentsPreview) ? commentsPreview as Array<Record<string, unknown>> : []
+      const addressedList = commentsPreview && typeof commentsPreview === 'object' && !Array.isArray(commentsPreview)
+        ? (commentsPreview as Record<string, unknown>).addressed as Array<Record<string, unknown>> | undefined
+        : undefined
+      return (
+        <div className="preview-box plan-gate-banner">
+          <div className="plan-gate-header-row">
+            <p className="field-label plan-gate-title-inline">
+              <strong>Review complete</strong> <span aria-hidden="true">&middot;</span> Review before posting
+            </p>
+          </div>
+          {reviewSummary ? (
+            <div className="gate-review-summary" style={{ margin: '0.5rem 0', padding: '0.5rem', background: 'var(--bg-secondary, #f5f5f5)', borderRadius: '4px', fontSize: '0.9em' }}>
+              <strong>Summary:</strong> {reviewSummary}
+            </div>
+          ) : null}
+          {commentsList.length > 0 ? (
+            <details style={{ margin: '0.5rem 0' }}>
+              <summary style={{ cursor: 'pointer', fontWeight: 500 }}>
+                {commentsList.length} review comment{commentsList.length !== 1 ? 's' : ''} generated
+              </summary>
+              <div style={{ maxHeight: '300px', overflow: 'auto', marginTop: '0.25rem' }}>
+                {commentsList.map((c, i) => (
+                  <div key={i} style={{ padding: '0.25rem 0', borderBottom: '1px solid var(--border-color, #e0e0e0)', fontSize: '0.85em' }}>
+                    <code>{String(c.path || '')}:{String(c.line || '')}</code>
+                    {c.severity ? <span style={{ marginLeft: '0.5rem', fontWeight: 600, textTransform: 'uppercase', fontSize: '0.75em' }}>[{String(c.severity)}]</span> : null}
+                    <p style={{ margin: '0.25rem 0 0 0' }}>{String(c.body || '')}</p>
+                  </div>
+                ))}
+              </div>
+            </details>
+          ) : addressedList && addressedList.length > 0 ? (
+            <details style={{ margin: '0.5rem 0' }}>
+              <summary style={{ cursor: 'pointer', fontWeight: 500 }}>
+                {addressedList.length} comment response{addressedList.length !== 1 ? 's' : ''} drafted
+              </summary>
+              <div style={{ maxHeight: '300px', overflow: 'auto', marginTop: '0.25rem' }}>
+                {addressedList.map((c, i) => (
+                  <div key={i} style={{ padding: '0.25rem 0', borderBottom: '1px solid var(--border-color, #e0e0e0)', fontSize: '0.85em' }}>
+                    <strong>#{String(c.comment_id || '')}</strong>
+                    <p style={{ margin: '0.25rem 0 0 0' }}>{String(c.response_body || c.fix_description || '')}</p>
+                  </div>
+                ))}
+              </div>
+            </details>
+          ) : (
+            <p className="text-muted" style={{ margin: '0.5rem 0', fontSize: '0.9em' }}>No review comments generated.</p>
+          )}
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', margin: '0.5rem 0' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+              <span className="field-label" style={{ margin: 0 }}>Decision:</span>
+              <select
+                value={gateReviewDecision}
+                onChange={(e) => setGateReviewDecision(e.target.value as ReviewDecisionType)}
+                disabled={taskActionPending !== null}
+              >
+                {REVIEW_DECISION_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="checkbox-row" style={{ margin: 0 }}>
+              <input
+                type="checkbox"
+                checked={gatePostComments}
+                onChange={(e) => setGatePostComments(e.target.checked)}
+                disabled={taskActionPending !== null}
+              />
+              Post to PR/MR
+            </label>
+          </div>
+          {proposedDecision ? (
+            <p className="text-muted" style={{ fontSize: '0.8em', margin: '0 0 0.5rem 0' }}>
+              AI proposed: <strong>{proposedDecision}</strong>
+            </p>
+          ) : null}
+          <div className="inline-actions plan-gate-actions">
+            <button
+              className="button button-primary"
+              onClick={() => void approveGate(task.id, task.pending_gate, { review_decision: gateReviewDecision, post_comments: gatePostComments })}
+              disabled={taskActionPending === 'approve_gate'}
+            >
+              {taskActionPending === 'approve_gate' && taskActionDetail.startsWith('approve:')
+                ? 'Posting...'
+                : gatePostComments ? 'Post review' : 'Stage review'}
+            </button>
+            {!gateRequestOpen ? (
+              <button
+                className="button"
+                onClick={() => setGateRequestOpen(true)}
+                disabled={taskActionPending !== null}
+              >
+                Refine review
+              </button>
+            ) : (
+              <>
+                <input
+                  className="review-guidance-input"
+                  value={gateRequestGuidance}
+                  onChange={(event) => setGateRequestGuidance(event.target.value)}
+                  placeholder="What should be refined?"
+                  disabled={taskActionPending !== null}
+                />
+                <button
+                  className="button"
+                  onClick={() => void requestGateChanges(task.id, task.pending_gate)}
+                  disabled={taskActionPending !== null}
+                >
+                  Re-review
+                </button>
+                <button className="button" onClick={() => { setGateRequestOpen(false); setGateRequestGuidance('') }}>Cancel</button>
+              </>
+            )}
+          </div>
+        </div>
+      )
+    }
+    return (
     <div className="preview-box plan-gate-banner plan-gate-banner-compact">
       <div className="plan-gate-header-row">
         {task.pending_gate === 'before_generate_tasks' ? (
@@ -4894,7 +5102,7 @@ export default function App() {
         )}
       </div>
     </div>
-  )
+  )}
 
   const taskDetailContent = selectedTaskView ? (
       <div className="detail-card">
@@ -5011,7 +5219,7 @@ export default function App() {
               </div>
             ) : null}
             {selectedTaskView.execution_summary && selectedTaskView.execution_summary.steps.length > 0 && (['in_review', 'blocked', 'done'].includes(selectedTaskView.status) || (selectedTaskView.status === 'in_progress' && !!selectedTaskView.pending_gate)) ? (() => {
-              const sumStep = selectedTaskView.execution_summary!.steps.find((s) => s.step === 'summary' || s.step === 'summarize')
+              const sumStep = selectedTaskView.execution_summary!.steps.slice().reverse().find((s) => s.step === 'summary' || s.step === 'summarize')
               const otherSteps = selectedTaskView.execution_summary!.steps.filter((s) => s.step !== 'summary' && s.step !== 'summarize')
               return (
                 <div className="execution-summary-box">
@@ -5079,6 +5287,41 @@ export default function App() {
                 </div>
               )
             })() : null}
+            {(() => {
+              const genComments = selectedTaskView.metadata?.generated_review_comments as Array<{path?: string; line?: number; severity?: string; body?: string}> | undefined
+              const postResults = selectedTaskView.metadata?.posted_comments as Array<{success?: boolean; platform_id?: string; error?: string}> | undefined
+              if (!genComments || genComments.length === 0) return null
+              return (
+                <details className="execution-details-collapse" open>
+                  <summary className="execution-details-toggle">
+                    Generated comments ({genComments.length})
+                  </summary>
+                  <div className="generated-comments-list">
+                    {genComments.map((c, i) => {
+                      const result = postResults?.[i]
+                      return (
+                        <div key={i} className="generated-comment-item">
+                          <p className="generated-comment-location">
+                            <code>{c.path || '(general)'}</code>
+                            {c.line ? <span>:{c.line}</span> : null}
+                            {c.severity ? <span className={`status-pill status-pill-inline severity-${c.severity}`}>{c.severity}</span> : null}
+                            {result ? (
+                              <span className={`status-pill status-pill-inline ${result.success ? 'status-done' : 'status-failed'}`}>
+                                {result.success ? (result.platform_id === 'dry_run' ? 'dry-run' : 'posted') : 'failed'}
+                              </span>
+                            ) : null}
+                          </p>
+                          {result && !result.success && result.error ? (
+                            <p className="generated-comment-error">{result.error}</p>
+                          ) : null}
+                          <RenderedMarkdown content={c.body || ''} className="generated-comment-body" />
+                        </div>
+                      )
+                    })}
+                  </div>
+                </details>
+              )
+            })()}
             {Array.isArray(selectedTaskView.human_review_actions) && selectedTaskView.human_review_actions.length > 0 ? (
               <div className="review-history-box">
                 <p className="review-history-header">Review history</p>
@@ -5111,24 +5354,34 @@ export default function App() {
               </div>
             ) : null}
             {selectedTaskView.error?.trim() ? (() => {
-              const stderrTail = (stderrHistory || '').trim()
-              const logTail = (stdoutHistory || '').trim()
+              const errorText = selectedTaskView.error!.trim()
               const contextLines: string[] = []
-              if (logTail) {
-                const last = logTail.slice(-800)
-                const fromNewline = last.indexOf('\n')
-                contextLines.push(fromNewline > 0 ? last.slice(fromNewline + 1) : last)
+              // Pull summaries from failed/error execution steps for context
+              const execSteps = selectedTaskView.execution_summary?.steps || []
+              const failedSteps = execSteps.filter((s) => s.status === 'error' || s.status === 'blocked')
+              for (const fs of failedSteps) {
+                if (fs.summary && fs.summary !== errorText) {
+                  contextLines.push(`[${fs.step}] ${fs.summary}`)
+                }
               }
+              // Append stderr tail only if it adds new information not already
+              // present in the error or step summaries (the backend now embeds
+              // sanitized stderr into step summaries, so repeating it is noisy).
+              const stderrTail = (stderrHistory || '').trim()
               if (stderrTail) {
                 const last = stderrTail.slice(-400)
                 const fromNewline = last.indexOf('\n')
-                contextLines.push('stderr: ' + (fromNewline > 0 ? last.slice(fromNewline + 1) : last))
+                const stderrSnippet = (fromNewline > 0 ? last.slice(fromNewline + 1) : last).trim()
+                const alreadyShown = errorText + '\n' + contextLines.join('\n')
+                if (stderrSnippet && !alreadyShown.includes(stderrSnippet.slice(-120))) {
+                  contextLines.push('stderr: ' + stderrSnippet)
+                }
               }
-              const context = contextLines.join('\n').trim()
+              const context = contextLines.join('\n\n').trim()
               return (
                 <div className="error-detail-box">
-                  <p className="error-detail-label">Error</p>
-                  <pre>{context ? `${selectedTaskView.error}\n\n${context}` : selectedTaskView.error}</pre>
+                  <p className="error-detail-label">Error details</p>
+                  <pre>{context ? `${errorText}\n\n${context}` : errorText}</pre>
                 </div>
               )
             })() : null}
@@ -5341,6 +5594,22 @@ export default function App() {
         {taskDetailTab === 'configuration' ? (
           <div className="task-detail-section-body">
               <div className="form-stack">
+                <label className="field-label" htmlFor="edit-task-title">Title</label>
+                <input
+                  id="edit-task-title"
+                  value={configLocked ? (selectedTaskView.title || '') : editTaskTitle}
+                  onChange={(event) => setEditTaskTitle(event.target.value)}
+                  disabled={configLocked || taskActionPending === 'save'}
+                />
+                <label className="field-label" htmlFor="edit-task-description">Description</label>
+                <textarea
+                  id="edit-task-description"
+                  className="json-editor-textarea"
+                  rows={4}
+                  value={configLocked ? (selectedTaskView.description || '') : editTaskDescription}
+                  onChange={(event) => setEditTaskDescription(event.target.value)}
+                  disabled={configLocked || taskActionPending === 'save'}
+                />
                 <label className="field-label" htmlFor="edit-task-labels">Labels (comma-separated)</label>
                 <input
                   id="edit-task-labels"
@@ -5817,6 +6086,13 @@ export default function App() {
             <summary className="board-more-btn" title="More actions">···</summary>
             <div className="board-more-dropdown">
               <button
+                className="board-more-item"
+                onClick={() => void queueAllBacklog()}
+                disabled={taskActionPending === 'queue-backlog'}
+              >
+                {taskActionPending === 'queue-backlog' ? 'Queuing...' : 'Queue All Backlog'}
+              </button>
+              <button
                 className="board-more-item board-more-item-danger"
                 onClick={() => void clearAllTasks()}
                 disabled={taskActionPending === 'clear'}
@@ -5844,12 +6120,10 @@ export default function App() {
                         key={task.id}
                         onClick={() => handleTaskSelect(task.id, (task.pending_gate === 'before_implement' || task.pending_gate === 'before_generate_tasks') ? 'plan' : undefined)}
                         onContextMenu={(e) => {
-                          if (task.status === 'done') {
-                            e.preventDefault()
-                            const menuW = 180
-                            const menuH = 50
-                            setContextMenu({ x: Math.max(0, Math.min(e.clientX, window.innerWidth - menuW)), y: Math.max(0, Math.min(e.clientY, window.innerHeight - menuH)), taskId: task.id })
-                          }
+                          e.preventDefault()
+                          const menuW = 180
+                          const menuH = 120
+                          setContextMenu({ x: Math.max(0, Math.min(e.clientX, window.innerWidth - menuW)), y: Math.max(0, Math.min(e.clientY, window.innerHeight - menuH)), taskId: task.id })
                         }}
                       >
                         <p className="task-title">{task.title}</p>
@@ -6934,6 +7208,7 @@ export default function App() {
     if (tab === 'review') {
       setSelectedPrNumber(null)
       setPrReviewGuidance('')
+      setPrReviewMode(ReviewMode.FixOnly)
       void fetchPullRequests()
     }
     setWorkOpen(true)
@@ -7029,7 +7304,7 @@ export default function App() {
                 const pipelineSteps = selectedTaskView.pipeline_template!
                 const currentStep = selectedTaskView.current_step || null
                 const pipelinePhase = String(selectedTaskView.metadata?.pipeline_phase || '') || currentStep
-                const isDone = selectedTaskView.status === 'done' || selectedTaskView.status === 'in_review'
+                const isDone = selectedTaskView.status === 'done'
                 const phaseIdx = pipelinePhase ? pipelineSteps.indexOf(pipelinePhase) : -1
                 return (
                   <div className="pipeline-flow">
@@ -7164,6 +7439,15 @@ export default function App() {
                 {taskStatus === 'done' && selectedTaskView.execution_summary?.steps.some((s) => s.commit) ? (
                   <button className="button" onClick={() => void reviewCommit(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'review_commit' ? 'Creating...' : 'Review Commit'}</button>
                 ) : null}
+                {selectedTaskView.metadata?.comment_dry_run &&
+                 Array.isArray(selectedTaskView.metadata?.generated_review_comments) &&
+                 (selectedTaskView.metadata.generated_review_comments as unknown[]).length > 0 &&
+                 (taskStatus === 'done' || taskStatus === 'in_review') ? (
+                  <button className="button button-primary" onClick={() => void postReviewComments(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'post_review_comments' ? 'Posting...' : 'Post Comments'}</button>
+                ) : null}
+                {taskSupportsPostCompletionGeneration(selectedTaskView) ? (
+                  <button className="button button-primary" onClick={() => void generateFollowUpTasks(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'generate_follow_ups' ? 'Generating...' : 'Generate Follow-Up Tasks'}</button>
+                ) : null}
                 {taskStatus === 'done' ? (
                   <button className="button button-danger" onClick={() => void deleteTask(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'delete' ? 'Deleting...' : 'Delete'}</button>
                 ) : null}
@@ -7175,11 +7459,27 @@ export default function App() {
         </div>
       ) : null}
 
-      {contextMenu ? (
-        <div className="context-menu" role="menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
-          <button role="menuitem" disabled={isTaskActionBusy} onClick={() => { setContextMenu(null); void reviewCommit(contextMenu.taskId) }}>Review Commit</button>
-        </div>
-      ) : null}
+      {contextMenu ? (() => {
+        const ctxTask = taskIndex.get(contextMenu.taskId)
+        const ctxStatus = ctxTask?.status
+        return (
+          <div className="context-menu" role="menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
+            <button role="menuitem" onClick={() => { void navigator.clipboard.writeText(contextMenu.taskId); setContextMenu(null) }}>Copy Task ID</button>
+            {ctxStatus === 'done' ? (
+              <button role="menuitem" disabled={isTaskActionBusy} onClick={() => { setContextMenu(null); void reviewCommit(contextMenu.taskId) }}>Review Commit</button>
+            ) : null}
+            {ctxStatus === 'done' && taskSupportsPostCompletionGeneration(ctxTask) ? (
+              <button role="menuitem" disabled={isTaskActionBusy} onClick={() => { setContextMenu(null); void generateFollowUpTasks(contextMenu.taskId) }}>Generate Follow-Up Tasks</button>
+            ) : null}
+            {ctxStatus === 'in_progress' || ctxStatus === 'blocked' ? (
+              <button role="menuitem" className="context-menu-danger" disabled={isTaskActionBusy} onClick={() => { setContextMenu(null); void transitionTask(contextMenu.taskId, 'cancelled') }}>Cancel Task</button>
+            ) : null}
+            {ctxStatus === 'backlog' || ctxStatus === 'queued' || ctxStatus === 'done' || ctxStatus === 'cancelled' ? (
+              <button role="menuitem" className="context-menu-danger" disabled={isTaskActionBusy} onClick={() => { setContextMenu(null); void deleteTask(contextMenu.taskId) }}>Delete Task</button>
+            ) : null}
+          </div>
+        )
+      })() : null}
 
       {error ? <div className="error-banner"><span>{error}</span><button type="button" className="error-banner-dismiss" onClick={() => setError('')} aria-label="Dismiss">&times;</button></div> : null}
 
@@ -7210,17 +7510,10 @@ export default function App() {
                   <select
                     id="task-type"
                     value={newTaskType}
-                    onChange={(event) => {
-                      const value = event.target.value
-                      if (value === 'auto' && autoPipelineNeedsManualSelection) {
-                        setError('Auto selection is locked after low confidence. Please select a specific pipeline for this task.')
-                        return
-                      }
-                      setNewTaskType(value)
-                    }}
+                    onChange={(event) => setNewTaskType(event.target.value)}
                   >
                     {TASK_TYPE_OPTIONS.map((taskType) => (
-                      <option key={taskType} value={taskType} disabled={taskType === 'auto' && autoPipelineNeedsManualSelection}>
+                      <option key={taskType} value={taskType}>
                         {humanizeLabel(taskType)}
                       </option>
                     ))}
@@ -7438,6 +7731,19 @@ export default function App() {
                       ))}
                     </div>
                   ) : null}
+                  <div className="review-mode-group">
+                    <label className="field-label" htmlFor="review-mode">Review mode</label>
+                    <select
+                      id="review-mode"
+                      value={prReviewMode}
+                      onChange={(e) => setPrReviewMode(e.target.value as ReviewMode)}
+                    >
+                      {REVIEW_MODE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                    <p className="review-mode-hint text-muted">{REVIEW_MODE_OPTIONS.find((o) => o.value === prReviewMode)?.description}</p>
+                  </div>
                   <label className="field-label" htmlFor="pr-review-guidance">Review guidance (optional)</label>
                   <textarea
                     id="pr-review-guidance"
