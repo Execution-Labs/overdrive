@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "overdrive"
+name = "overdrive-ai"
 version = "0.3.1"
 description = "Deterministic orchestration for AI-assisted software delivery."
 readme = "README.md"
@@ -11,6 +11,12 @@ requires-python = ">=3.10"
 dependencies = [
   "loguru",
   "PyYAML>=6.0",
+  "fastapi>=0.109.0",
+  "uvicorn[standard]>=0.27.0",
+  "websockets>=12.0",
+  "pydantic>=2.5.0",
+  "pyjwt>=2.8.0",
+  "python-multipart>=0.0.6",
 ]
 
 [project.optional-dependencies]
@@ -24,14 +30,6 @@ test = [
 dev = [
   "mypy>=1.8",
   "ruff>=0.4",
-]
-server = [
-  "fastapi>=0.109.0",
-  "uvicorn[standard]>=0.27.0",
-  "websockets>=12.0",
-  "pydantic>=2.5.0",
-  "pyjwt>=2.8.0",
-  "python-multipart>=0.0.6",
 ]
 
 [tool.mypy]
@@ -49,6 +47,9 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+overdrive = ["web_dist/**/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

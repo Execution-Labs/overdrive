@@ -48,7 +48,7 @@ jobs:
       - name: Install backend server dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[server,test]"
+          python -m pip install -e ".[test]"
 
       - name: Setup Node
         uses: actions/setup-node@v4

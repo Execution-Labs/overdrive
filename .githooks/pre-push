@@ -4,9 +4,18 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Block direct pushes to main
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [[ "$remote_ref" == "refs/heads/main" ]]; then
+    echo "[pre-push] ERROR: Direct pushes to main are not allowed."
+    echo "[pre-push] Create a feature branch and open a pull request instead."
+    exit 1
+  fi
+done
+
 if [[ ! -x ".venv/bin/python" ]]; then
   echo "[pre-push] Missing .venv at repo root."
-  echo "[pre-push] Create it first (example): python3 -m venv .venv && .venv/bin/pip install -e \".[server,test,dev]\""
+  echo "[pre-push] Create it first (example): python3 -m venv .venv && .venv/bin/pip install -e \".[test,dev]\""
   exit 1
 fi
 

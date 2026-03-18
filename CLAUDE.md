@@ -13,8 +13,8 @@ Overdrive is a local orchestration control center for AI-assisted software deliv
 ```bash
 # Activate venv
 source .venv/bin/activate
-# Install (editable, with server deps)
-python -m pip install -e ".[server]"
+# Install (editable)
+python -m pip install -e .
 
 # Run backend server
 overdrive server --project-dir /path/to/repo

@@ -9,12 +9,35 @@ from typing import Any, AsyncIterator, Optional, cast
 
 from fastapi import FastAPI, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from ..runtime.api import create_router
 from ..runtime.events import EventBus
 from ..runtime.events import hub
 from ..runtime.orchestrator import OrchestratorService, WorkerAdapter, create_orchestrator
 from ..runtime.storage import Container
+
+
+def _find_frontend_dist() -> Optional[Path]:
+    """Locate the built frontend dist directory.
+
+    Checks two locations:
+    1. Bundled with the package: <package>/web_dist/
+    2. Development repo layout: <repo_root>/web/dist/
+    """
+    # Bundled in the package (PyPI wheel)
+    pkg_dist = Path(__file__).resolve().parent.parent / "web_dist"
+    if (pkg_dist / "index.html").is_file():
+        return pkg_dist
+
+    # Development: repo root / web / dist
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
+    dev_dist = repo_root / "web" / "dist"
+    if (dev_dist / "index.html").is_file():
+        return dev_dist
+
+    return None
 
 
 def create_app(
@@ -111,52 +134,12 @@ def create_app(
 
     app.include_router(create_router(_resolve_container, _resolve_orchestrator, app.state.import_jobs, app.state.terminal_services))
 
-    @app.get("/")
-    async def root(project_dir: Optional[str] = Query(None)) -> dict[str, object]:
-        """Return basic service metadata for the selected project context.
-        
-        Args:
-            project_dir: Optional project directory used to resolve runtime state.
-        
-        Returns:
-            A payload containing service metadata and project identity fields.
-        """
-        container = _resolve_container(project_dir)
-        cfg = container.config.load()
-        schema_version = cfg.get("schema_version")
-        try:
-            schema = int(schema_version) if schema_version is not None else 4
-        except (TypeError, ValueError):
-            schema = 4
-        storage_backend = str(cfg.get("storage_backend") or "sqlite")
-        return {
-            "name": "Overdrive",
-            "version": "3.0.0",
-            "project": str(container.project_dir),
-            "project_id": container.project_id,
-            "schema_version": schema,
-            "storage_backend": storage_backend,
-        }
-
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
-        """Expose liveness status for process-level health checks.
-        
-        Returns:
-            A payload indicating the API process is running.
-        """
         return {"status": "ok", "version": "3.0.0"}
 
     @app.get("/readyz")
     async def readyz(project_dir: Optional[str] = Query(None)) -> dict[str, object]:
-        """Expose readiness status for the selected project context.
-        
-        Args:
-            project_dir: Optional project directory used to resolve runtime state.
-        
-        Returns:
-            A payload indicating readiness and current orchestrator cache size.
-        """
         container = _resolve_container(project_dir)
         return {
             "status": "ready",
@@ -167,15 +150,47 @@ def create_app(
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
-        """Bridge websocket clients to the shared event hub handler.
-        
-        Args:
-            websocket: Active websocket connection accepted by FastAPI.
-        
-        Returns:
-            ``None`` after the connection lifecycle ends.
-        """
         await hub.handle_connection(websocket)
+
+    # Serve built frontend if web/dist/ exists, otherwise serve JSON at /
+    _frontend_dist = _find_frontend_dist()
+    if _frontend_dist is not None:
+        _index_html = _frontend_dist / "index.html"
+        _assets_dir = _frontend_dist / "assets"
+        if _assets_dir.is_dir():
+            app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="static-assets")
+
+        @app.get("/", include_in_schema=False)
+        async def serve_index() -> FileResponse:
+            return FileResponse(str(_index_html))
+
+        @app.get("/{path:path}", include_in_schema=False)
+        async def spa_fallback(path: str) -> FileResponse:
+            # Serve actual static files (favicon, images, etc.)
+            candidate = _frontend_dist / path
+            if path and candidate.is_file() and ".." not in path:
+                return FileResponse(str(candidate))
+            # Everything else gets index.html (SPA client-side routing)
+            return FileResponse(str(_index_html))
+    else:
+        @app.get("/")
+        async def root(project_dir: Optional[str] = Query(None)) -> dict[str, object]:
+            container = _resolve_container(project_dir)
+            cfg = container.config.load()
+            schema_version = cfg.get("schema_version")
+            try:
+                schema = int(schema_version) if schema_version is not None else 4
+            except (TypeError, ValueError):
+                schema = 4
+            storage_backend = str(cfg.get("storage_backend") or "sqlite")
+            return {
+                "name": "Overdrive",
+                "version": "3.0.0",
+                "project": str(container.project_dir),
+                "project_id": container.project_id,
+                "schema_version": schema,
+                "storage_backend": storage_backend,
+            }
 
     return app
 

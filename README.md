@@ -66,23 +66,28 @@ When you need:
 
 ## Quick Start
 
-### 1. Start the backend
+### pip install (recommended)
 
 ```bash
-python -m pip install -e ".[server]"
+pip install overdrive-ai
+cd /path/to/your/repo
 overdrive server
 ```
 
-Backend runs at `http://localhost:8080` by default.
-
-### 2. Start the web UI
+### One-liner install
 
 ```bash
-npm --prefix web install
-npm --prefix web run dev
+curl -sSL https://raw.githubusercontent.com/Execution-Labs/overdrive/main/scripts/install.sh | bash
 ```
 
-Frontend runs at `http://localhost:3000` by default (proxies `/api` to the backend).
+### Development setup
+
+```bash
+git clone https://github.com/Execution-Labs/overdrive.git
+cd overdrive
+make setup   # create venv, install backend + frontend
+make dev     # start backend on :8080 + frontend on :3000
+```
 
 ## Navigation
 
@@ -226,7 +231,7 @@ Notes:
 ```bash
 # Use Python 3.10+ and a local virtualenv
 python3 -m venv .venv
-.venv/bin/pip install -e ".[server,test,dev]"
+.venv/bin/pip install -e ".[test,dev]"
 
 # Backend tests
 .venv/bin/pytest -q
