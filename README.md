@@ -1,69 +1,35 @@
-[![Backend CI](https://github.com/wcgan7/overdrive/actions/workflows/backend-ci.yml/badge.svg)](https://github.com/wcgan7/overdrive/actions/workflows/backend-ci.yml)
-[![Web CI](https://github.com/wcgan7/overdrive/actions/workflows/web-ci.yml/badge.svg)](https://github.com/wcgan7/overdrive/actions/workflows/web-ci.yml)
-[![Version](https://img.shields.io/github/v/release/wcgan7/overdrive)](https://github.com/wcgan7/overdrive/releases)
+[![Backend CI](https://github.com/Execution-Labs/overdrive/actions/workflows/backend-ci.yml/badge.svg)](https://github.com/Execution-Labs/overdrive/actions/workflows/backend-ci.yml)
+[![Web CI](https://github.com/Execution-Labs/overdrive/actions/workflows/web-ci.yml/badge.svg)](https://github.com/Execution-Labs/overdrive/actions/workflows/web-ci.yml)
+[![Version](https://img.shields.io/github/v/release/Execution-Labs/overdrive)](https://github.com/Execution-Labs/overdrive/releases)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 
 # Overdrive
 
-Deterministic orchestration for AI-assisted software delivery.
+Give coding agents real development superpowers.
 
-Overdrive sequences planning, implementation, validation, and review into a controlled execution pipeline. It runs multi-step AI workflows with dependency awareness, quality gates, and full traceability.
+Instead of one-shot prompting, this system enforces:
+plan → implement → verify → review → repeat
 
-Designed for developers who want controlled, repeatable AI-driven workflows — not single-pass code generation.
+The result:
+- higher code quality  
+- parallel task execution  
+- dependency-aware workflows  
+- full traceability of every step  
 
-## Core Principles
-
-- **Deterministic execution over ad-hoc prompting**
-- **Quality gates before commits**
-- **Dependency-aware parallelism**
-- **Provider-agnostic routing**
-- **Complete execution traceability**
-
-## Execution Model
-
-Overdrive runs tasks through **pipeline templates** chosen by task intent (or auto-routed).
-
-```
-Task
-  ↓
-Select pipeline template (feature / bug_fix / refactor / docs / test / research / …)
-  ↓
-Execute staged steps (template-defined)
-  ↓
-Apply quality gates (approvals, severity thresholds, retry limits)
-  ↓
-Outcome (commit, report, or task generation)
-```
-
-Pipeline templates define step flow; quality policies determine how and when work progresses.
-
-### Reference Pipeline: `feature`
-
-The `feature` pipeline represents the full delivery loop:
-
-plan → implement → verify → review → commit
-
-It includes structured planning, automated verification, severity-scored review findings, and iterative fix cycles until quality gates are satisfied.
-
----
+Ship software faster with agents that follow real engineering workflows — not single-shot prompts.
 
 <!-- Regenerate screenshot: npm --prefix web run screenshot:homepage -->
 ![Overdrive Dashboard](web/public/homepage-screenshot.png)
 
----
 
 ## When to Use Overdrive
 
-Choose Overdrive when you need:
+When you need:
 
-- Multi-step AI-driven feature delivery with review loops
-- Quality controls over automated code changes
-- Coordinating work across multiple repositories
-- Traceable, structured execution pipelines
-- Structured decomposition of large PRDs into executable tasks
-
-Not designed for single-pass code generation.
+- Multi-step tasks that need plan → implement → verify → review discipline
+- Parallel execution across multiple tasks or repos
+- Full audit trail of every agent decision and code change
 
 ## What You Can Do
 
@@ -87,6 +53,11 @@ Not designed for single-pass code generation.
 - Automatically integrate branches and trigger conflict-resolution flows when collisions occur.
 - Route pipeline steps across providers (Codex, Claude, Ollama) with configurable step-to-provider mapping.
 - Use the embedded interactive terminal to intervene manually without leaving the orchestrator UI.
+
+### Review and fix pull requests
+- Review GitHub PRs and GitLab MRs: comment, fix, or fix-and-respond to existing review threads.
+- Fix modes go beyond comments — they implement fixes, verify, and commit.
+- Post-review gate lets you inspect findings and adjust the decision before anything is posted.
 
 ### Trace every task
 - Track full task history from prompt to completion: task state transitions, plan/workdoc revisions, review decisions, and gate approvals.
