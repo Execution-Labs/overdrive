@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_orchestrator.runtime.domain.models import RunRecord, Task, now_iso
-from agent_orchestrator.runtime.orchestrator.service import (
+from overdrive.runtime.domain.models import RunRecord, Task, now_iso
+from overdrive.runtime.orchestrator.service import (
     OrchestratorService,
     _BLOCKED_RECOMMENDED_ACTIONS,
     _classify_block_reason,
@@ -308,7 +308,7 @@ class TestTaskPayloadRecommendedAction:
 
     def test_includes_recommended_action_from_metadata(self) -> None:
         """Non-empty recommended_action is included in the API payload."""
-        from agent_orchestrator.runtime.api.router_impl import _task_payload
+        from overdrive.runtime.api.router_impl import _task_payload
 
         task = Task(title="t", metadata={"recommended_action": "Click Retry."})
         payload = _task_payload(task)
@@ -316,7 +316,7 @@ class TestTaskPayloadRecommendedAction:
 
     def test_returns_none_when_absent(self) -> None:
         """Missing recommended_action returns None in the API payload."""
-        from agent_orchestrator.runtime.api.router_impl import _task_payload
+        from overdrive.runtime.api.router_impl import _task_payload
 
         task = Task(title="t", metadata={})
         payload = _task_payload(task)
@@ -324,7 +324,7 @@ class TestTaskPayloadRecommendedAction:
 
     def test_returns_none_for_empty_string(self) -> None:
         """Empty-string recommended_action returns None in the API payload."""
-        from agent_orchestrator.runtime.api.router_impl import _task_payload
+        from overdrive.runtime.api.router_impl import _task_payload
 
         task = Task(title="t", metadata={"recommended_action": ""})
         payload = _task_payload(task)
@@ -332,7 +332,7 @@ class TestTaskPayloadRecommendedAction:
 
     def test_returns_none_for_whitespace(self) -> None:
         """Whitespace-only recommended_action returns None in the API payload."""
-        from agent_orchestrator.runtime.api.router_impl import _task_payload
+        from overdrive.runtime.api.router_impl import _task_payload
 
         task = Task(title="t", metadata={"recommended_action": "   "})
         payload = _task_payload(task)
@@ -372,7 +372,7 @@ class TestRecommendedActionClearing:
 
     def test_stale_action_not_returned_after_clearing_metadata(self) -> None:
         """After clearing recommended_action, API payload returns None."""
-        from agent_orchestrator.runtime.api.router_impl import _task_payload
+        from overdrive.runtime.api.router_impl import _task_payload
 
         task = Task(title="t", metadata={"recommended_action": "Old stale action."})
         task.metadata.pop("recommended_action", None)

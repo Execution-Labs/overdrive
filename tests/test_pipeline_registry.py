@@ -1,7 +1,7 @@
 """Tests for pipeline templates and registry."""
 
 import pytest
-from agent_orchestrator.pipelines.registry import (
+from overdrive.pipelines.registry import (
     BUILTIN_TEMPLATES,
     PipelineRegistry,
     PipelineTemplate,

@@ -1172,7 +1172,7 @@ describe('App default route', () => {
 
   it('ignores websocket events from other projects', async () => {
     const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
-    localStorage.setItem('agent-orchestrator-project', '/tmp/repo-alpha')
+    localStorage.setItem('overdrive-project', '/tmp/repo-alpha')
     render(<App />)
 
     const boardCallCount = () =>

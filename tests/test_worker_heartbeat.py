@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_orchestrator.utils import _now_iso
-from agent_orchestrator.worker import WorkerCancelledError, _run_codex_worker
+from overdrive.utils import _now_iso
+from overdrive.worker import WorkerCancelledError, _run_codex_worker
 
 
 def test_worker_uses_output_as_heartbeat(tmp_path: Path) -> None:

@@ -9,10 +9,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_orchestrator.comments.models import CommentPostResult, PRComment
-from agent_orchestrator.comments.reader import CommentFetchError
-from agent_orchestrator.runtime.domain.models import RunRecord, Task, now_iso
-from agent_orchestrator.runtime.orchestrator.task_executor import TaskExecutor
+from overdrive.comments.models import CommentPostResult, PRComment
+from overdrive.comments.reader import CommentFetchError
+from overdrive.runtime.domain.models import RunRecord, Task, now_iso
+from overdrive.runtime.orchestrator.task_executor import TaskExecutor
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -72,7 +72,7 @@ class TestExecuteFetchComments:
         executor = TaskExecutor(svc)
         return executor, svc
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.fetch_pr_comments")
+    @patch("overdrive.runtime.orchestrator.task_executor.fetch_pr_comments")
     def test_success_github(self, mock_fetch: MagicMock) -> None:
         comments = _sample_comments(3)
         mock_fetch.return_value = comments
@@ -93,7 +93,7 @@ class TestExecuteFetchComments:
         assert run.steps[0]["status"] == "ok"
         assert run.steps[0]["comment_count"] == 3
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.fetch_mr_comments")
+    @patch("overdrive.runtime.orchestrator.task_executor.fetch_mr_comments")
     def test_success_gitlab(self, mock_fetch: MagicMock) -> None:
         comments = _sample_comments(2)
         mock_fetch.return_value = comments
@@ -107,7 +107,7 @@ class TestExecuteFetchComments:
         assert task.metadata["comment_platform"]["platform"] == "gitlab"
         assert len(task.metadata["fetched_comments"]) == 2
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.fetch_pr_comments")
+    @patch("overdrive.runtime.orchestrator.task_executor.fetch_pr_comments")
     def test_empty_comments(self, mock_fetch: MagicMock) -> None:
         mock_fetch.return_value = []
         executor, svc = self._make_executor()
@@ -120,7 +120,7 @@ class TestExecuteFetchComments:
         assert task.metadata["fetched_comments"] == []
         assert task.metadata["formatted_comments"] == ""
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.fetch_pr_comments")
+    @patch("overdrive.runtime.orchestrator.task_executor.fetch_pr_comments")
     def test_fetch_error_blocks(self, mock_fetch: MagicMock) -> None:
         mock_fetch.side_effect = CommentFetchError("API error")
         executor, svc = self._make_executor()
@@ -146,7 +146,7 @@ class TestExecuteFetchComments:
         assert task.status == "blocked"
         assert "source_url" in (task.error or "").lower() or "source" in (task.error or "").lower()
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.fetch_pr_comments")
+    @patch("overdrive.runtime.orchestrator.task_executor.fetch_pr_comments")
     def test_fallback_to_pr_number(self, mock_fetch: MagicMock) -> None:
         comments = _sample_comments(1)
         mock_fetch.return_value = comments
@@ -176,7 +176,7 @@ class TestExecutePostComments:
         executor = TaskExecutor(svc)
         return executor, svc
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.post_comments_batch")
+    @patch("overdrive.runtime.orchestrator.task_executor.post_comments_batch")
     def test_success(self, mock_batch: MagicMock) -> None:
         mock_batch.return_value = [
             CommentPostResult(success=True, platform_id="1001"),
@@ -256,7 +256,7 @@ class TestExecutePostComments:
         assert task.metadata["posted_comments"][0]["_comment_path"] == "src/foo.py"
         assert task.metadata["posted_comments"][0]["_comment_line"] == 5
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.post_comments_batch")
+    @patch("overdrive.runtime.orchestrator.task_executor.post_comments_batch")
     def test_live_when_explicitly_false(self, mock_batch: MagicMock) -> None:
         """comment_dry_run=False → calls post_comments_batch, results have post_status='posted'."""
         mock_batch.return_value = [CommentPostResult(success=True, platform_id="1001")]
@@ -278,7 +278,7 @@ class TestExecutePostComments:
         mock_batch.assert_called_once()
         assert task.metadata["posted_comments"][0]["post_status"] == "posted"
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.post_comments_batch")
+    @patch("overdrive.runtime.orchestrator.task_executor.post_comments_batch")
     def test_live_partial_failure_status(self, mock_batch: MagicMock) -> None:
         """Mixed success/failure → correct post_status values."""
         mock_batch.return_value = [
@@ -305,7 +305,7 @@ class TestExecutePostComments:
         assert run.steps[0]["posted_count"] == 1
         assert run.steps[0]["failed_count"] == 1
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.post_comments_batch")
+    @patch("overdrive.runtime.orchestrator.task_executor.post_comments_batch")
     def test_total_failure_blocks(self, mock_batch: MagicMock) -> None:
         mock_batch.return_value = [
             CommentPostResult(success=False, error="401 Unauthorized"),
@@ -328,7 +328,7 @@ class TestExecutePostComments:
         assert task.status == "blocked"
         svc._emit_task_blocked.assert_called_once()
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.post_comments_batch")
+    @patch("overdrive.runtime.orchestrator.task_executor.post_comments_batch")
     def test_partial_failure_ok(self, mock_batch: MagicMock) -> None:
         mock_batch.return_value = [
             CommentPostResult(success=True, platform_id="1001"),
@@ -375,8 +375,8 @@ class TestExecutePostComments:
         assert result == "blocked"
         assert "parse" in (task.error or "").lower()
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.post_comments_batch")
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.post_pr_review_decision")
+    @patch("overdrive.runtime.orchestrator.task_executor.post_comments_batch")
+    @patch("overdrive.runtime.orchestrator.task_executor.post_pr_review_decision")
     def test_review_decision_posted(self, mock_decision: MagicMock, mock_batch: MagicMock) -> None:
         mock_batch.return_value = [CommentPostResult(success=True, platform_id="1001")]
         mock_decision.return_value = CommentPostResult(success=True, platform_id="2001")
@@ -414,7 +414,7 @@ class TestExecutePostComments:
         })
         run = _make_run()
 
-        with patch("agent_orchestrator.runtime.orchestrator.task_executor.post_pr_review_decision") as mock_decision:
+        with patch("overdrive.runtime.orchestrator.task_executor.post_pr_review_decision") as mock_decision:
             result = executor._execute_post_comments(task, run)
 
         assert result == "ok"
@@ -536,7 +536,7 @@ class TestExecutePostCommentResponses:
         executor = TaskExecutor(svc)
         return executor, svc
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.post_comments_batch")
+    @patch("overdrive.runtime.orchestrator.task_executor.post_comments_batch")
     def test_success(self, mock_batch: MagicMock) -> None:
         mock_batch.return_value = [CommentPostResult(success=True, platform_id="3001")]
         executor, svc = self._make_executor()
@@ -613,7 +613,7 @@ class TestExecutePostCommentResponses:
         assert task.metadata["posted_responses"][0]["_comment_body"] == "Done"
         assert task.metadata["posted_responses"][0]["_original_comment_id"] == "comment-0"
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.post_comments_batch")
+    @patch("overdrive.runtime.orchestrator.task_executor.post_comments_batch")
     def test_live_status_tracking(self, mock_batch: MagicMock) -> None:
         """comment_dry_run=False → posts replies, results have correct post_status."""
         mock_batch.return_value = [CommentPostResult(success=True, platform_id="3001")]
@@ -684,7 +684,7 @@ class TestExecutePostCommentResponses:
         assert run.steps[0]["staged_count"] == 1
         assert run.steps[0]["posted_count"] == 0
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.post_comments_batch")
+    @patch("overdrive.runtime.orchestrator.task_executor.post_comments_batch")
     def test_total_failure_blocks(self, mock_batch: MagicMock) -> None:
         mock_batch.return_value = [CommentPostResult(success=False, error="403")]
         executor, svc = self._make_executor()

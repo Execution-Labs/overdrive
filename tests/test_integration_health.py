@@ -5,17 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from agent_orchestrator.runtime.domain.models import RunRecord, Task, now_iso
-from agent_orchestrator.runtime.events.bus import EventBus
-from agent_orchestrator.runtime.orchestrator.integration_health import (
+from overdrive.runtime.domain.models import RunRecord, Task, now_iso
+from overdrive.runtime.events.bus import EventBus
+from overdrive.runtime.orchestrator.integration_health import (
     HealthCheckResult,
     IntegrationHealthChecker,
     _truncate,
 )
-from agent_orchestrator.runtime.orchestrator.invariants import apply_runtime_invariants
-from agent_orchestrator.runtime.orchestrator.service import OrchestratorService
-from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter
-from agent_orchestrator.runtime.storage.container import Container
+from overdrive.runtime.orchestrator.invariants import apply_runtime_invariants
+from overdrive.runtime.orchestrator.service import OrchestratorService
+from overdrive.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter
+from overdrive.runtime.storage.container import Container
 
 
 def _make_service(tmp_path: Path) -> OrchestratorService:
@@ -148,7 +148,7 @@ def test_run_check_pass(tmp_path: Path) -> None:
     cfg["orchestrator"] = orch
     svc.container.config.save(cfg)
 
-    _mod = "agent_orchestrator.runtime.orchestrator.integration_health.subprocess.run"
+    _mod = "overdrive.runtime.orchestrator.integration_health.subprocess.run"
     with patch(_mod) as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="OK", stderr="")
         with patch.object(svc._integration_health, "_resolve_test_command", return_value="pytest"):
@@ -174,7 +174,7 @@ def test_run_check_fail_creates_fix_task(tmp_path: Path) -> None:
     cfg["orchestrator"] = orch
     svc.container.config.save(cfg)
 
-    _mod = "agent_orchestrator.runtime.orchestrator.integration_health.subprocess.run"
+    _mod = "overdrive.runtime.orchestrator.integration_health.subprocess.run"
     with patch(_mod) as mock_run:
         mock_run.return_value = MagicMock(returncode=1, stdout="FAILED test_foo", stderr="")
         with patch.object(svc._integration_health, "_resolve_test_command", return_value="pytest"):
@@ -222,7 +222,7 @@ def test_no_duplicate_fix_task(tmp_path: Path) -> None:
     )
     svc.container.tasks.upsert(existing_fix)
 
-    _mod = "agent_orchestrator.runtime.orchestrator.integration_health.subprocess.run"
+    _mod = "overdrive.runtime.orchestrator.integration_health.subprocess.run"
     with patch(_mod) as mock_run:
         mock_run.return_value = MagicMock(returncode=1, stdout="FAILED", stderr="")
         with patch.object(svc._integration_health, "_resolve_test_command", return_value="pytest"):
@@ -532,7 +532,7 @@ def test_run_check_timeout(tmp_path: Path) -> None:
     cfg["orchestrator"] = orch
     svc.container.config.save(cfg)
 
-    _mod = "agent_orchestrator.runtime.orchestrator.integration_health.subprocess.run"
+    _mod = "overdrive.runtime.orchestrator.integration_health.subprocess.run"
     with patch(_mod) as mock_run:
         mock_run.side_effect = _subprocess.TimeoutExpired(cmd="pytest", timeout=30)
         with patch.object(svc._integration_health, "_resolve_test_command", return_value="pytest"):
@@ -558,7 +558,7 @@ def test_no_fix_task_when_disabled(tmp_path: Path) -> None:
     cfg["orchestrator"] = orch
     svc.container.config.save(cfg)
 
-    _mod = "agent_orchestrator.runtime.orchestrator.integration_health.subprocess.run"
+    _mod = "overdrive.runtime.orchestrator.integration_health.subprocess.run"
     with patch(_mod) as mock_run:
         mock_run.return_value = MagicMock(returncode=1, stdout="FAILED", stderr="")
         with patch.object(svc._integration_health, "_resolve_test_command", return_value="pytest"):
@@ -603,7 +603,7 @@ def test_dedup_updates_fix_task_id(tmp_path: Path) -> None:
     # Clear any prior fix_task_id reference
     svc._integration_health._fix_task_id = None
 
-    _mod = "agent_orchestrator.runtime.orchestrator.integration_health.subprocess.run"
+    _mod = "overdrive.runtime.orchestrator.integration_health.subprocess.run"
     with patch(_mod) as mock_run:
         mock_run.return_value = MagicMock(returncode=1, stdout="FAILED", stderr="")
         with patch.object(svc._integration_health, "_resolve_test_command", return_value="pytest"):

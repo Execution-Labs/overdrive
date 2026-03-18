@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from agent_orchestrator.runtime.orchestrator.venv_detector import (
+from overdrive.runtime.orchestrator.venv_detector import (
     VenvInfo,
     _is_venv,
     detect_python_venv,
 )
-from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
+from overdrive.runtime.orchestrator.live_worker_adapter import (
     _apply_venv_to_defaults,
 )
 
@@ -247,8 +247,8 @@ class TestApplyVenvToDefaults:
 
 class TestEnvResolverVenvIntegration:
     def test_venv_detected_injects_virtual_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from agent_orchestrator.runtime.orchestrator.env_resolver import resolve_env_vars
-        from agent_orchestrator.runtime.domain.models import Task
+        from overdrive.runtime.orchestrator.env_resolver import resolve_env_vars
+        from overdrive.runtime.domain.models import Task
 
         _make_venv(tmp_path / ".venv")
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)
@@ -257,8 +257,8 @@ class TestEnvResolverVenvIntegration:
         assert result["VIRTUAL_ENV"] == str((tmp_path / ".venv").resolve())
 
     def test_venv_prepends_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from agent_orchestrator.runtime.orchestrator.env_resolver import resolve_env_vars
-        from agent_orchestrator.runtime.domain.models import Task
+        from overdrive.runtime.orchestrator.env_resolver import resolve_env_vars
+        from overdrive.runtime.domain.models import Task
 
         _make_venv(tmp_path / ".venv")
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)
@@ -268,8 +268,8 @@ class TestEnvResolverVenvIntegration:
         assert result["PATH"].startswith(bin_dir + os.pathsep)
 
     def test_config_virtual_env_overrides_detected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from agent_orchestrator.runtime.orchestrator.env_resolver import resolve_env_vars
-        from agent_orchestrator.runtime.domain.models import Task
+        from overdrive.runtime.orchestrator.env_resolver import resolve_env_vars
+        from overdrive.runtime.domain.models import Task
 
         _make_venv(tmp_path / ".venv")
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)
@@ -279,8 +279,8 @@ class TestEnvResolverVenvIntegration:
         assert result["VIRTUAL_ENV"] == "/custom/path"
 
     def test_no_venv_env_unchanged(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from agent_orchestrator.runtime.orchestrator.env_resolver import resolve_env_vars
-        from agent_orchestrator.runtime.domain.models import Task
+        from overdrive.runtime.orchestrator.env_resolver import resolve_env_vars
+        from overdrive.runtime.domain.models import Task
 
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)
         monkeypatch.delenv("CONDA_PREFIX", raising=False)
@@ -291,7 +291,7 @@ class TestEnvResolverVenvIntegration:
         assert "VIRTUAL_ENV" not in result or result.get("VIRTUAL_ENV") == os.environ.get("VIRTUAL_ENV")
 
     def test_resolved_view_shows_venv_source(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from agent_orchestrator.runtime.orchestrator.env_resolver import resolved_env_vars_view
+        from overdrive.runtime.orchestrator.env_resolver import resolved_env_vars_view
 
         _make_venv(tmp_path / ".venv")
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)

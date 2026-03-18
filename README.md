@@ -1,14 +1,14 @@
-[![Backend CI](https://github.com/wcgan7/agent-orchestrator/actions/workflows/backend-ci.yml/badge.svg)](https://github.com/wcgan7/agent-orchestrator/actions/workflows/backend-ci.yml)
-[![Web CI](https://github.com/wcgan7/agent-orchestrator/actions/workflows/web-ci.yml/badge.svg)](https://github.com/wcgan7/agent-orchestrator/actions/workflows/web-ci.yml)
-[![Version](https://img.shields.io/github/v/release/wcgan7/agent-orchestrator)](https://github.com/wcgan7/agent-orchestrator/releases)
+[![Backend CI](https://github.com/wcgan7/overdrive/actions/workflows/backend-ci.yml/badge.svg)](https://github.com/wcgan7/overdrive/actions/workflows/backend-ci.yml)
+[![Web CI](https://github.com/wcgan7/overdrive/actions/workflows/web-ci.yml/badge.svg)](https://github.com/wcgan7/overdrive/actions/workflows/web-ci.yml)
+[![Version](https://img.shields.io/github/v/release/wcgan7/overdrive)](https://github.com/wcgan7/overdrive/releases)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 
-# Agent Orchestrator
+# Overdrive
 
 Deterministic orchestration for AI-assisted software delivery.
 
-Agent Orchestrator sequences planning, implementation, validation, and review into a controlled execution pipeline. It runs multi-step AI workflows with dependency awareness, quality gates, and full traceability.
+Overdrive sequences planning, implementation, validation, and review into a controlled execution pipeline. It runs multi-step AI workflows with dependency awareness, quality gates, and full traceability.
 
 Designed for developers who want controlled, repeatable AI-driven workflows — not single-pass code generation.
 
@@ -22,7 +22,7 @@ Designed for developers who want controlled, repeatable AI-driven workflows — 
 
 ## Execution Model
 
-Agent Orchestrator runs tasks through **pipeline templates** chosen by task intent (or auto-routed).
+Overdrive runs tasks through **pipeline templates** chosen by task intent (or auto-routed).
 
 ```
 Task
@@ -49,13 +49,13 @@ It includes structured planning, automated verification, severity-scored review 
 ---
 
 <!-- Regenerate screenshot: npm --prefix web run screenshot:homepage -->
-![Agent Orchestrator Dashboard](web/public/homepage-screenshot.png)
+![Overdrive Dashboard](web/public/homepage-screenshot.png)
 
 ---
 
-## When to Use Agent Orchestrator
+## When to Use Overdrive
 
-Choose Agent Orchestrator when you need:
+Choose Overdrive when you need:
 
 - Multi-step AI-driven feature delivery with review loops
 - Quality controls over automated code changes
@@ -99,7 +99,7 @@ Not designed for single-pass code generation.
 
 ```bash
 python -m pip install -e ".[server]"
-agent-orchestrator server
+overdrive server
 ```
 
 Backend runs at `http://localhost:8080` by default.
@@ -195,29 +195,29 @@ WebSocket endpoint: `/ws`
 
 ```bash
 # Start server
-agent-orchestrator server --project-dir /path/to/repo
+overdrive server --project-dir /path/to/repo
 
 # Task management
-agent-orchestrator task create "My task" --priority P1 --task-type feature
-agent-orchestrator task list --status queued
-agent-orchestrator task run <task_id>
+overdrive task create "My task" --priority P1 --task-type feature
+overdrive task list --status queued
+overdrive task run <task_id>
 
 # Orchestrator control
-agent-orchestrator orchestrator status
-agent-orchestrator orchestrator control pause
+overdrive orchestrator status
+overdrive orchestrator control pause
 
 # Project management
-agent-orchestrator project pin /path/to/repo
-agent-orchestrator project list
-agent-orchestrator project unpin <project_id>
+overdrive project pin /path/to/repo
+overdrive project list
+overdrive project unpin <project_id>
 ```
 
 ## Configuration and Runtime Data
 
 Runtime state is stored in the selected project directory:
-- `.agent_orchestrator/runtime.db` (canonical runtime state store)
-- `.agent_orchestrator/workdocs/<task_id>.md` (canonical task workdocs synced with per-worktree `.workdoc.md`)
-- `.agent_orchestrator_archive/state_<timestamp>/` (archived runtime snapshots on clear)
+- `.overdrive/runtime.db` (canonical runtime state store)
+- `.overdrive/workdocs/<task_id>.md` (canonical task workdocs synced with per-worktree `.workdoc.md`)
+- `.overdrive_archive/state_<timestamp>/` (archived runtime snapshots on clear)
 
 Execution metadata also records per-step log artifact locations (for example `stdout.log`, `stderr.log`, and `progress.json`) in task run details.
 
@@ -261,8 +261,8 @@ python3 -m venv .venv
 .venv/bin/pytest -q
 
 # Optional integration tests (skipped by default and in CI)
-AGENT_ORCHESTRATOR_RUN_INTEGRATION=1 .venv/bin/pytest tests/test_integration_worker_model_fallback.py
-AGENT_ORCHESTRATOR_RUN_INTEGRATION=1 .venv/bin/pytest tests/test_integration_claude_provider.py
+OVERDRIVE_RUN_INTEGRATION=1 .venv/bin/pytest tests/test_integration_worker_model_fallback.py
+OVERDRIVE_RUN_INTEGRATION=1 .venv/bin/pytest tests/test_integration_claude_provider.py
 
 # Frontend checks
 npm --prefix web run check
@@ -292,7 +292,7 @@ git config core.hooksPath .githooks
 
 ## Versioning
 
-Agent Orchestrator follows Semantic Versioning.
+Overdrive follows Semantic Versioning.
 
 During `v0.x`, the primary compatibility surface is the CLI and configuration schema. The REST/WebSocket API and UI are evolving and may change between minor releases.
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Agent Orchestrator is a local orchestration control center for AI-assisted software delivery. It provides a task board, execution controls, review gates, and agent management. The backend is Python/FastAPI; the frontend is React/TypeScript with Vite.
+Overdrive is a local orchestration control center for AI-assisted software delivery. It provides a task board, execution controls, review gates, and agent management. The backend is Python/FastAPI; the frontend is React/TypeScript with Vite.
 
 ## Development Commands
 
@@ -17,7 +17,7 @@ source .venv/bin/activate
 python -m pip install -e ".[server]"
 
 # Run backend server
-agent-orchestrator server --project-dir /path/to/repo
+overdrive server --project-dir /path/to/repo
 
 # Run all unit tests
 pytest
@@ -29,7 +29,7 @@ pytest tests/test_event_hub.py
 pytest tests/test_event_hub.py::test_name -x
 
 # Integration tests (skipped by default)
-AGENT_ORCHESTRATOR_RUN_INTEGRATION=1 pytest tests/test_integration_claude_provider.py
+OVERDRIVE_RUN_INTEGRATION=1 pytest tests/test_integration_claude_provider.py
 
 # Type checking
 mypy
@@ -58,7 +58,7 @@ The build script enforces API contract checks (`check:mounted-api-contracts`) be
 
 ## Architecture
 
-### Backend (`src/agent_orchestrator/`)
+### Backend (`src/overdrive/`)
 
 - **`runtime/orchestrator/service.py`** — Core `OrchestratorService`. Manages task queue, worker dispatch via `ThreadPoolExecutor`, state transitions, and review cycles. This is the central coordination point.
 - **`runtime/orchestrator/task_executor.py`** — Task execution logic: runs pipeline steps, persists run/task state, handles retries.
@@ -91,7 +91,7 @@ The build script enforces API contract checks (`check:mounted-api-contracts`) be
 - **`pipelines/`** — Pipeline template registry for task execution workflows.
 - **`collaboration/`** — HITL (Human-In-The-Loop) mode configs: autopilot, supervised, collaborative, review_only.
 - **`prompts/`** — Prompt templates for worker steps and output formatters.
-- **`cli.py`** — CLI entry point (`agent-orchestrator` command).
+- **`cli.py`** — CLI entry point (`overdrive` command).
 
 ### Frontend (`web/src/`)
 
@@ -109,7 +109,7 @@ The build script enforces API contract checks (`check:mounted-api-contracts`) be
 
 ### Data Storage
 
-All runtime state lives in `.agent_orchestrator/` within the target project directory, stored in a SQLite database (`runtime.db`). No external database required.
+All runtime state lives in `.overdrive/` within the target project directory, stored in a SQLite database (`runtime.db`). No external database required.
 
 ### Task Lifecycle
 

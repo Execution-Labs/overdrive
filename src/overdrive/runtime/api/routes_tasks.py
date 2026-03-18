@@ -450,7 +450,7 @@ def _is_runtime_state_path(path_text: str) -> bool:
     normalized = str(path_text or "").replace("\\", "/").strip()
     if normalized.startswith("./"):
         normalized = normalized[2:]
-    return normalized == ".agent_orchestrator" or normalized.startswith(".agent_orchestrator/")
+    return normalized == ".overdrive" or normalized.startswith(".overdrive/")
 
 
 def _short_sha(value: str | None) -> str:

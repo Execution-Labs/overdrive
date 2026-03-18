@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_orchestrator.workers.config import WorkerProviderSpec
-from agent_orchestrator.workers.run import run_worker
+from overdrive.workers.config import WorkerProviderSpec
+from overdrive.workers.run import run_worker
 
 RUN_INTEGRATION = os.getenv("AGENT_ORCHESTRATOR_RUN_INTEGRATION", "0") == "1"
 

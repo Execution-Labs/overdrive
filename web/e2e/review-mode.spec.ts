@@ -51,7 +51,7 @@ async function pauseOrchestrator(request: APIRequestContext): Promise<void> {
 test.beforeEach(async ({ page, request }) => {
   await pauseOrchestrator(request)
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: 'Agent Orchestrator' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Overdrive' })).toBeVisible()
 })
 
 test('creates fix_only review task and displays mode badge', async ({ page, request }) => {

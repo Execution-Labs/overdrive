@@ -2916,7 +2916,7 @@ class OrchestratorService:
     )
     _SCOPE_WRITE_STEPS = {"implement", "implement_fix", "prototype"}
     _SCOPE_IGNORE_PATH_SEGMENTS = {
-        ".agent_orchestrator",
+        ".overdrive",
         ".mypy_cache",
         ".pytest_cache",
         ".ruff_cache",

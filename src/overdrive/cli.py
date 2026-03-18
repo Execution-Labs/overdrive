@@ -120,7 +120,7 @@ def _server(args: argparse.Namespace) -> int:
     try:
         import uvicorn
     except ImportError:
-        sys.stderr.write("Install server extras: pip install 'agent-orchestrator[server]'\n")
+        sys.stderr.write("Install server extras: pip install 'overdrive[server]'\n")
         return 1
 
     app = create_app(project_dir=_resolve_project_dir(args.project_dir))
@@ -135,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
         argparse.ArgumentParser: Configured parser with server, project, task,
             and orchestrator command groups.
     """
-    parser = argparse.ArgumentParser(description='Agent Orchestrator CLI (UI-first minimal)')
+    parser = argparse.ArgumentParser(description='Overdrive CLI')
     parser.add_argument('--project-dir', default=None, help='Target project directory (default: current working directory)')
     subparsers = parser.add_subparsers(dest='command', required=True)
 

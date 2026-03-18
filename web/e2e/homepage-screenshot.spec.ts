@@ -43,7 +43,7 @@ async function createTask(
 }
 
 function forceSetPendingGate(projectDir: string, taskId: string, gate: string): void {
-  const dbPath = path.join(projectDir, '.agent_orchestrator', 'runtime.db')
+  const dbPath = path.join(projectDir, '.overdrive', 'runtime.db')
   const script = `
 import datetime
 import json
@@ -147,7 +147,7 @@ test('captures homepage screenshot with task detail over board context', async (
   })
 
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: 'Agent Orchestrator' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Overdrive' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Board' })).toBeVisible()
   const compactToggle = page.locator('.board-compact-toggle input')
   if (await compactToggle.isChecked()) {

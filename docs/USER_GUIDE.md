@@ -2,7 +2,7 @@
 
 ## Overview
 
-Agent Orchestrator is a local AI delivery control center with task lifecycle
+Overdrive is a local AI delivery control center with task lifecycle
 management, execution orchestration, review gates, and worker routing. It runs
 entirely on your machine — no external services required beyond the AI worker
 providers you configure.
@@ -28,7 +28,7 @@ Start backend:
 
 ```bash
 python -m pip install -e ".[server]"
-agent-orchestrator server --project-dir /absolute/path/to/your/repo
+overdrive server --project-dir /absolute/path/to/your/repo
 ```
 
 Start frontend:
@@ -146,8 +146,8 @@ A summary section appears at the bottom when the dispatch queue is blocked or po
 
 #### Clear All Tasks
 
-**Clear All Tasks** archives the existing `.agent_orchestrator/` directory to
-`.agent_orchestrator_archive/state_<timestamp>/`, then initializes fresh
+**Clear All Tasks** archives the existing `.overdrive/` directory to
+`.overdrive_archive/state_<timestamp>/`, then initializes fresh
 empty state. The UI shows the archive destination path after a successful clear.
 
 ---
@@ -764,11 +764,11 @@ Settings → Providers, or via `GET /api/workers/health`.
 ## Runtime Storage
 
 State root in each project directory:
-- `.agent_orchestrator/runtime.db` — canonical runtime state store (SQLite).
-- `.agent_orchestrator/workdocs/<task_id>.md` — canonical task working documents.
-- `.agent_orchestrator_archive/state_<timestamp>/` — archived snapshots from clear/reset operations.
+- `.overdrive/runtime.db` — canonical runtime state store (SQLite).
+- `.overdrive/workdocs/<task_id>.md` — canonical task working documents.
+- `.overdrive_archive/state_<timestamp>/` — archived snapshots from clear/reset operations.
 
-Legacy migration: incompatible old state is archived to `.agent_orchestrator_legacy_<timestamp>/`.
+Legacy migration: incompatible old state is archived to `.overdrive_legacy_<timestamp>/`.
 
 ---
 

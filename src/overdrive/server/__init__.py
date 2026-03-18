@@ -1,4 +1,4 @@
-"""Web server for Agent Orchestrator dashboard."""
+"""Web server for Overdrive dashboard."""
 
 from .api import app, create_app
 

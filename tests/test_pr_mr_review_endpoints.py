@@ -11,9 +11,9 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_orchestrator.runtime.domain.models import Task
-from agent_orchestrator.runtime.storage.container import Container
-from agent_orchestrator.server.api import create_app
+from overdrive.runtime.domain.models import Task
+from overdrive.runtime.storage.container import Container
+from overdrive.server.api import create_app
 
 
 def _git_init(path: Path) -> None:
@@ -49,13 +49,13 @@ class TestDiffTruncation:
 
     def test_short_diff_unchanged(self):
         """Diffs under the limit are returned as-is."""
-        from agent_orchestrator.runtime.api.routes_tasks import _truncate_diff
+        from overdrive.runtime.api.routes_tasks import _truncate_diff
         diff = "a\nb\nc\n"
         assert _truncate_diff(diff) == diff
 
     def test_large_diff_truncated_at_line_boundary(self):
         """Diffs over 100K chars are truncated at the last newline before the limit."""
-        from agent_orchestrator.runtime.api.routes_tasks import _truncate_diff
+        from overdrive.runtime.api.routes_tasks import _truncate_diff
         line = "x" * 99 + "\n"  # 100 chars per line
         diff = line * 1200  # 120K chars total
         result = _truncate_diff(diff)
@@ -80,7 +80,7 @@ class TestReviewPR:
     def test_missing_gh_cli_returns_400(self, tmp_path: Path):
         client, container = _client_and_container(tmp_path)
         task = _create_task(container, title="T", task_type="feature", status="queued")
-        with patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value=None):
+        with patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value=None):
             resp = client.post(f"/api/tasks/{task.id}/review-pr?pr_number=1")
         assert resp.status_code == 400
         assert "gh" in resp.json()["detail"].lower()
@@ -112,8 +112,8 @@ class TestReviewPR:
             return r
 
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=mock_run),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=mock_run),
         ):
             resp = client.post(f"/api/tasks/{task.id}/review-pr?pr_number=42")
 
@@ -146,7 +146,7 @@ class TestReviewPR:
                 "source_pr_number": 42,
             },
         )
-        with patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"):
+        with patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/gh"):
             resp = client.post(f"/api/tasks/{task.id}/review-pr?pr_number=42")
         assert resp.status_code == 409
 
@@ -167,7 +167,7 @@ class TestReviewMR:
     def test_missing_glab_cli_returns_400(self, tmp_path: Path):
         client, container = _client_and_container(tmp_path)
         task = _create_task(container, title="T", task_type="feature", status="queued")
-        with patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value=None):
+        with patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value=None):
             resp = client.post(f"/api/tasks/{task.id}/review-mr?mr_number=1")
         assert resp.status_code == 400
         assert "glab" in resp.json()["detail"].lower()
@@ -199,8 +199,8 @@ class TestReviewMR:
             return r
 
         with (
-            patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/glab"),
-            patch("agent_orchestrator.runtime.api.routes_tasks.subprocess.run", side_effect=mock_run),
+            patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/glab"),
+            patch("overdrive.runtime.api.routes_tasks.subprocess.run", side_effect=mock_run),
         ):
             resp = client.post(f"/api/tasks/{task.id}/review-mr?mr_number=15")
 
@@ -229,6 +229,6 @@ class TestReviewMR:
                 "source_mr_number": 15,
             },
         )
-        with patch("agent_orchestrator.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/glab"):
+        with patch("overdrive.runtime.api.routes_tasks.shutil.which", return_value="/usr/bin/glab"):
             resp = client.post(f"/api/tasks/{task.id}/review-mr?mr_number=15")
         assert resp.status_code == 409

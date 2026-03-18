@@ -4,10 +4,10 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from agent_orchestrator.runtime.domain.models import Task
-from agent_orchestrator.runtime.events import EventBus
-from agent_orchestrator.runtime.orchestrator import OrchestratorService
-from agent_orchestrator.runtime.storage.container import Container
+from overdrive.runtime.domain.models import Task
+from overdrive.runtime.events import EventBus
+from overdrive.runtime.orchestrator import OrchestratorService
+from overdrive.runtime.storage.container import Container
 
 
 def _service(tmp_path: Path) -> tuple[Container, OrchestratorService, EventBus]:
@@ -67,7 +67,7 @@ def test_feature_writes_sections_to_workdoc(tmp_path: Path) -> None:
     """feature run should populate core implementation-cycle sections."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     plan_text = "plan: implement scoped login feature"
     implement_text = "implement: added login endpoint and handler"
@@ -151,7 +151,7 @@ def test_bug_fix_writes_sections_to_workdoc(tmp_path: Path) -> None:
     """bug_fix run should populate diagnose/fix/verify/review/fix-log."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     diagnose_text = "diagnose: None dereference in auth adapter"
     implement_text = "implement: added guard and fallback profile path"
@@ -216,7 +216,7 @@ def test_refactor_writes_sections_to_workdoc(tmp_path: Path) -> None:
     """refactor run should populate analysis/plan/implement/verify/review/fix-log."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     analyze_text = "analyze: identified module boundary issues"
     plan_text = "plan: phased internal API cleanup"
@@ -309,7 +309,7 @@ def test_research_writes_sections_to_workdoc(tmp_path: Path) -> None:
     """research run should populate Research Analysis section in workdoc."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     analyze_text = "analyze: compared options and constraints"
 
@@ -373,7 +373,7 @@ def test_security_audit_writes_sections_to_workdoc(tmp_path: Path) -> None:
     """security_audit run should populate scan and generate tasks sections."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     deps_text = "scan_deps: found 2 vulnerable packages"
     code_text = "scan_code: found 1 high severity sink"
@@ -447,7 +447,7 @@ def test_repo_review_writes_sections_to_workdoc(tmp_path: Path) -> None:
     """repo_review run should populate repository-analysis planning sections."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     analyze_text = "analyze: identified architecture and hygiene gaps"
     plan_text = "initiative plan: phased modernization strategy"
@@ -525,7 +525,7 @@ def test_review_writes_sections_to_workdoc(tmp_path: Path) -> None:
     """review run should populate Review Analysis and Review Findings."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     analyze_text = "analyze: baseline and scope verified"
 
@@ -597,7 +597,7 @@ def test_performance_writes_sections_to_workdoc(tmp_path: Path) -> None:
     """performance run should populate perf-specific lifecycle sections."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     called_steps: list[str] = []
     profile_text = "profile: baseline p95=240ms cpu=82%"
@@ -669,7 +669,7 @@ def test_test_pipeline_writes_sections_to_workdoc(tmp_path: Path) -> None:
     """test run should populate coverage/test-impl/verify/review/fix-log sections."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     analyze_text = "analyze: identified missing auth integration scenarios"
     implement_text = "implement: added integration and negative-path tests"
@@ -743,7 +743,7 @@ def test_docs_pipeline_writes_sections_to_workdoc(tmp_path: Path) -> None:
     """docs run should populate docs-analysis/update/verify/review/fix-log sections."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     analyze_text = "analyze: found stale setup and API examples"
     implement_text = "implement: refreshed onboarding and API usage docs"
@@ -871,7 +871,7 @@ def test_review_findings_passed_to_implement_fix(tmp_path: Path) -> None:
     task.metadata['review_findings'] before implement_fix runs."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter
+    from overdrive.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter
 
     captured_metadata: list[dict] = []
     real_adapter = DefaultWorkerAdapter()
@@ -1019,7 +1019,7 @@ def test_hotfix_writes_sections_to_workdoc(tmp_path: Path) -> None:
     """hotfix run should populate hotfix-impl/verify/review/fix-log sections."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     implement_text = "implement: patched auth timeout regression"
     verify_text = "verify: smoke tests and focused checks passed"
@@ -1096,7 +1096,7 @@ def test_spike_writes_sections_to_workdoc(tmp_path: Path) -> None:
     """spike run should populate analysis/prototype sections."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     analyze_text = "analyze: compared caching candidates and constraints"
     prototype_text = "prototype: implemented throwaway Redis adapter"
@@ -1162,7 +1162,7 @@ def test_chore_writes_sections_to_workdoc(tmp_path: Path) -> None:
     """chore run should populate chore implementation and verification sections."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     implement_text = "implement: applied formatter and removed dead comments"
     verify_text = "verify: lint and test checks passed"
@@ -1233,7 +1233,7 @@ def test_plan_only_writes_sections_to_workdoc(tmp_path: Path) -> None:
     """plan_only run should populate all sections of its minimal workdoc."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     analyze_text = "analyze: scope and constraints clarified"
     plan_text = "initiative plan: phased rollout with dependencies"
@@ -1346,7 +1346,7 @@ def test_verify_only_writes_verify_and_report_to_workdoc(tmp_path: Path) -> None
     """verify_only run should populate Verification Results."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     verify_text = "verify: all selected checks passed"
 
@@ -1388,7 +1388,7 @@ def test_plan_output_stored_in_revisions(tmp_path: Path) -> None:
     """Plan/analyze steps store their output in plan revisions."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
 
     real_adapter = DefaultWorkerAdapter()
 
@@ -1425,7 +1425,7 @@ def test_diagnose_and_analyze_steps_create_plan_revisions(tmp_path: Path) -> Non
     """bug_fix (diagnose) and docs/test (analyze) steps create plan revisions."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
 
     real_adapter = DefaultWorkerAdapter()
 
@@ -1484,7 +1484,7 @@ def test_refactor_creates_revisions_for_analyze_and_plan(tmp_path: Path) -> None
     """Refactor pipeline creates two plan revisions: analyze + plan."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
 
     real_adapter = DefaultWorkerAdapter()
 
@@ -1524,7 +1524,7 @@ def test_generate_tasks_from_plan(tmp_path: Path) -> None:
     """generate_tasks_from_plan() creates child tasks from plan text."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     def mock_run_step(*, task, step, attempt):
         if step == "generate_tasks":
@@ -1573,7 +1573,7 @@ def test_generate_tasks_from_plan_with_deps(tmp_path: Path) -> None:
     """depends_on task IDs are wired as blocked_by/blocks between children."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     def mock_run_step(*, task, step, attempt):
         if step == "generate_tasks":
@@ -1622,7 +1622,7 @@ def test_generate_tasks_from_plan_normalizes_generated_task_types(tmp_path: Path
     """Generated task types are constrained to feature/bug/chore."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     def mock_run_step(*, task, step, attempt):
         if step == "generate_tasks":
@@ -1657,8 +1657,8 @@ def test_pipeline_generate_tasks_consumes_pending_policy_override(tmp_path: Path
     """Runtime generate_tasks step should consume one-shot policy override."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.domain.models import RunRecord, now_iso
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.domain.models import RunRecord, now_iso
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     def mock_run_step(*, task, step, attempt):
         if step == "generate_tasks":
@@ -1734,7 +1734,7 @@ def test_generate_tasks_from_plan_empty_worker_output_fails(tmp_path: Path) -> N
     """Explicit plan decomposition should fail if worker returns no tasks."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     def mock_run_step(*, task, step, attempt):
         if step == "generate_tasks":
@@ -1765,7 +1765,7 @@ def test_step_outputs_populated_after_successful_step(tmp_path: Path) -> None:
     """After a successful non-review step, step_outputs should contain the summary."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     summaries: dict[str, str] = {}
 
@@ -1805,7 +1805,7 @@ def test_step_outputs_cleaned_up_on_completion(tmp_path: Path) -> None:
     """step_outputs metadata is removed when pipeline reaches done status."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     def mock_run_step(*, task, step, attempt):
         return StepResult(status="ok", summary=f"Result of {step}")
@@ -1836,7 +1836,7 @@ def test_step_outputs_preserved_on_blocked(tmp_path: Path) -> None:
     """step_outputs should NOT be cleaned up when task is blocked (may be retried)."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     call_count = {"n": 0}
 
@@ -1876,7 +1876,7 @@ def test_feature_non_actionable_verify_failure_skips_fix_loop_and_completes(tmp_
     """Missing tooling/config verify failures should not trigger implement_fix loops."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     seen_fix = {"called": 0}
 
@@ -1926,7 +1926,7 @@ def test_review_loop_non_actionable_verify_failure_skips_extra_fix_loop(tmp_path
     """When verify fails non-actionably after implement_fix, do not spin extra verify-fix loop."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     calls = {"implement_fix": 0}
 
@@ -1975,7 +1975,7 @@ def test_feature_review_loop_post_fix_validation_uses_verify(tmp_path: Path) -> 
     """Feature review-loop post-fix validation should run verify after implement_fix."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     called_steps: list[str] = []
 
@@ -2020,7 +2020,7 @@ def test_restricted_scope_blocks_out_of_scope_implement_changes(tmp_path: Path) 
     """Restricted scope must block when implementation edits an out-of-scope file."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     _git_init(tmp_path)
 
@@ -2061,7 +2061,7 @@ def test_restricted_scope_baseline_failure_skips_fix_loop(tmp_path: Path) -> Non
     """Restricted-scope unchanged baseline verify failure should skip implement_fix loop."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     _git_init(tmp_path)
     calls = {"implement_fix": 0}
@@ -2122,7 +2122,7 @@ def test_restricted_scope_regression_still_runs_fix_loop(tmp_path: Path) -> None
     """Restricted scope should still treat in-scope verify failures as regressions."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     _git_init(tmp_path)
     calls = {"implement_fix": 0}
@@ -2169,7 +2169,7 @@ def test_restricted_scope_review_findings_outside_scope_are_deferred(tmp_path: P
     """Out-of-scope review findings should be deferred and not trigger implement_fix."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     _git_init(tmp_path)
     calls = {"implement_fix": 0}
@@ -2222,7 +2222,7 @@ def test_restricted_scope_verify_reason_code_refreshes_between_verify_runs(tmp_p
     """A stale baseline reason must not suppress later actionable verify failures."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     _git_init(tmp_path)
     state = {"verify_calls": 0, "implement_fix_calls": 0, "review_calls": 0}
@@ -2282,7 +2282,7 @@ def test_restricted_scope_ambiguous_verify_failure_not_downgraded(tmp_path: Path
     """Ambiguous verify failures should remain actionable, not baseline debt."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     _git_init(tmp_path)
     calls = {"implement_fix": 0}
@@ -2329,7 +2329,7 @@ def test_restricted_scope_test_baseline_filename_not_downgraded(tmp_path: Path) 
     """Test names containing baseline should remain actionable failures."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     _git_init(tmp_path)
     calls = {"implement_fix": 0}
@@ -2376,7 +2376,7 @@ def test_scope_ignore_cache_paths_do_not_trigger_violation(tmp_path: Path) -> No
     """Nested transient cache paths should be ignored by scope violation detection."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+    from overdrive.runtime.orchestrator.worker_adapter import StepResult
 
     _git_init(tmp_path)
 

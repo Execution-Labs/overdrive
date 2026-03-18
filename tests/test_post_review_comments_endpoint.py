@@ -9,10 +9,10 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from agent_orchestrator.comments.models import CommentPostResult
-from agent_orchestrator.runtime.domain.models import Task
-from agent_orchestrator.runtime.storage.container import Container
-from agent_orchestrator.server.api import create_app
+from overdrive.comments.models import CommentPostResult
+from overdrive.runtime.domain.models import Task
+from overdrive.runtime.storage.container import Container
+from overdrive.server.api import create_app
 
 
 def _git_init(path: Path) -> None:
@@ -120,7 +120,7 @@ class TestPostReviewComments:
         ]
 
         with patch(
-            "agent_orchestrator.comments.writer.post_comments_batch",
+            "overdrive.comments.writer.post_comments_batch",
             return_value=mock_results,
         ):
             resp = client.post(f"/api/tasks/{task.id}/post-review-comments")
@@ -141,6 +141,6 @@ class TestPostReviewComments:
 
     def test_metadata_contains_generated_review_comments_after_executor(self, tmp_path: Path) -> None:
         """Verify generated_review_comments is not in internal metadata keys."""
-        from agent_orchestrator.runtime.api.routes_tasks import _INTERNAL_TASK_METADATA_KEYS
+        from overdrive.runtime.api.routes_tasks import _INTERNAL_TASK_METADATA_KEYS
 
         assert "generated_review_comments" not in _INTERNAL_TASK_METADATA_KEYS

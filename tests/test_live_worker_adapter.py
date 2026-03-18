@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_orchestrator.runtime.domain.models import RunRecord, Task
-from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
+from overdrive.runtime.domain.models import RunRecord, Task
+from overdrive.runtime.orchestrator.live_worker_adapter import (
     LiveWorkerAdapter,
     _EARLY_COMPLETE_STEPS,
     _SETTINGS_PROMPT_STEPS,
@@ -25,14 +25,14 @@ from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
     build_step_prompt,
     detect_project_languages,
 )
-from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
-from agent_orchestrator.runtime.orchestrator.environment_preflight import (
+from overdrive.runtime.orchestrator.worker_adapter import StepResult
+from overdrive.runtime.orchestrator.environment_preflight import (
     EnvironmentIssue,
     EnvironmentPreflightResult,
 )
-from agent_orchestrator.runtime.storage.container import Container
-from agent_orchestrator.workers.config import WorkerProviderSpec
-from agent_orchestrator.workers.run import WorkerRunResult
+from overdrive.runtime.storage.container import Container
+from overdrive.workers.config import WorkerProviderSpec
+from overdrive.workers.run import WorkerRunResult
 
 
 @pytest.fixture()
@@ -92,7 +92,7 @@ def test_error_when_no_worker_available(adapter: LiveWorkerAdapter) -> None:
     task = _make_task()
 
     with patch(
-        "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+        "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
         return_value=(False, "Executable not found in PATH: codex"),
     ):
         result = adapter.run_step(task=task, step="implement", attempt=1)
@@ -106,7 +106,7 @@ def test_error_when_worker_cannot_be_resolved(adapter: LiveWorkerAdapter) -> Non
     task = _make_task()
 
     with patch(
-        "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
+        "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
         side_effect=ValueError("No workers section in config"),
     ):
         result = adapter.run_step(task=task, step="implement", attempt=1)
@@ -125,22 +125,22 @@ def test_codex_success_maps_to_ok(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
             return_value=EnvironmentPreflightResult(ok=True, issues=()),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -161,19 +161,19 @@ def test_codex_model_prefers_task_override(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
             return_value=runtime,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ) as run_worker_mock,
     ):
@@ -194,19 +194,19 @@ def test_codex_model_falls_back_to_runtime_default(adapter: LiveWorkerAdapter) -
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
             return_value=runtime,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ) as run_worker_mock,
     ):
@@ -226,22 +226,22 @@ def test_claude_uses_shared_prompt_construction(adapter: LiveWorkerAdapter) -> N
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CLAUDE_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.build_step_prompt",
+            "overdrive.runtime.orchestrator.live_worker_adapter.build_step_prompt",
             return_value="prompt",
         ) as build_prompt_mock,
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -268,22 +268,22 @@ def test_environment_preflight_failure_short_circuits_before_worker_run(adapter:
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
             return_value=failed_preflight,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
         ) as run_worker_mock,
     ):
         result = adapter.run_step(task=task, step="implement", attempt=1)
@@ -312,27 +312,27 @@ def test_capability_fallback_selects_provider_with_required_capabilities(
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
             return_value=runtime,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.required_capabilities_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.required_capabilities_for_step",
             return_value=("docker",),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
             return_value=EnvironmentPreflightResult(ok=True, issues=(), required_capabilities=("docker",)),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ) as run_worker_mock,
     ):
@@ -353,18 +353,18 @@ def test_timeout_override_from_task_metadata(adapter: LiveWorkerAdapter) -> None
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ) as run_worker_mock,
     ):
@@ -386,18 +386,18 @@ def test_timeout_defaults_to_no_timeout(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ) as run_worker_mock,
     ):
@@ -419,18 +419,18 @@ def test_timeout_defaults_from_orchestrator_settings_when_step_has_no_template(
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ) as run_worker_mock,
     ):
@@ -456,18 +456,18 @@ def test_global_timeout_applies_to_template_steps_and_aliases(
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ) as run_worker_mock,
     ):
@@ -483,18 +483,18 @@ def test_heartbeat_defaults_are_forwarded(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ) as run_worker_mock,
     ):
@@ -514,18 +514,18 @@ def test_heartbeat_settings_from_workers_config(container: Container, adapter: L
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ) as run_worker_mock,
     ):
@@ -547,22 +547,22 @@ def test_codex_failure_maps_to_error(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
             return_value=EnvironmentPreflightResult(ok=True, issues=()),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -582,22 +582,22 @@ def test_codex_timeout_maps_to_error(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
             return_value=EnvironmentPreflightResult(ok=True, issues=()),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -617,18 +617,18 @@ def test_codex_no_heartbeat_maps_to_stalled_error(adapter: LiveWorkerAdapter) ->
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -651,18 +651,18 @@ def test_human_blocking_issues_map_to_human_blocked(adapter: LiveWorkerAdapter) 
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -685,18 +685,18 @@ def test_ollama_review_parses_findings(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_OLLAMA_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -721,18 +721,18 @@ def test_ollama_review_normalizes_findings(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_OLLAMA_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -759,18 +759,18 @@ def test_ollama_generate_tasks_parses_tasks(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_OLLAMA_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -794,18 +794,18 @@ def test_ollama_implement_extracts_summary(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_OLLAMA_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -1114,18 +1114,18 @@ def test_worker_exception_returns_error(adapter: LiveWorkerAdapter) -> None:
     """When run_worker raises, return error — don't silently succeed."""
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             side_effect=RuntimeError("Codex crashed"),
         ),
     ):
@@ -1146,18 +1146,18 @@ def test_ollama_verify_pass(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_OLLAMA_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -1173,18 +1173,18 @@ def test_ollama_verify_fail(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_OLLAMA_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -1203,18 +1203,18 @@ def test_verify_formatter_includes_reason_code_on_fail(adapter: LiveWorkerAdapte
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             side_effect=[raw_result, fmt_result],
         ),
     ):
@@ -1236,18 +1236,18 @@ def test_verify_formatter_environment_sets_note_with_reason(adapter: LiveWorkerA
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             side_effect=[raw_result, fmt_result],
         ),
     ):
@@ -1277,18 +1277,18 @@ def test_verify_environment_note_normalizes_missing_frontend_toolchain(
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             side_effect=[raw_result, fmt_result],
         ),
     ):
@@ -1317,18 +1317,18 @@ def test_verify_json_environment_path_does_not_raise_and_sets_env_kind(
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -1367,22 +1367,22 @@ def test_verify_environment_note_normalizes_prisma_missing_database_url(
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
             return_value=EnvironmentPreflightResult(ok=True, issues=()),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -1429,22 +1429,22 @@ def test_verify_environment_note_normalizes_prisma_missing_local_cli(
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
             return_value=EnvironmentPreflightResult(ok=True, issues=()),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -1464,18 +1464,18 @@ def test_task_generation_parses_top_level_array(adapter: LiveWorkerAdapter) -> N
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -1505,7 +1505,7 @@ def test_prompt_includes_guardrails(step: str) -> None:
     task = _make_task()
     prompt = build_step_prompt(task=task, step=step, attempt=1)
     assert "Do NOT commit" in prompt
-    assert ".agent_orchestrator/" in prompt
+    assert ".overdrive/" in prompt
     assert "suppress" in prompt.lower()
 
 
@@ -1961,22 +1961,22 @@ def test_run_step_reads_project_commands_from_config(container: Container, adapt
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
             return_value=EnvironmentPreflightResult(ok=True, issues=()),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             side_effect=_capture_run_worker,
         ),
     ):
@@ -2009,22 +2009,22 @@ def test_run_step_verify_with_prisma_schema_injects_prisma_command_hints(
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
             return_value=EnvironmentPreflightResult(ok=True, issues=()),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             side_effect=_capture_run_worker,
         ),
     ):
@@ -2049,22 +2049,22 @@ def test_run_step_verify_includes_required_workspace_gates(
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter._detect_required_verify_commands",
+            "overdrive.runtime.orchestrator.live_worker_adapter._detect_required_verify_commands",
             return_value=["npm --prefix frontend run build"],
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             side_effect=_capture_run_worker,
         ),
     ):
@@ -2090,18 +2090,18 @@ def test_run_step_reads_prompt_overrides_from_config(container: Container, adapt
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             side_effect=_capture_run_worker,
         ),
     ):
@@ -2126,18 +2126,18 @@ def test_run_step_reads_prompt_injections_from_config(container: Container, adap
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             side_effect=_capture_run_worker,
         ),
     ):
@@ -2572,18 +2572,18 @@ def test_pipeline_classify_maps_json_summary(adapter: LiveWorkerAdapter) -> None
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, ""),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -2614,18 +2614,18 @@ def test_generate_run_summary_prompt_prefers_workdoc_snapshot(
 
     with (
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            "overdrive.runtime.orchestrator.live_worker_adapter.run_worker",
             side_effect=_capture_run_worker,
         ),
     ):
@@ -2882,11 +2882,11 @@ class TestCommentAwareMapResult:
         json_output = '{"comments": [{"path": "x.py", "line": 10, "body": "Fix this", "severity": "high"}], "summary": "One issue"}'
         result = _make_run_result(response_text=json_output)
 
-        with patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step", return_value=_CODEX_SPEC), \
-             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config") as mock_cfg, \
-             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker", return_value=(True, "")), \
-             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker", return_value=result), \
-             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight") as mock_pf:
+        with patch("overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step", return_value=_CODEX_SPEC), \
+             patch("overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config") as mock_cfg, \
+             patch("overdrive.runtime.orchestrator.live_worker_adapter.test_worker", return_value=(True, "")), \
+             patch("overdrive.runtime.orchestrator.live_worker_adapter.run_worker", return_value=result), \
+             patch("overdrive.runtime.orchestrator.live_worker_adapter.run_environment_preflight") as mock_pf:
             mock_cfg.return_value = SimpleNamespace(providers={"codex": _CODEX_SPEC}, default_model="")
             mock_pf.return_value = EnvironmentPreflightResult(ok=True, issues=[], required_capabilities=set(), attempted_remediation=False, remediation_log="")
             task = _make_task(task_type="pr_review_comment")
@@ -2913,11 +2913,11 @@ class TestCommentAwareMapResult:
                 return primary_result
             return formatter_result
 
-        with patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step", return_value=_CODEX_SPEC), \
-             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config") as mock_cfg, \
-             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker", return_value=(True, "")), \
-             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker", side_effect=mock_run_worker), \
-             patch("agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight") as mock_pf:
+        with patch("overdrive.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step", return_value=_CODEX_SPEC), \
+             patch("overdrive.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config") as mock_cfg, \
+             patch("overdrive.runtime.orchestrator.live_worker_adapter.test_worker", return_value=(True, "")), \
+             patch("overdrive.runtime.orchestrator.live_worker_adapter.run_worker", side_effect=mock_run_worker), \
+             patch("overdrive.runtime.orchestrator.live_worker_adapter.run_environment_preflight") as mock_pf:
             mock_cfg.return_value = SimpleNamespace(providers={"codex": _CODEX_SPEC}, default_model="")
             mock_pf.return_value = EnvironmentPreflightResult(ok=True, issues=[], required_capabilities=set(), attempted_remediation=False, remediation_log="")
             task = _make_task(task_type="pr_review_comment")

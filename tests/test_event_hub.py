@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 
-from agent_orchestrator.runtime.events.ws import WebSocketHub
+from overdrive.runtime.events.ws import WebSocketHub
 
 
 def test_publish_sync_from_background_thread_uses_attached_loop() -> None:

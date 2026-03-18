@@ -3,7 +3,7 @@
 Executable:
 
 ```bash
-agent-orchestrator
+overdrive
 ```
 
 The CLI is a local operational interface for server startup, project pinning,
@@ -25,7 +25,7 @@ task creation/list/run, and orchestrator control.
 Start the FastAPI server:
 
 ```bash
-agent-orchestrator [--project-dir PATH] server [--host 127.0.0.1] [--port 8080] [--reload]
+overdrive [--project-dir PATH] server [--host 127.0.0.1] [--port 8080] [--reload]
 ```
 
 Options:
@@ -45,7 +45,7 @@ python -m pip install -e ".[server]"
 Pin a repository path for quick selection in API/UI.
 
 ```bash
-agent-orchestrator [--project-dir PATH] project pin /absolute/path/to/repo [--project-id ID] [--allow-non-git]
+overdrive [--project-dir PATH] project pin /absolute/path/to/repo [--project-id ID] [--allow-non-git]
 ```
 
 Notes:
@@ -57,14 +57,14 @@ Notes:
 List pinned projects from config.
 
 ```bash
-agent-orchestrator [--project-dir PATH] project list
+overdrive [--project-dir PATH] project list
 ```
 
 ### `project unpin`
 Remove a pinned project by id.
 
 ```bash
-agent-orchestrator [--project-dir PATH] project unpin <project_id>
+overdrive [--project-dir PATH] project unpin <project_id>
 ```
 
 ## Task Commands
@@ -73,7 +73,7 @@ agent-orchestrator [--project-dir PATH] project unpin <project_id>
 Create a task in `backlog` status.
 
 ```bash
-agent-orchestrator [--project-dir PATH] task create "Title" [--description TEXT] [--priority P0|P1|P2|P3] [--task-type TYPE]
+overdrive [--project-dir PATH] task create "Title" [--description TEXT] [--priority P0|P1|P2|P3] [--task-type TYPE]
 ```
 
 Defaults:
@@ -85,7 +85,7 @@ Defaults:
 List tasks, optionally filtered by status.
 
 ```bash
-agent-orchestrator [--project-dir PATH] task list [--status STATUS]
+overdrive [--project-dir PATH] task list [--status STATUS]
 ```
 
 Common statuses:
@@ -95,7 +95,7 @@ Common statuses:
 Run a task by id via orchestrator.
 
 ```bash
-agent-orchestrator [--project-dir PATH] task run <task_id>
+overdrive [--project-dir PATH] task run <task_id>
 ```
 
 ## Orchestrator Commands
@@ -104,19 +104,19 @@ agent-orchestrator [--project-dir PATH] task run <task_id>
 Show orchestrator runtime status.
 
 ```bash
-agent-orchestrator [--project-dir PATH] orchestrator status
+overdrive [--project-dir PATH] orchestrator status
 ```
 
 ### `orchestrator control`
 Change orchestrator control state.
 
 ```bash
-agent-orchestrator [--project-dir PATH] orchestrator control pause
-agent-orchestrator [--project-dir PATH] orchestrator control resume
-agent-orchestrator [--project-dir PATH] orchestrator control drain
-agent-orchestrator [--project-dir PATH] orchestrator control stop
-agent-orchestrator [--project-dir PATH] orchestrator control reset
-agent-orchestrator [--project-dir PATH] orchestrator control reconcile
+overdrive [--project-dir PATH] orchestrator control pause
+overdrive [--project-dir PATH] orchestrator control resume
+overdrive [--project-dir PATH] orchestrator control drain
+overdrive [--project-dir PATH] orchestrator control stop
+overdrive [--project-dir PATH] orchestrator control reset
+overdrive [--project-dir PATH] orchestrator control reconcile
 ```
 
 Allowed actions:
@@ -132,15 +132,15 @@ Allowed actions:
 Create and run a docs task in a repo:
 
 ```bash
-agent-orchestrator --project-dir /path/to/repo task create "Document dependency policy" --task-type docs --priority P1
-agent-orchestrator --project-dir /path/to/repo task list --status backlog
-agent-orchestrator --project-dir /path/to/repo task run <task_id>
+overdrive --project-dir /path/to/repo task create "Document dependency policy" --task-type docs --priority P1
+overdrive --project-dir /path/to/repo task list --status backlog
+overdrive --project-dir /path/to/repo task run <task_id>
 ```
 
 Pin multiple projects for the dashboard project selector:
 
 ```bash
-agent-orchestrator project pin ~/repos/service-a
-agent-orchestrator project pin ~/repos/service-b
-agent-orchestrator project list
+overdrive project pin ~/repos/service-a
+overdrive project pin ~/repos/service-b
+overdrive project list
 ```

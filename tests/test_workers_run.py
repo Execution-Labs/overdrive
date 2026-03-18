@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_orchestrator.workers.config import WorkerProviderSpec
-from agent_orchestrator.workers.run import WorkerRunResult, run_worker
+from overdrive.workers.config import WorkerProviderSpec
+from overdrive.workers.run import WorkerRunResult, run_worker
 
 
 def test_run_worker_extracts_human_blocking_issues_from_progress(
@@ -42,7 +42,7 @@ def test_run_worker_extracts_human_blocking_issues_from_progress(
         }
 
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._run_codex_worker",
+        "overdrive.workers.run._run_codex_worker",
         _fake_codex_worker,
     )
 
@@ -96,7 +96,7 @@ def test_run_worker_extracts_human_blocking_issues_for_ollama(
         )
 
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._run_ollama_generate",
+        "overdrive.workers.run._run_ollama_generate",
         _fake_ollama_generate,
     )
 
@@ -145,11 +145,11 @@ def test_run_worker_codex_adds_model_and_reasoning_flags(
         }
 
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._run_codex_worker",
+        "overdrive.workers.run._run_codex_worker",
         _fake_codex_worker,
     )
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._codex_supports_reasoning_effort",
+        "overdrive.workers.run._codex_supports_reasoning_effort",
         lambda _exe: True,
     )
 
@@ -203,11 +203,11 @@ def test_run_worker_codex_skips_reasoning_flag_when_unsupported(
         }
 
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._run_codex_worker",
+        "overdrive.workers.run._run_codex_worker",
         _fake_codex_worker,
     )
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._codex_supports_reasoning_effort",
+        "overdrive.workers.run._codex_supports_reasoning_effort",
         lambda _exe: False,
     )
 
@@ -258,11 +258,11 @@ def test_run_worker_codex_host_access_injects_danger_flag(
         }
 
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._run_codex_worker",
+        "overdrive.workers.run._run_codex_worker",
         _fake_codex_worker,
     )
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._codex_supports_reasoning_effort",
+        "overdrive.workers.run._codex_supports_reasoning_effort",
         lambda _exe: True,
     )
 
@@ -311,11 +311,11 @@ def test_run_worker_claude_adds_model_and_effort_flags(
         }
 
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._run_codex_worker",
+        "overdrive.workers.run._run_codex_worker",
         _fake_worker,
     )
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._claude_supports_effort",
+        "overdrive.workers.run._claude_supports_effort",
         lambda _exe: True,
     )
 
@@ -369,11 +369,11 @@ def test_run_worker_claude_skips_effort_when_unsupported(
         }
 
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._run_codex_worker",
+        "overdrive.workers.run._run_codex_worker",
         _fake_worker,
     )
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._claude_supports_effort",
+        "overdrive.workers.run._claude_supports_effort",
         lambda _exe: False,
     )
 
@@ -426,11 +426,11 @@ def test_run_worker_claude_defaults_to_stream_json_output(
         }
 
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._run_codex_worker",
+        "overdrive.workers.run._run_codex_worker",
         _fake_worker,
     )
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._claude_supports_effort",
+        "overdrive.workers.run._claude_supports_effort",
         lambda _exe: True,
     )
 
@@ -482,11 +482,11 @@ def test_run_worker_claude_sandboxed_does_not_force_danger_permission_flag(
         }
 
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._run_codex_worker",
+        "overdrive.workers.run._run_codex_worker",
         _fake_worker,
     )
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._claude_supports_effort",
+        "overdrive.workers.run._claude_supports_effort",
         lambda _exe: True,
     )
 
@@ -544,7 +544,7 @@ def test_run_worker_claude_stream_json_extracts_assistant_text(
         }
 
     monkeypatch.setattr(
-        "agent_orchestrator.workers.run._run_codex_worker",
+        "overdrive.workers.run._run_codex_worker",
         _fake_worker,
     )
 
@@ -567,7 +567,7 @@ def test_run_worker_claude_stream_json_extracts_assistant_text(
 
 
 def test_extract_claude_stream_json_usage_with_result_event() -> None:
-    from agent_orchestrator.workers.run import _extract_claude_stream_json_usage
+    from overdrive.workers.run import _extract_claude_stream_json_usage
 
     stdout = "\n".join([
         '{"type":"system","subtype":"init"}',
@@ -584,7 +584,7 @@ def test_extract_claude_stream_json_usage_with_result_event() -> None:
 
 
 def test_extract_claude_stream_json_usage_no_result_event() -> None:
-    from agent_orchestrator.workers.run import _extract_claude_stream_json_usage
+    from overdrive.workers.run import _extract_claude_stream_json_usage
 
     stdout = '{"type":"system","subtype":"init"}\n{"type":"assistant","message":{"content":[]}}'
     usage = _extract_claude_stream_json_usage(stdout)
@@ -592,7 +592,7 @@ def test_extract_claude_stream_json_usage_no_result_event() -> None:
 
 
 def test_extract_claude_stream_json_usage_empty_input() -> None:
-    from agent_orchestrator.workers.run import _extract_claude_stream_json_usage
+    from overdrive.workers.run import _extract_claude_stream_json_usage
 
     assert _extract_claude_stream_json_usage("") == {}
     assert _extract_claude_stream_json_usage("   ") == {}
@@ -629,7 +629,7 @@ def test_run_worker_claude_extracts_token_usage(
             "no_heartbeat": False,
         }
 
-    monkeypatch.setattr("agent_orchestrator.workers.run._run_codex_worker", _fake_worker)
+    monkeypatch.setattr("overdrive.workers.run._run_codex_worker", _fake_worker)
 
     result = run_worker(
         spec=WorkerProviderSpec(
@@ -674,8 +674,8 @@ def test_run_worker_codex_sets_provider_type_only(
             "no_heartbeat": False,
         }
 
-    monkeypatch.setattr("agent_orchestrator.workers.run._run_codex_worker", _fake_worker)
-    monkeypatch.setattr("agent_orchestrator.workers.run._codex_supports_reasoning_effort", lambda _: False)
+    monkeypatch.setattr("overdrive.workers.run._run_codex_worker", _fake_worker)
+    monkeypatch.setattr("overdrive.workers.run._codex_supports_reasoning_effort", lambda _: False)
 
     result = run_worker(
         spec=WorkerProviderSpec(name="codex", type="codex", command="codex"),

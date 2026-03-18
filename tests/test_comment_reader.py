@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_orchestrator.comments.reader import (
+from overdrive.comments.reader import (
     CommentFetchError,
     _map_issue_comment,
     _map_review_comment,
@@ -205,7 +205,7 @@ class TestFetchPrComments:
             "repos/owner/repo/issues/1/comments": "[]",
             "repos/owner/repo/pulls/1/reviews": "[]",
         }
-        with patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_subprocess_run(responses)):
+        with patch("overdrive.comments.reader.subprocess.run", side_effect=_mock_subprocess_run(responses)):
             result = fetch_pr_comments("owner", "repo", 1, tmp_path)
         assert result == []
 
@@ -215,7 +215,7 @@ class TestFetchPrComments:
             "repos/o/r/issues/42/comments": FIXTURE_ISSUE_COMMENTS_5,
             "repos/o/r/pulls/42/reviews": FIXTURE_REVIEWS_5,
         }
-        with patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_subprocess_run(responses)):
+        with patch("overdrive.comments.reader.subprocess.run", side_effect=_mock_subprocess_run(responses)):
             result = fetch_pr_comments("o", "r", 42, tmp_path)
         assert len(result) == 15
         # All should be PRComment instances.
@@ -229,18 +229,18 @@ class TestFetchPrComments:
             "repos/o/r/issues/10/comments": "[]",
             "repos/o/r/pulls/10/reviews": "[]",
         }
-        with patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_subprocess_run(responses)):
+        with patch("overdrive.comments.reader.subprocess.run", side_effect=_mock_subprocess_run(responses)):
             result = fetch_pr_comments("o", "r", 10, tmp_path)
         assert len(result) == 50
 
     def test_gh_not_found(self, tmp_path: Path) -> None:
-        with patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=FileNotFoundError("gh not found")):
+        with patch("overdrive.comments.reader.subprocess.run", side_effect=FileNotFoundError("gh not found")):
             result = fetch_pr_comments("o", "r", 1, tmp_path)
         assert result == []
 
     def test_gh_nonzero_exit(self, tmp_path: Path) -> None:
         with patch(
-            "agent_orchestrator.comments.reader.subprocess.run",
+            "overdrive.comments.reader.subprocess.run",
             side_effect=subprocess.CalledProcessError(1, ["gh"], stderr="auth required"),
         ):
             result = fetch_pr_comments("o", "r", 1, tmp_path)
@@ -248,7 +248,7 @@ class TestFetchPrComments:
 
     def test_gh_timeout(self, tmp_path: Path) -> None:
         with patch(
-            "agent_orchestrator.comments.reader.subprocess.run",
+            "overdrive.comments.reader.subprocess.run",
             side_effect=subprocess.TimeoutExpired(["gh"], 60),
         ):
             result = fetch_pr_comments("o", "r", 1, tmp_path)
@@ -260,7 +260,7 @@ class TestFetchPrComments:
             "repos/o/r/issues/1/comments": "not json",
             "repos/o/r/pulls/1/reviews": "not json",
         }
-        with patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_subprocess_run(responses)):
+        with patch("overdrive.comments.reader.subprocess.run", side_effect=_mock_subprocess_run(responses)):
             result = fetch_pr_comments("o", "r", 1, tmp_path)
         assert result == []
 
@@ -279,7 +279,7 @@ class TestFetchPrComments:
             # reviews
             return subprocess.CompletedProcess(cmd, 0, stdout=FIXTURE_REVIEWS_5, stderr="")
 
-        with patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=side_effect):
+        with patch("overdrive.comments.reader.subprocess.run", side_effect=side_effect):
             result = fetch_pr_comments("o", "r", 1, tmp_path)
         assert len(result) == 10  # 5 issue + 5 review, 0 from failed endpoint
 
@@ -290,7 +290,7 @@ class TestFetchPrComments:
             "repos/o/r/issues/1/comments": FIXTURE_ISSUE_COMMENTS_5,
             "repos/o/r/pulls/1/reviews": FIXTURE_REVIEWS_5,
         }
-        with patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_subprocess_run(responses)):
+        with patch("overdrive.comments.reader.subprocess.run", side_effect=_mock_subprocess_run(responses)):
             result = fetch_pr_comments("o", "r", 1, tmp_path)
         dates = [c.created_at for c in result]
         assert dates == sorted(dates)
@@ -325,8 +325,8 @@ class TestFetchMrCommentsBasic:
     def test_filters_system_notes_and_parses_fields(self) -> None:
         fixture = _load_fixture("mr_notes_page1.json")
         with (
-            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
-            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok(fixture)),
+            patch("overdrive.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("overdrive.comments.reader.subprocess.run", side_effect=_mock_run_ok(fixture)),
         ):
             comments = fetch_mr_comments("123", 1)
 
@@ -366,8 +366,8 @@ class TestFetchMrCommentsInlineFallback:
             }
         ])
         with (
-            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
-            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok(note)),
+            patch("overdrive.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("overdrive.comments.reader.subprocess.run", side_effect=_mock_run_ok(note)),
         ):
             comments = fetch_mr_comments("123", 1)
 
@@ -382,8 +382,8 @@ class TestFetchMrCommentsPagination:
         page2 = _load_fixture("mr_notes_page2.json").strip()
         paginated = page1 + "\n" + page2
         with (
-            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
-            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok(paginated)),
+            patch("overdrive.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("overdrive.comments.reader.subprocess.run", side_effect=_mock_run_ok(paginated)),
         ):
             comments = fetch_mr_comments("123", 1)
 
@@ -396,8 +396,8 @@ class TestFetchMrCommentsEmpty:
     def test_empty_notes_returns_empty_list(self) -> None:
         fixture = _load_fixture("mr_notes_empty.json")
         with (
-            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
-            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok(fixture)),
+            patch("overdrive.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("overdrive.comments.reader.subprocess.run", side_effect=_mock_run_ok(fixture)),
         ):
             comments = fetch_mr_comments("123", 1)
 
@@ -406,7 +406,7 @@ class TestFetchMrCommentsEmpty:
 
 class TestFetchMrCommentsGlabNotInstalled:
     def test_raises_when_glab_missing(self) -> None:
-        with patch("agent_orchestrator.comments.reader.shutil.which", return_value=None):
+        with patch("overdrive.comments.reader.shutil.which", return_value=None):
             with pytest.raises(CommentFetchError, match="not installed"):
                 fetch_mr_comments("123", 1)
 
@@ -414,9 +414,9 @@ class TestFetchMrCommentsGlabNotInstalled:
 class TestFetchMrCommentsGlabError:
     def test_raises_on_subprocess_error(self) -> None:
         with (
-            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("overdrive.comments.reader.shutil.which", return_value="/usr/bin/glab"),
             patch(
-                "agent_orchestrator.comments.reader.subprocess.run",
+                "overdrive.comments.reader.subprocess.run",
                 side_effect=subprocess.CalledProcessError(1, "glab", stderr="not found"),
             ),
         ):
@@ -427,9 +427,9 @@ class TestFetchMrCommentsGlabError:
 class TestFetchMrCommentsTimeout:
     def test_raises_on_timeout(self) -> None:
         with (
-            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("overdrive.comments.reader.shutil.which", return_value="/usr/bin/glab"),
             patch(
-                "agent_orchestrator.comments.reader.subprocess.run",
+                "overdrive.comments.reader.subprocess.run",
                 side_effect=subprocess.TimeoutExpired("glab", 60),
             ),
         ):
@@ -440,8 +440,8 @@ class TestFetchMrCommentsTimeout:
 class TestFetchMrCommentsInvalidJson:
     def test_raises_on_bad_json(self) -> None:
         with (
-            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
-            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok("not json {{")),
+            patch("overdrive.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("overdrive.comments.reader.subprocess.run", side_effect=_mock_run_ok("not json {{")),
         ):
             with pytest.raises(CommentFetchError, match="Failed to parse"):
                 fetch_mr_comments("123", 1)
@@ -469,8 +469,8 @@ class TestFetchMrCommentsMalformedNote:
             },
         ])
         with (
-            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
-            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok(notes)),
+            patch("overdrive.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("overdrive.comments.reader.subprocess.run", side_effect=_mock_run_ok(notes)),
         ):
             comments = fetch_mr_comments("123", 1)
 
@@ -493,8 +493,8 @@ class TestFetchMrCommentsResolvedNull:
             }
         ])
         with (
-            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
-            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok(notes)),
+            patch("overdrive.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("overdrive.comments.reader.subprocess.run", side_effect=_mock_run_ok(notes)),
         ):
             comments = fetch_mr_comments("123", 1)
 
@@ -525,8 +525,8 @@ class TestFetchMrCommentsSortedByDate:
             },
         ])
         with (
-            patch("agent_orchestrator.comments.reader.shutil.which", return_value="/usr/bin/glab"),
-            patch("agent_orchestrator.comments.reader.subprocess.run", side_effect=_mock_run_ok(notes)),
+            patch("overdrive.comments.reader.shutil.which", return_value="/usr/bin/glab"),
+            patch("overdrive.comments.reader.subprocess.run", side_effect=_mock_run_ok(notes)),
         ):
             comments = fetch_mr_comments("123", 1)
 

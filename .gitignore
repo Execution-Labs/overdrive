@@ -35,7 +35,7 @@ htmlcov/
 .vite/
 **/.vite/
 node_modules/
-.agent_orchestrator/
+.overdrive/
 .claude/
 
 .prd_runner/
@@ -53,6 +53,9 @@ node_modules/
 # Generated reports
 web/lighthouse/
 
-# Agent Orchestrator runtime data
+# Overdrive runtime data
 .workdoc.md
+.overdrive_archive/
+# Keep old name ignored during migration
+.agent_orchestrator/
 .agent_orchestrator_archive/

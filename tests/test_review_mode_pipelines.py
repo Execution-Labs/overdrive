@@ -17,11 +17,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_orchestrator.runtime.domain.models import RunRecord, Task, now_iso
-from agent_orchestrator.runtime.events import EventBus
-from agent_orchestrator.runtime.orchestrator import OrchestratorService
-from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
-from agent_orchestrator.runtime.storage.container import Container
+from overdrive.runtime.domain.models import RunRecord, Task, now_iso
+from overdrive.runtime.events import EventBus
+from overdrive.runtime.orchestrator import OrchestratorService
+from overdrive.runtime.orchestrator.worker_adapter import StepResult
+from overdrive.runtime.storage.container import Container
 
 
 # ---------------------------------------------------------------------------
@@ -145,12 +145,12 @@ class TestPrReviewFixOnlyPipeline:
 class TestPrReviewCommentPipeline:
     """pr_review_comment: fetch_comments → pr_review_comment → post_comments."""
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.fetch_pr_comments")
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.post_comments_batch")
+    @patch("overdrive.runtime.orchestrator.task_executor.fetch_pr_comments")
+    @patch("overdrive.runtime.orchestrator.task_executor.post_comments_batch")
     def test_step_sequence(
         self, mock_post: MagicMock, mock_fetch: MagicMock, tmp_path: Path,
     ) -> None:
-        from agent_orchestrator.comments.models import PRComment
+        from overdrive.comments.models import PRComment
 
         mock_fetch.return_value = [
             PRComment(id="c1", author="alice", body="Fix this", platform_id="100"),
@@ -187,11 +187,11 @@ class TestPrReviewCommentPipeline:
         assert "post_comments" not in worker_calls
         assert "pr_review_comment" in worker_calls
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.fetch_pr_comments")
+    @patch("overdrive.runtime.orchestrator.task_executor.fetch_pr_comments")
     def test_fetch_comments_called_with_correct_args(
         self, mock_fetch: MagicMock, tmp_path: Path,
     ) -> None:
-        from agent_orchestrator.comments.models import PRComment
+        from overdrive.comments.models import PRComment
 
         mock_fetch.return_value = [
             PRComment(id="c1", author="alice", body="Note", platform_id="100"),
@@ -220,9 +220,9 @@ class TestPrReviewCommentPipeline:
 class TestPrReviewSummarizePipeline:
     """pr_review_summarize: fetch_comments → pr_review_summarize."""
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.fetch_pr_comments")
+    @patch("overdrive.runtime.orchestrator.task_executor.fetch_pr_comments")
     def test_step_sequence(self, mock_fetch: MagicMock, tmp_path: Path) -> None:
-        from agent_orchestrator.comments.models import PRComment
+        from overdrive.comments.models import PRComment
 
         mock_fetch.return_value = [
             PRComment(id="c1", author="alice", body="LGTM", platform_id="100"),
@@ -249,10 +249,10 @@ class TestPrReviewSummarizePipeline:
         assert "fetch_comments" not in worker_calls
         assert "pr_review_summarize" in worker_calls
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.fetch_pr_comments")
+    @patch("overdrive.runtime.orchestrator.task_executor.fetch_pr_comments")
     def test_no_commit_step(self, mock_fetch: MagicMock, tmp_path: Path) -> None:
         """Summarize pipeline has no commit step."""
-        from agent_orchestrator.comments.models import PRComment
+        from overdrive.comments.models import PRComment
 
         mock_fetch.return_value = []
 
@@ -277,12 +277,12 @@ class TestPrReviewSummarizePipeline:
 class TestPrReviewFixRespondPipeline:
     """pr_review_fix_respond: fetch_comments → pr_review_fix_respond → implement → verify → review → post_comment_responses → commit."""
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.fetch_pr_comments")
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.post_comments_batch")
+    @patch("overdrive.runtime.orchestrator.task_executor.fetch_pr_comments")
+    @patch("overdrive.runtime.orchestrator.task_executor.post_comments_batch")
     def test_step_sequence(
         self, mock_post: MagicMock, mock_fetch: MagicMock, tmp_path: Path,
     ) -> None:
-        from agent_orchestrator.comments.models import PRComment
+        from overdrive.comments.models import PRComment
 
         mock_fetch.return_value = [
             PRComment(id="comment-0", author="reviewer", body="Fix this bug", platform_id="100"),
@@ -388,7 +388,7 @@ class TestLegacyPrReviewRegression:
 
     def test_legacy_pr_review_identical_to_fix_only(self, tmp_path: Path) -> None:
         """Legacy pr_review pipeline has same step structure as pr_review_fix_only."""
-        from agent_orchestrator.pipelines.registry import PipelineRegistry
+        from overdrive.pipelines.registry import PipelineRegistry
 
         registry = PipelineRegistry()
         legacy = registry.get("pr_review")
@@ -450,7 +450,7 @@ class TestPipelineTemplateStored:
             ["fetch_comments", "pr_review_fix_respond", "implement", "verify", "review", "post_comment_responses", "commit"],
         ),
     ])
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.fetch_pr_comments")
+    @patch("overdrive.runtime.orchestrator.task_executor.fetch_pr_comments")
     def test_pipeline_template_matches_registry(
         self,
         mock_fetch: MagicMock,
@@ -458,7 +458,7 @@ class TestPipelineTemplateStored:
         task_type: str,
         expected_steps: list[str],
     ) -> None:
-        from agent_orchestrator.comments.models import PRComment
+        from overdrive.comments.models import PRComment
 
         mock_fetch.return_value = []
 
@@ -502,7 +502,7 @@ class TestPipelineRegistryReviewModes:
         "pr_review_fix_respond",
     ])
     def test_pipeline_resolves_for_task_type(self, task_type: str) -> None:
-        from agent_orchestrator.pipelines.registry import PipelineRegistry
+        from overdrive.pipelines.registry import PipelineRegistry
 
         registry = PipelineRegistry()
         template = registry.resolve_for_task_type(task_type)
@@ -516,7 +516,7 @@ class TestPipelineRegistryReviewModes:
         ("pr_review_fix_respond", True),
     ])
     def test_commit_step_presence(self, task_type: str, has_commit: bool) -> None:
-        from agent_orchestrator.pipelines.registry import PipelineRegistry
+        from overdrive.pipelines.registry import PipelineRegistry
 
         registry = PipelineRegistry()
         template = registry.resolve_for_task_type(task_type)
@@ -533,7 +533,7 @@ class TestPipelineRegistryReviewModes:
         ("pr_review_fix_respond", True),
     ])
     def test_review_step_presence(self, task_type: str, has_review: bool) -> None:
-        from agent_orchestrator.pipelines.registry import PipelineRegistry
+        from overdrive.pipelines.registry import PipelineRegistry
 
         registry = PipelineRegistry()
         template = registry.resolve_for_task_type(task_type)
@@ -550,7 +550,7 @@ class TestPipelineRegistryReviewModes:
         ("pr_review_fix_respond", True),
     ])
     def test_fetch_comments_step_presence(self, task_type: str, has_fetch: bool) -> None:
-        from agent_orchestrator.pipelines.registry import PipelineRegistry
+        from overdrive.pipelines.registry import PipelineRegistry
 
         registry = PipelineRegistry()
         template = registry.resolve_for_task_type(task_type)
@@ -569,9 +569,9 @@ class TestPipelineRegistryReviewModes:
 class TestFetchCommentsBlocksPipeline:
     """If fetch_comments fails, the pipeline should not continue."""
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.fetch_pr_comments")
+    @patch("overdrive.runtime.orchestrator.task_executor.fetch_pr_comments")
     def test_fetch_failure_blocks_task(self, mock_fetch: MagicMock, tmp_path: Path) -> None:
-        from agent_orchestrator.comments.reader import CommentFetchError
+        from overdrive.comments.reader import CommentFetchError
 
         mock_fetch.side_effect = CommentFetchError("GitHub API unavailable")
 
@@ -597,12 +597,12 @@ class TestFetchCommentsBlocksPipeline:
 class TestFixRespondDryRunInPipeline:
     """In pipeline context, post_comment_responses respects comment_dry_run."""
 
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.fetch_pr_comments")
-    @patch("agent_orchestrator.runtime.orchestrator.task_executor.post_comments_batch")
+    @patch("overdrive.runtime.orchestrator.task_executor.fetch_pr_comments")
+    @patch("overdrive.runtime.orchestrator.task_executor.post_comments_batch")
     def test_dry_run_does_not_call_post_batch(
         self, mock_post: MagicMock, mock_fetch: MagicMock, tmp_path: Path,
     ) -> None:
-        from agent_orchestrator.comments.models import PRComment
+        from overdrive.comments.models import PRComment
 
         mock_fetch.return_value = [
             PRComment(id="comment-0", author="reviewer", body="Fix", platform_id="100"),
