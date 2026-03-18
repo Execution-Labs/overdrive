@@ -51,7 +51,7 @@ VENV_DIR="${OVERDRIVE_VENV_DIR:-$HOME/.overdrive-venv}"
 "$PYTHON" -m venv "$VENV_DIR"
 
 info "Installing Overdrive from PyPI..."
-"$VENV_DIR/bin/pip" install -q "overdrive[server]"
+"$VENV_DIR/bin/pip" install -q "overdrive-ai[server]"
 
 # --- Shell setup ---
 

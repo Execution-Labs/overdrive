@@ -69,7 +69,7 @@ When you need:
 ### pip install (recommended)
 
 ```bash
-pip install overdrive[server]
+pip install overdrive-ai[server]
 cd /path/to/your/project
 overdrive server                  # UI + API on :8080
 ```

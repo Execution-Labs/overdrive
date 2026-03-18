@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "overdrive"
+name = "overdrive-ai"
 version = "0.3.1"
 description = "Deterministic orchestration for AI-assisted software delivery."
 readme = "README.md"
