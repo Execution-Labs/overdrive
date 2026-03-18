@@ -66,23 +66,28 @@ When you need:
 
 ## Quick Start
 
-### 1. Start the backend
+### One-liner install
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Execution-Labs/overdrive/main/scripts/install.sh | bash
+```
+
+### Or clone and use Make
+
+```bash
+git clone https://github.com/Execution-Labs/overdrive.git
+cd overdrive
+make setup   # create venv, install backend + frontend
+make dev     # start backend on :8080 + frontend on :3000
+```
+
+### Manual setup
 
 ```bash
 python -m pip install -e ".[server]"
-overdrive server
+overdrive server                  # backend on :8080
+npm --prefix web install && npm --prefix web run dev   # frontend on :3000
 ```
-
-Backend runs at `http://localhost:8080` by default.
-
-### 2. Start the web UI
-
-```bash
-npm --prefix web install
-npm --prefix web run dev
-```
-
-Frontend runs at `http://localhost:3000` by default (proxies `/api` to the backend).
 
 ## Navigation
 
