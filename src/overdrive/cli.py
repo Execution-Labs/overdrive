@@ -117,11 +117,7 @@ def _orchestrator_control(args: argparse.Namespace) -> int:
 
 
 def _server(args: argparse.Namespace) -> int:
-    try:
-        import uvicorn
-    except ImportError:
-        sys.stderr.write("Install server extras: pip install 'overdrive[server]'\n")
-        return 1
+    import uvicorn
 
     app = create_app(project_dir=_resolve_project_dir(args.project_dir))
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)

@@ -69,7 +69,7 @@ When you need:
 ### pip install (recommended)
 
 ```bash
-pip install overdrive-ai[server]
+pip install overdrive-ai
 cd /path/to/your/project
 overdrive server                  # UI + API on :8080
 ```
@@ -231,7 +231,7 @@ Notes:
 ```bash
 # Use Python 3.10+ and a local virtualenv
 python3 -m venv .venv
-.venv/bin/pip install -e ".[server,test,dev]"
+.venv/bin/pip install -e ".[test,dev]"
 
 # Backend tests
 .venv/bin/pytest -q

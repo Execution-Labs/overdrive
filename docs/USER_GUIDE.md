@@ -27,7 +27,7 @@ Additional surfaces available from any view:
 Start backend:
 
 ```bash
-python -m pip install -e ".[server]"
+python -m pip install -e .
 overdrive server --project-dir /absolute/path/to/your/repo
 ```
 

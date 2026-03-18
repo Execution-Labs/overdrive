@@ -15,7 +15,7 @@ done
 
 if [[ ! -x ".venv/bin/python" ]]; then
   echo "[pre-push] Missing .venv at repo root."
-  echo "[pre-push] Create it first (example): python3 -m venv .venv && .venv/bin/pip install -e \".[server,test,dev]\""
+  echo "[pre-push] Create it first (example): python3 -m venv .venv && .venv/bin/pip install -e \".[test,dev]\""
   exit 1
 fi
 

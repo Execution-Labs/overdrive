@@ -6,7 +6,7 @@ setup: setup-backend setup-frontend ## Full project setup
 
 setup-backend: ## Create venv and install backend with all extras
 	python3 -m venv .venv
-	.venv/bin/pip install -e ".[server,test,dev]"
+	.venv/bin/pip install -e ".[test,dev]"
 
 setup-frontend: ## Install frontend dependencies
 	npm --prefix web install

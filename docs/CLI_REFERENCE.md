@@ -36,7 +36,7 @@ Options:
 If server extras are missing, install with:
 
 ```bash
-python -m pip install -e ".[server]"
+python -m pip install -e .
 ```
 
 ## Project Commands
