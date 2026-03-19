@@ -212,6 +212,7 @@ a:focus-visible {
   align-items: center;
   gap: 0.5rem;
   margin-bottom: 0.5rem;
+  min-width: 0;
 }
 
 .board-icon-btn {
@@ -281,12 +282,16 @@ a:focus-visible {
   width: 1.75rem;
   height: 1.75rem;
   border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-primary);
   cursor: pointer;
   color: var(--color-text-muted);
   font-size: 1rem;
   font-weight: 700;
   letter-spacing: 0.1em;
-  line-height: 1;
+  padding-left: 0.1em;
+  line-height: 0;
+  padding-bottom: 0.2rem;
   list-style: none;
   user-select: none;
 }
@@ -1656,6 +1661,68 @@ textarea {
   width: 7rem;
 }
 
+/* Toggle switch */
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 2rem;
+  height: 1.125rem;
+}
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--color-border-default);
+  border-radius: 1rem;
+  transition: background 0.15s;
+}
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 0.825rem;
+  height: 0.825rem;
+  left: 0.15rem;
+  bottom: 0.15rem;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.15s;
+}
+.toggle-switch input:checked + .toggle-slider {
+  background: var(--color-primary-500);
+}
+.toggle-switch input:checked + .toggle-slider::before {
+  transform: translateX(0.875rem);
+}
+.toggle-switch-sm {
+  width: 1.6rem;
+  height: 0.9rem;
+}
+.toggle-switch-sm .toggle-slider::before {
+  width: 0.65rem;
+  height: 0.65rem;
+  left: 0.125rem;
+  bottom: 0.125rem;
+}
+.toggle-switch-sm input:checked + .toggle-slider::before {
+  transform: translateX(0.7rem);
+}
+
+.binary-warning {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.35rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--color-warning-800);
+  background: var(--color-warning-100);
+  border-radius: var(--radius-sm);
+}
+
 .pr-review-setup {
   border: 1px solid var(--color-border-default);
   border-radius: var(--radius-md);
@@ -2063,6 +2130,24 @@ textarea {
   .orchestrator-app {
     padding: 1rem 0.85rem 1.2rem;
   }
+
+  .git-branch-label {
+    font-size: 0;
+    gap: 0;
+    max-width: none;
+  }
+
+  .git-branch-label svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .git-ahead-badge,
+  .git-behind-badge,
+  .git-push-message {
+    display: none;
+  }
+
 
   .topbar {
     flex-direction: column;
@@ -3674,4 +3759,237 @@ textarea {
 
 .review-decision-group {
   margin: 0.5rem 0;
+}
+
+/* ── Git push feature ──────────────────────────────────────── */
+
+.git-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  min-width: 0;
+  position: relative;
+}
+
+.git-branch-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.78rem;
+  max-width: clamp(0px, calc(100vw - 320px), 180px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.git-ahead-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: var(--color-success-100, #dcfce7);
+  color: var(--color-success-700, #15803d);
+}
+
+.git-behind-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: var(--color-warning-100, #fef9c3);
+  color: var(--color-warning-700, #a16207);
+}
+
+.git-push-wrap {
+  position: relative;
+}
+
+.git-push-btn {
+  position: relative;
+}
+
+.git-push-spinner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.git-push-spinner::after {
+  content: '';
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--color-text-secondary);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: git-spin 0.6s linear infinite;
+}
+
+@keyframes git-spin {
+  to { transform: rotate(360deg); }
+}
+
+.git-push-message {
+  font-size: 0.75rem;
+  color: var(--color-success-700, #15803d);
+  white-space: nowrap;
+}
+
+.push-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 100;
+  min-width: 280px;
+  background: var(--color-bg-card, #fff);
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  padding: 0.6rem;
+}
+
+@media (max-width: 920px) {
+  .push-popover {
+    right: auto;
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 0;
+    width: calc(100vw - 1.7rem);
+    max-width: 340px;
+  }
+}
+
+.push-popover-header {
+  font-weight: 600;
+  font-size: 0.82rem;
+  margin-bottom: 0.4rem;
+  color: var(--color-text-primary);
+}
+
+.push-commit-list {
+  max-height: 120px;
+  overflow-y: auto;
+  margin-bottom: 0.4rem;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 4px;
+  padding: 0.3rem;
+}
+
+.push-commit-item {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  padding: 0.15rem 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.push-commit-item code {
+  color: var(--color-primary-600, #4f46e5);
+  font-size: 0.7rem;
+}
+
+.push-commit-more {
+  font-style: italic;
+}
+
+.push-option-btn {
+  display: block;
+  width: 100%;
+  padding: 0.35rem 0.5rem;
+  margin: 0.25rem 0;
+  font-size: 0.78rem;
+  text-align: left;
+  background: var(--color-primary-50, #eef2ff);
+  color: var(--color-primary-700, #4338ca);
+  border: 1px solid var(--color-primary-200, #c7d2fe);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.push-option-btn:hover:not(:disabled) {
+  background: var(--color-primary-100, #e0e7ff);
+}
+
+.push-option-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.push-popover-divider {
+  border-top: 1px solid var(--color-border, #e2e8f0);
+  margin: 0.4rem 0;
+}
+
+.push-new-branch-section {
+  margin-top: 0.2rem;
+}
+
+.push-new-branch-label {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin-bottom: 0.2rem;
+  display: block;
+}
+
+.push-new-branch-row {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.push-branch-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.78rem;
+  font-family: var(--font-mono, monospace);
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 4px;
+  background: var(--color-bg-primary, #fff);
+  color: var(--color-text-primary);
+}
+
+.push-branch-input:focus {
+  outline: none;
+  border-color: var(--color-primary-400, #818cf8);
+}
+
+.push-auto-btn {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 500;
+  background: var(--color-bg-hover, #f1f5f9);
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+}
+
+.push-auto-btn:hover:not(:disabled) {
+  background: var(--color-bg-active, #e2e8f0);
+}
+
+.push-auto-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.push-error {
+  font-size: 0.72rem;
+  color: var(--color-danger-600, #dc2626);
+  margin-top: 0.3rem;
+  word-break: break-word;
 }

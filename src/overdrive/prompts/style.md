@@ -7,4 +7,5 @@
 - During refactors/migrations, do not silently drop important existing intent comments without preserving that intent in the updated code.
 - Always import directly from source modules. Avoid re-exporting.
 - Document functions and types following the repository's established style.
+- Match the existing design language and visual patterns for UI changes. Reuse existing components, CSS classes, and variables before creating new ones.
 - If style is unclear in touched areas, apply the language-default fallbacks below.

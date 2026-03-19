@@ -630,6 +630,14 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             cfg["project"] = project_cfg
             touched_sections.append("project.commands")
 
+        if body.project is not None and body.project.disabled_commands is not None:
+            project_cfg = dict(cfg.get("project") or {})
+            project_cfg["disabled_commands"] = [
+                s for s in (str(v).strip().lower() for v in body.project.disabled_commands) if s
+            ]
+            cfg["project"] = project_cfg
+            touched_sections.append("project.disabled_commands")
+
         if body.project is not None and body.project.prompt_overrides is not None:
             project_cfg = dict(cfg.get("project") or {})
             existing_overrides = impl._normalize_prompt_overrides(project_cfg.get("prompt_overrides"))

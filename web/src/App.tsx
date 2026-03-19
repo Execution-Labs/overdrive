@@ -1767,6 +1767,21 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>('')
 
+  // Git push feature state
+  const [gitStatus, setGitStatus] = useState<{
+    branch: string
+    remote_branch: string | null
+    ahead_count: number
+    behind_count: number
+    commits: { sha: string; message: string }[]
+    has_remote: boolean
+  } | null>(null)
+  const [pushPopoverOpen, setPushPopoverOpen] = useState(false)
+  const [pushTargetBranch, setPushTargetBranch] = useState('')
+  const [pushInProgress, setPushInProgress] = useState(false)
+  const [pushMessage, setPushMessage] = useState('')
+  const [pushError, setPushError] = useState('')
+
   const [workOpen, setWorkOpen] = useState(false)
   const [createTab, setCreateTab] = useState<CreateTab>('task')
   const [prList, setPrList] = useState<PullRequestItem[]>([])
@@ -2058,7 +2073,9 @@ export default function App() {
     languages: string[]
     commands: Record<string, Record<string, string>>
     venv: { path: string; source: string } | null
+    binary_warnings: Record<string, string[]>
   } | null>(null)
+  const [disabledCommands, setDisabledCommands] = useState<Set<string>>(new Set())
   const [resolvedEnvVars, setResolvedEnvVars] = useState<{ key: string; source: string; has_value: boolean }[]>([])
   const settingsLoadedRef = useRef(false)
   const shouldPrefillTaskProjectCommandsRef = useRef(false)
@@ -2321,6 +2338,12 @@ export default function App() {
     setSettingsProjectCommands(
       Object.keys(projectCommands).length > 0 ? serializeProjectCommandsYaml(projectCommands) : ''
     )
+    const rawDisabled = (payload.project as Record<string, unknown>).disabled_commands
+    if (Array.isArray(rawDisabled)) {
+      setDisabledCommands(new Set(rawDisabled.filter((v): v is string => typeof v === 'string')))
+    } else {
+      setDisabledCommands(new Set())
+    }
     const promptOverrides = payload.project.prompt_overrides || {}
     const promptInjections = payload.project.prompt_injections || {}
     const promptDefaults = payload.project.prompt_defaults || {}
@@ -2361,6 +2384,8 @@ export default function App() {
           commands: (d.commands && typeof d.commands === 'object' && !Array.isArray(d.commands))
             ? d.commands as Record<string, Record<string, string>> : {},
           venv: (d.venv && typeof d.venv === 'object') ? d.venv as { path: string; source: string } : null,
+          binary_warnings: (d.binary_warnings && typeof d.binary_warnings === 'object' && !Array.isArray(d.binary_warnings))
+            ? d.binary_warnings as Record<string, string[]> : {},
         })
       } else {
         setAutoDetectedDefaults(null)
@@ -3240,6 +3265,56 @@ export default function App() {
     }
   }
 
+  async function fetchGitStatus(): Promise<void> {
+    try {
+      const data = await requestJson<{
+        branch: string
+        remote_branch: string | null
+        ahead_count: number
+        behind_count: number
+        commits: { sha: string; message: string }[]
+        has_remote: boolean
+      }>(buildApiUrl('/api/git/status', projectDirRef.current))
+      setGitStatus(data)
+    } catch {
+      // Silently ignore — git status is optional UI
+    }
+  }
+
+  async function handleGitPush(targetBranch?: string, autoName?: boolean): Promise<void> {
+    setPushInProgress(true)
+    setPushError('')
+    setPushMessage('')
+    try {
+      const result = await requestJson<{
+        success: boolean
+        error: string | null
+        remote_branch: string
+        pushed_commits: number
+      }>(buildApiUrl('/api/git/push', projectDirRef.current), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target_branch: targetBranch || null,
+          auto_name: autoName || false,
+        }),
+      })
+      setPushMessage(
+        result.pushed_commits === 0
+          ? `Set upstream tracking to ${result.remote_branch}`
+          : `Pushed ${result.pushed_commits} commit${result.pushed_commits !== 1 ? 's' : ''} to ${result.remote_branch}`,
+      )
+      setPushPopoverOpen(false)
+      setPushTargetBranch('')
+      void fetchGitStatus()
+      window.setTimeout(() => setPushMessage(''), 6000)
+    } catch (err) {
+      setPushError(err instanceof Error ? err.message : 'Push failed')
+    } finally {
+      setPushInProgress(false)
+    }
+  }
+
   function isSchedulerStale(status: OrchestratorStatus): boolean {
     if (typeof status.scheduler_stale === 'boolean') return status.scheduler_stale
     return status.status === 'running'
@@ -3321,7 +3396,32 @@ export default function App() {
 
   useEffect(() => {
     void reloadAll()
+    void fetchGitStatus()
   }, [projectDir])
+
+  useEffect(() => {
+    if (!pushPopoverOpen) return
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target && !target.closest('.git-push-wrap')) {
+        setPushPopoverOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [pushPopoverOpen])
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target && !target.closest('.board-more-menu')) {
+        const details = document.querySelector('.board-more-menu') as HTMLDetailsElement | null
+        if (details?.open) details.open = false
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
 
   useEffect(() => {
     let stopped = false
@@ -3355,7 +3455,13 @@ export default function App() {
       }
       const data = payload as Record<string, unknown>
       const channel = String(data.channel || '').trim()
-      if (!channel || channel === 'system') {
+      if (!channel) {
+        return
+      }
+      if (channel === 'system') {
+        if (String(data.event_type || '') === 'git.pushed') {
+          void fetchGitStatus()
+        }
         return
       }
       const eventProjectId = String(data.project_id || '').trim()
@@ -4363,6 +4469,26 @@ export default function App() {
       setSettingsError(`Failed to save settings (${detail})`)
     } finally {
       setSettingsSaving(false)
+    }
+  }
+
+  async function toggleDisabledCommand(key: string): Promise<void> {
+    const next = new Set(disabledCommands)
+    if (next.has(key)) {
+      next.delete(key)
+    } else {
+      next.add(key)
+    }
+    setDisabledCommands(next)
+    try {
+      await requestJson(buildApiUrl('/api/settings', projectDir), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: { disabled_commands: [...next] } }),
+      })
+    } catch {
+      // revert on failure
+      setDisabledCommands(disabledCommands)
     }
   }
 
@@ -6082,6 +6208,101 @@ export default function App() {
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><line x1="2" y1="4" x2="14" y2="4" /><line x1="2" y1="8" x2="14" y2="8" /><line x1="2" y1="12" x2="14" y2="12" /></svg>
           </label>
           <div className="board-toolbar-spacer" />
+          {gitStatus && (
+            <div className="git-status-bar git-push-wrap">
+              <button className="git-branch-label" title={gitStatus.branch} onClick={() => setPushPopoverOpen((v) => !v)}>
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="5" cy="4" r="2" /><circle cx="5" cy="12" r="2" /><circle cx="12" cy="6" r="2" /><path d="M5 6v4M10.2 6.8C9 8 7 8 5 8" /></svg>
+                {gitStatus.branch}
+              </button>
+              {gitStatus.ahead_count > 0 && (
+                <span className="git-ahead-badge" title={`${gitStatus.ahead_count} commit${gitStatus.ahead_count !== 1 ? 's' : ''} ahead of remote`}>
+                  {gitStatus.ahead_count} ahead
+                </span>
+              )}
+              {gitStatus.behind_count > 0 && (
+                <span className="git-behind-badge" title={`${gitStatus.behind_count} commit${gitStatus.behind_count !== 1 ? 's' : ''} behind remote`}>
+                  {gitStatus.behind_count} behind
+                </span>
+              )}
+              <button
+                className="board-icon-btn git-push-btn"
+                disabled={pushInProgress || (gitStatus.ahead_count === 0 && !!gitStatus.remote_branch)}
+                onClick={() => setPushPopoverOpen((v) => !v)}
+                title={gitStatus.ahead_count === 0 && gitStatus.remote_branch ? 'Nothing to push' : 'Push to remote'}
+                aria-label="Push to remote"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M8 12V3" /><path d="M4 7l4-4 4 4" /><path d="M3 14h10" /></svg>
+                {pushInProgress && <span className="git-push-spinner" />}
+              </button>
+              {pushPopoverOpen && (
+                <div className="push-popover">
+                  <div className="push-popover-header">{gitStatus.branch}</div>
+                    {gitStatus.ahead_count > 0 && gitStatus.commits.length > 0 && (
+                      <div className="push-commit-list">
+                        {gitStatus.commits.slice(0, 5).map((c) => (
+                          <div key={c.sha} className="push-commit-item" title={c.sha}>
+                            <code>{c.sha.slice(0, 7)}</code> {c.message}
+                          </div>
+                        ))}
+                        {gitStatus.commits.length > 5 && (
+                          <div className="push-commit-item push-commit-more">...and {gitStatus.commits.length - 5} more</div>
+                        )}
+                      </div>
+                    )}
+                    {gitStatus.remote_branch ? (
+                      <button
+                        className="push-option-btn"
+                        disabled={pushInProgress || gitStatus.ahead_count === 0}
+                        onClick={() => void handleGitPush()}
+                      >
+                        Push to {gitStatus.remote_branch}
+                      </button>
+                    ) : (
+                      <button
+                        className="push-option-btn"
+                        disabled={pushInProgress}
+                        onClick={() => void handleGitPush()}
+                      >
+                        Push to origin/{gitStatus.branch}
+                      </button>
+                    )}
+                    <div className="push-popover-divider" />
+                    <div className="push-new-branch-section">
+                      <label className="push-new-branch-label">Push to new branch</label>
+                      <div className="push-new-branch-row">
+                        <input
+                          className="push-branch-input"
+                          type="text"
+                          placeholder="branch-name"
+                          value={pushTargetBranch}
+                          onChange={(e) => setPushTargetBranch(e.target.value)}
+                          disabled={pushInProgress}
+                        />
+                        <button
+                          className="push-auto-btn"
+                          disabled={pushInProgress}
+                          onClick={() => void handleGitPush(undefined, true)}
+                          title="Auto-generate branch name"
+                        >
+                          Auto
+                        </button>
+                      </div>
+                      {pushTargetBranch.trim() && (
+                        <button
+                          className="push-option-btn"
+                          disabled={pushInProgress}
+                          onClick={() => void handleGitPush(pushTargetBranch.trim())}
+                        >
+                          Push to origin/{pushTargetBranch.trim()}
+                        </button>
+                      )}
+                    </div>
+                    {pushError && <div className="push-error">{pushError}</div>}
+                </div>
+              )}
+              {pushMessage && <span className="git-push-message">{pushMessage}</span>}
+            </div>
+          )}
           <details className="board-more-menu">
             <summary className="board-more-btn" title="More actions">···</summary>
             <div className="board-more-dropdown">
@@ -6787,7 +7008,7 @@ export default function App() {
               <article className="settings-card">
                 <h3>Auto-detected Defaults</h3>
                 <p className="field-label" style={{ marginBottom: '0.75rem' }}>
-                  What workers will use when no overrides are configured. Override by editing Project Commands above.
+                  What workers will use when no overrides are configured. Toggle individual commands or override by editing Project Commands above.
                 </p>
 
                 {autoDetectedDefaults.languages.length > 0 && (
@@ -6816,12 +7037,28 @@ export default function App() {
                           <span style={{ fontSize: '0.85em', fontWeight: 600 }}>{lang}</span>
                           <table className="auto-detected-table">
                             <tbody>
-                              {Object.entries(cmds).map(([step, cmd]) => (
-                                <tr key={step}>
-                                  <td className="auto-detected-step">{step}</td>
-                                  <td><code style={{ fontSize: '0.85em' }}>{cmd}</code></td>
-                                </tr>
-                              ))}
+                              {Object.entries(cmds).map(([step, cmd]) => {
+                                const key = `${lang}.${step}`
+                                const isDisabled = disabledCommands.has(key)
+                                const hasBinaryWarning = (autoDetectedDefaults.binary_warnings[lang] || []).includes(step)
+                                return (
+                                  <tr key={step} style={isDisabled ? { opacity: 0.5 } : undefined}>
+                                    <td className="auto-detected-step" style={{ whiteSpace: 'nowrap' }}>
+                                      <label className="toggle-switch toggle-switch-sm" style={{ marginRight: '0.4rem', verticalAlign: 'middle' }}>
+                                        <input type="checkbox" checked={!isDisabled} onChange={() => void toggleDisabledCommand(key)} />
+                                        <span className="toggle-slider" />
+                                      </label>
+                                      {step}
+                                    </td>
+                                    <td>
+                                      <code style={{ fontSize: '0.85em' }}>{cmd}</code>
+                                      {hasBinaryWarning && !isDisabled && (
+                                        <span className="binary-warning" title="Binary not found on PATH">not found</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                )
+                              })}
                             </tbody>
                           </table>
                         </div>
@@ -7300,7 +7537,7 @@ export default function App() {
                 <h2>{selectedTaskView.title}</h2>
                 <span className={`status-pill status-pill-prominent ${statusPillClass(selectedTaskStatusDisplay.classStatus)}`}>{selectedTaskStatusDisplay.label}</span>
               </div>
-              {(selectedTaskView.pipeline_template || []).length > 0 ? (() => {
+              {(selectedTaskView.pipeline_template || []).length > 0 && selectedTaskView.pending_gate !== 'pipeline_classify' && selectedTaskView.pending_gate !== 'select_pipeline' ? (() => {
                 const pipelineSteps = selectedTaskView.pipeline_template!
                 const currentStep = selectedTaskView.current_step || null
                 const pipelinePhase = String(selectedTaskView.metadata?.pipeline_phase || '') || currentStep
@@ -7346,10 +7583,10 @@ export default function App() {
                       disabled={isTaskActionBusy || hasUnresolvedBlockers}
                     >
                       <option value="">From beginning</option>
-                      {(selectedTaskView.pipeline_template || []).map((step) => (
+                      {selectedTaskView.pending_gate !== 'pipeline_classify' && selectedTaskView.pending_gate !== 'select_pipeline' && (selectedTaskView.pipeline_template || []).map((step) => (
                         <option key={step} value={step}>{humanizeLabel(step)}</option>
                       ))}
-                      {selectedTaskView.current_step && !(selectedTaskView.pipeline_template || []).includes(selectedTaskView.current_step) && (
+                      {selectedTaskView.pending_gate !== 'pipeline_classify' && selectedTaskView.pending_gate !== 'select_pipeline' && selectedTaskView.current_step && !(selectedTaskView.pipeline_template || []).includes(selectedTaskView.current_step) && (
                         <option value={selectedTaskView.current_step}>{humanizeLabel(selectedTaskView.current_step)}</option>
                       )}
                     </select>

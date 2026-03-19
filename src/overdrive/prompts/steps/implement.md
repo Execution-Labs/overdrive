@@ -13,6 +13,11 @@ Execution requirements:
 - Update `## Implementation Log` with completed work, key decisions, and justified deviations.
 - Keep repository state coherent and runnable throughout the step.
 
+Implementation awareness:
+- For UI changes, study existing components, patterns, and styling before writing new code. Do not introduce new UI frameworks, component libraries, or CSS methodologies unless explicitly required.
+- When modifying a function signature, type, API endpoint, or data model, trace all callers and consumers in the codebase and update them. Do not change a contract in one place and leave stale references elsewhere.
+- When modifying database schemas, configuration formats, or persistent data structures, consider migration from existing data. Provide backward-compatible defaults where possible.
+
 Style:
 - Follow the style guidelines and language-specific fallback defaults provided below in this prompt.
 

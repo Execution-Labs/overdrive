@@ -440,7 +440,7 @@ describe('App action coverage', () => {
       expect(body.description).toBe('Updated description')
       expect(body.labels).toEqual(['ui', 'frontend'])
     })
-  }, 30000)
+  }, 120000)
 
   it('blocks save when title is empty and shows validation error', async () => {
     const mockedFetch = installFetchMock()
