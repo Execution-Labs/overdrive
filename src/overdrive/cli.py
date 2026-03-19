@@ -119,7 +119,13 @@ def _orchestrator_control(args: argparse.Namespace) -> int:
 def _server(args: argparse.Namespace) -> int:
     import uvicorn
 
-    app = create_app(project_dir=_resolve_project_dir(args.project_dir))
+    project_dir = _resolve_project_dir(args.project_dir)
+    url = f"http://{args.host}:{args.port}"
+    if args.host == "0.0.0.0":
+        url = f"http://localhost:{args.port}"
+    print(f"\n  Overdrive is running at: {url}")
+    print(f"  Project: {project_dir}\n")
+    app = create_app(project_dir=project_dir)
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)
     return 0
 
