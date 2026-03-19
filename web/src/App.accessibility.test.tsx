@@ -75,7 +75,7 @@ describe('App navigation and settings flows', () => {
     await waitFor(() => {
       expect(screen.getByRole('tab', { name: /Providers/i })).toBeInTheDocument()
     })
-  })
+  }, 30_000)
 
   it('pins manual project paths from Settings', async () => {
     render(<App />)

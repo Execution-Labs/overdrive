@@ -50,12 +50,13 @@ def test_queue_backlog_queues_all_backlog_tasks(tmp_path: Path) -> None:
     assert set(data["task_ids"]) == {t1.id, t2.id}
     assert "message" in data
 
-    # Verify persisted state
+    # Verify persisted state. Under the live scheduler a freshly queued task may
+    # be claimed immediately, so accept either queued or in_progress here.
     stored1 = container.tasks.get(t1.id)
     stored2 = container.tasks.get(t2.id)
     stored3 = container.tasks.get(t3.id)
-    assert stored1 is not None and stored1.status == "queued"
-    assert stored2 is not None and stored2.status == "queued"
+    assert stored1 is not None and stored1.status in {"queued", "in_progress"}
+    assert stored2 is not None and stored2.status in {"queued", "in_progress"}
     assert stored3 is not None and stored3.status == "done"
 
 

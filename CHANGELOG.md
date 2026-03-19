@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.5] - 2026-03-20
+
+### Added
+- Git remote status and push actions in the board toolbar, including push-to-new-branch support
+- Per-command toggles for auto-detected project commands in Settings
+
+### Changed
+- Prompt guidance now emphasizes implementation awareness for UI changes, contract changes, and migrations
+- Pinned repositories inherit the current worker default/provider setup more reliably
+
+### Fixed
+- Pipeline detail UI no longer shows misleading progress while pipeline classification/selection is still pending
+- Git remote tests use an explicit `main` branch, and the longest board action test gets a higher timeout to reduce CI flakiness
+
 ## [0.3.4] - 2026-03-19
 
 ### Fixed
