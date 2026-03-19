@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.4] - 2026-03-19
+
+### Fixed
+- Reconciler no longer blocks `pipeline_classify` and `select_pipeline` gates on queued tasks
+- WebSocket real-time updates now work when frontend is served from the backend (`pip install` mode)
+
 ## [0.3.3] - 2026-03-19
 
 ### Fixed
