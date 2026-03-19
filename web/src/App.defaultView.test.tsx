@@ -1197,7 +1197,7 @@ describe('App default route', () => {
     render(<App />)
 
     const rootCallCount = () =>
-      mockedFetch.mock.calls.filter(([url]) => String(url).startsWith('/?') || String(url) === '/').length
+      mockedFetch.mock.calls.filter(([url]) => String(url).includes('/readyz')).length
     const boardCallCount = () =>
       mockedFetch.mock.calls.filter(([url]) => String(url).includes('/api/tasks/board')).length
 

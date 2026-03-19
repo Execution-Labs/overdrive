@@ -169,7 +169,8 @@ def apply_runtime_invariants(
                     message="Cleaned retained context and branch artifacts from cancelled task.",
                 )
 
-        if task.status == "queued" and task.pending_gate:
+        _VALID_QUEUED_GATES = {"pipeline_classify", "select_pipeline"}
+        if task.status == "queued" and task.pending_gate and task.pending_gate not in _VALID_QUEUED_GATES:
             gate_name = str(task.pending_gate or "").strip() or "approval"
             task.status = "blocked"
             task.error = f"Invalid queued gate state detected ({gate_name})."
