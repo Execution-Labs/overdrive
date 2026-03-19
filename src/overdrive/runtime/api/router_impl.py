@@ -1686,6 +1686,7 @@ def create_router(
     from .deps import RouteDeps
     from .routes_agents import register_agent_routes
     from .routes_collab import register_collab_routes
+    from .routes_git import register_git_routes
     from .routes_imports import register_import_routes
     from .routes_misc import register_misc_routes
     from .routes_projects import register_project_routes
@@ -1714,6 +1715,7 @@ def create_router(
     register_collab_routes(router, deps)
     register_terminal_routes(router, deps)
     register_misc_routes(router, deps)
+    register_git_routes(router, deps)
 
     return router
 

@@ -1767,6 +1767,21 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>('')
 
+  // Git push feature state
+  const [gitStatus, setGitStatus] = useState<{
+    branch: string
+    remote_branch: string | null
+    ahead_count: number
+    behind_count: number
+    commits: { sha: string; message: string }[]
+    has_remote: boolean
+  } | null>(null)
+  const [pushPopoverOpen, setPushPopoverOpen] = useState(false)
+  const [pushTargetBranch, setPushTargetBranch] = useState('')
+  const [pushInProgress, setPushInProgress] = useState(false)
+  const [pushMessage, setPushMessage] = useState('')
+  const [pushError, setPushError] = useState('')
+
   const [workOpen, setWorkOpen] = useState(false)
   const [createTab, setCreateTab] = useState<CreateTab>('task')
   const [prList, setPrList] = useState<PullRequestItem[]>([])
@@ -3250,6 +3265,56 @@ export default function App() {
     }
   }
 
+  async function fetchGitStatus(): Promise<void> {
+    try {
+      const data = await requestJson<{
+        branch: string
+        remote_branch: string | null
+        ahead_count: number
+        behind_count: number
+        commits: { sha: string; message: string }[]
+        has_remote: boolean
+      }>(buildApiUrl('/api/git/status', projectDirRef.current))
+      setGitStatus(data)
+    } catch {
+      // Silently ignore — git status is optional UI
+    }
+  }
+
+  async function handleGitPush(targetBranch?: string, autoName?: boolean): Promise<void> {
+    setPushInProgress(true)
+    setPushError('')
+    setPushMessage('')
+    try {
+      const result = await requestJson<{
+        success: boolean
+        error: string | null
+        remote_branch: string
+        pushed_commits: number
+      }>(buildApiUrl('/api/git/push', projectDirRef.current), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target_branch: targetBranch || null,
+          auto_name: autoName || false,
+        }),
+      })
+      setPushMessage(
+        result.pushed_commits === 0
+          ? `Set upstream tracking to ${result.remote_branch}`
+          : `Pushed ${result.pushed_commits} commit${result.pushed_commits !== 1 ? 's' : ''} to ${result.remote_branch}`,
+      )
+      setPushPopoverOpen(false)
+      setPushTargetBranch('')
+      void fetchGitStatus()
+      window.setTimeout(() => setPushMessage(''), 6000)
+    } catch (err) {
+      setPushError(err instanceof Error ? err.message : 'Push failed')
+    } finally {
+      setPushInProgress(false)
+    }
+  }
+
   function isSchedulerStale(status: OrchestratorStatus): boolean {
     if (typeof status.scheduler_stale === 'boolean') return status.scheduler_stale
     return status.status === 'running'
@@ -3331,7 +3396,20 @@ export default function App() {
 
   useEffect(() => {
     void reloadAll()
+    void fetchGitStatus()
   }, [projectDir])
+
+  useEffect(() => {
+    if (!pushPopoverOpen) return
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target && !target.closest('.git-push-wrap')) {
+        setPushPopoverOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [pushPopoverOpen])
 
   useEffect(() => {
     let stopped = false
@@ -3365,7 +3443,13 @@ export default function App() {
       }
       const data = payload as Record<string, unknown>
       const channel = String(data.channel || '').trim()
-      if (!channel || channel === 'system') {
+      if (!channel) {
+        return
+      }
+      if (channel === 'system') {
+        if (String(data.event_type || '') === 'git.pushed') {
+          void fetchGitStatus()
+        }
         return
       }
       const eventProjectId = String(data.project_id || '').trim()
@@ -7293,6 +7377,103 @@ export default function App() {
             ))}
             <option value={ADD_REPO_VALUE}>Add repo...</option>
           </select>
+          {gitStatus ? (
+            <div className="git-status-bar">
+              <span className="git-branch-label" title={gitStatus.branch}>
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="5" cy="4" r="2" /><circle cx="5" cy="12" r="2" /><circle cx="12" cy="6" r="2" /><path d="M5 6v4M10.2 6.8C9 8 7 8 5 8" /></svg>
+                {gitStatus.branch}
+              </span>
+              {gitStatus.ahead_count > 0 && (
+                <span className="git-ahead-badge" title={`${gitStatus.ahead_count} commit${gitStatus.ahead_count !== 1 ? 's' : ''} ahead of remote`}>
+                  {gitStatus.ahead_count} ahead
+                </span>
+              )}
+              {gitStatus.behind_count > 0 && (
+                <span className="git-behind-badge" title={`${gitStatus.behind_count} commit${gitStatus.behind_count !== 1 ? 's' : ''} behind remote`}>
+                  {gitStatus.behind_count} behind
+                </span>
+              )}
+              <div className="git-push-wrap">
+                <button
+                  className="topbar-icon-btn git-push-btn"
+                  disabled={pushInProgress || (gitStatus.ahead_count === 0 && !!gitStatus.remote_branch)}
+                  onClick={() => setPushPopoverOpen((v) => !v)}
+                  title={gitStatus.ahead_count === 0 && gitStatus.remote_branch ? 'Nothing to push' : 'Push to remote'}
+                  aria-label="Push to remote"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M8 12V3" /><path d="M4 7l4-4 4 4" /><path d="M3 14h10" /></svg>
+                  {pushInProgress && <span className="git-push-spinner" />}
+                </button>
+                {pushPopoverOpen && (
+                  <div className="push-popover">
+                    <div className="push-popover-header">Push commits</div>
+                    {gitStatus.ahead_count > 0 && gitStatus.commits.length > 0 && (
+                      <div className="push-commit-list">
+                        {gitStatus.commits.slice(0, 5).map((c) => (
+                          <div key={c.sha} className="push-commit-item" title={c.sha}>
+                            <code>{c.sha.slice(0, 7)}</code> {c.message}
+                          </div>
+                        ))}
+                        {gitStatus.commits.length > 5 && (
+                          <div className="push-commit-item push-commit-more">...and {gitStatus.commits.length - 5} more</div>
+                        )}
+                      </div>
+                    )}
+                    {gitStatus.remote_branch ? (
+                      <button
+                        className="push-option-btn"
+                        disabled={pushInProgress || gitStatus.ahead_count === 0}
+                        onClick={() => void handleGitPush()}
+                      >
+                        Push to {gitStatus.remote_branch}
+                      </button>
+                    ) : (
+                      <button
+                        className="push-option-btn"
+                        disabled={pushInProgress}
+                        onClick={() => void handleGitPush()}
+                      >
+                        Push to origin/{gitStatus.branch}
+                      </button>
+                    )}
+                    <div className="push-popover-divider" />
+                    <div className="push-new-branch-section">
+                      <label className="push-new-branch-label">Push to new branch</label>
+                      <div className="push-new-branch-row">
+                        <input
+                          className="push-branch-input"
+                          type="text"
+                          placeholder="branch-name"
+                          value={pushTargetBranch}
+                          onChange={(e) => setPushTargetBranch(e.target.value)}
+                          disabled={pushInProgress}
+                        />
+                        <button
+                          className="push-auto-btn"
+                          disabled={pushInProgress}
+                          onClick={() => void handleGitPush(undefined, true)}
+                          title="Auto-generate branch name"
+                        >
+                          Auto
+                        </button>
+                      </div>
+                      {pushTargetBranch.trim() && (
+                        <button
+                          className="push-option-btn"
+                          disabled={pushInProgress}
+                          onClick={() => void handleGitPush(pushTargetBranch.trim())}
+                        >
+                          Push to origin/{pushTargetBranch.trim()}
+                        </button>
+                      )}
+                    </div>
+                    {pushError && <div className="push-error">{pushError}</div>}
+                  </div>
+                )}
+              </div>
+              {pushMessage && <span className="git-push-message">{pushMessage}</span>}
+            </div>
+          ) : null}
           <button className="topbar-icon-btn" onClick={() => void refreshWithSchedulerRepair()} disabled={loading} title="Refresh" aria-label="Refresh">
             <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M1.5 2v4.5H6" /><path d="M1.8 6.5A6.5 6.5 0 1 1 2.5 10" /></svg>
           </button>
