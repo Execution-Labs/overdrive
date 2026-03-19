@@ -2171,7 +2171,7 @@ export default function App() {
     const fallback = inferProjectId(projectDir)
     setActiveProjectId(fallback)
     try {
-      const root = await requestJson<RootSnapshot>(buildApiUrl('/', projectDir))
+      const root = await requestJson<RootSnapshot>(buildApiUrl('/readyz', projectDir))
       const resolved = String(root.project_id || '').trim()
       if (resolved) {
         setActiveProjectId(resolved)
