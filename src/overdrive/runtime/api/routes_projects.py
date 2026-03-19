@@ -84,6 +84,29 @@ def register_project_routes(router: APIRouter, deps: RouteDeps) -> None:
         pinned.append({"id": project_id, "path": str(path), "pinned_at": now_iso()})
         cfg["pinned_projects"] = pinned
         container.config.save(cfg)
+
+        # Propagate current project's worker preferences to the newly pinned
+        # project so the default provider doesn't reset to "codex".
+        current_workers = cfg.get("workers") or {}
+        if current_workers.get("default"):
+            new_container = deps.resolve_container(str(path))
+            new_cfg = new_container.config.load()
+            new_workers = new_cfg.get("workers") or {}
+            if not new_workers.get("default"):
+                seed_workers = dict(new_workers)
+                seed_workers["default"] = current_workers["default"]
+                if current_workers.get("default_model"):
+                    seed_workers.setdefault("default_model", current_workers["default_model"])
+                current_providers = current_workers.get("providers") or {}
+                if current_providers:
+                    existing_providers = dict(seed_workers.get("providers") or {})
+                    for name, spec in current_providers.items():
+                        if name not in existing_providers:
+                            existing_providers[name] = spec
+                    seed_workers["providers"] = existing_providers
+                new_cfg["workers"] = seed_workers
+                new_container.config.save(new_cfg)
+
         return {"project": {"id": project_id, "path": str(path)}}
 
     @router.delete("/projects/pinned/{project_id}")
