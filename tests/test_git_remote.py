@@ -27,7 +27,7 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
 
 def _init_repo(path: Path) -> None:
     """Create an initialised git repo with one commit."""
-    _git(["init"], cwd=path)
+    _git(["init", "-b", "main"], cwd=path)
     _git(["config", "user.email", "test@test.com"], cwd=path)
     _git(["config", "user.name", "Test"], cwd=path)
     (path / "README.md").write_text("init\n")
