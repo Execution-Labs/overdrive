@@ -789,6 +789,78 @@ def test_project_pin_requires_git_unless_override(tmp_path: Path) -> None:
         assert len(listing) == 1
 
 
+def test_pin_project_propagates_worker_default(tmp_path: Path) -> None:
+    """Pinning a new project seeds it with the current project's worker preferences."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    new_repo = tmp_path / "new_repo"
+    new_repo.mkdir()
+    (new_repo / ".git").mkdir()
+
+    with TestClient(app) as client:
+        # Set current project's worker config to "claude"
+        settings_resp = client.patch(
+            "/api/settings",
+            json={"workers": {"default": "claude", "default_model": "opus", "providers": {"claude": {"type": "claude"}}}},
+        )
+        assert settings_resp.status_code == 200
+
+        # Pin the new repo
+        pin = client.post("/api/projects/pinned", json={"path": str(new_repo)})
+        assert pin.status_code == 200
+
+        # Read the new project's config to verify propagation
+        from overdrive.runtime.storage.container import Container
+        new_container = Container(new_repo)
+        new_cfg = new_container.config.load()
+        new_workers = new_cfg.get("workers") or {}
+        assert new_workers.get("default") == "claude"
+        assert new_workers.get("default_model") == "opus"
+        assert "claude" in (new_workers.get("providers") or {})
+
+
+def test_pin_project_does_not_overwrite_existing_worker_default(tmp_path: Path) -> None:
+    """Pinning a project that already has a worker default does not overwrite it."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    new_repo = tmp_path / "existing_repo"
+    new_repo.mkdir()
+    (new_repo / ".git").mkdir()
+
+    # Pre-configure the new repo with its own worker preference
+    from overdrive.runtime.storage.container import Container
+    pre_container = Container(new_repo)
+    pre_cfg = pre_container.config.load()
+    pre_cfg["workers"] = {"default": "ollama"}
+    pre_container.config.save(pre_cfg)
+
+    with TestClient(app) as client:
+        # Set current project's worker config to "claude"
+        client.patch(
+            "/api/settings",
+            json={"workers": {"default": "claude", "providers": {"claude": {"type": "claude"}}}},
+        )
+
+        # Pin the repo that already has its own config
+        pin = client.post("/api/projects/pinned", json={"path": str(new_repo)})
+        assert pin.status_code == 200
+
+        # Verify existing preference was preserved
+        post_container = Container(new_repo)
+        post_cfg = post_container.config.load()
+        assert post_cfg.get("workers", {}).get("default") == "ollama"
+
+
+def test_pin_project_no_crash_without_worker_config(tmp_path: Path) -> None:
+    """Pinning a project when current project has no worker config does not crash."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    new_repo = tmp_path / "noconfig_repo"
+    new_repo.mkdir()
+    (new_repo / ".git").mkdir()
+
+    with TestClient(app) as client:
+        pin = client.post("/api/projects/pinned", json={"path": str(new_repo)})
+        assert pin.status_code == 200
+
+
 def test_import_preview_commit_creates_dependency_chain(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=_PrdImportWorkerAdapter())
     with TestClient(app) as client:
