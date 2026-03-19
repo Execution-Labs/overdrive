@@ -3412,6 +3412,18 @@ export default function App() {
   }, [pushPopoverOpen])
 
   useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target && !target.closest('.board-more-menu')) {
+        const details = document.querySelector('.board-more-menu') as HTMLDetailsElement | null
+        if (details?.open) details.open = false
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  useEffect(() => {
     let stopped = false
     let socket: WebSocket | null = null
     let reconnectTimer: number | null = null
@@ -6196,6 +6208,101 @@ export default function App() {
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><line x1="2" y1="4" x2="14" y2="4" /><line x1="2" y1="8" x2="14" y2="8" /><line x1="2" y1="12" x2="14" y2="12" /></svg>
           </label>
           <div className="board-toolbar-spacer" />
+          {gitStatus && (
+            <div className="git-status-bar git-push-wrap">
+              <button className="git-branch-label" title={gitStatus.branch} onClick={() => setPushPopoverOpen((v) => !v)}>
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="5" cy="4" r="2" /><circle cx="5" cy="12" r="2" /><circle cx="12" cy="6" r="2" /><path d="M5 6v4M10.2 6.8C9 8 7 8 5 8" /></svg>
+                {gitStatus.branch}
+              </button>
+              {gitStatus.ahead_count > 0 && (
+                <span className="git-ahead-badge" title={`${gitStatus.ahead_count} commit${gitStatus.ahead_count !== 1 ? 's' : ''} ahead of remote`}>
+                  {gitStatus.ahead_count} ahead
+                </span>
+              )}
+              {gitStatus.behind_count > 0 && (
+                <span className="git-behind-badge" title={`${gitStatus.behind_count} commit${gitStatus.behind_count !== 1 ? 's' : ''} behind remote`}>
+                  {gitStatus.behind_count} behind
+                </span>
+              )}
+              <button
+                className="board-icon-btn git-push-btn"
+                disabled={pushInProgress || (gitStatus.ahead_count === 0 && !!gitStatus.remote_branch)}
+                onClick={() => setPushPopoverOpen((v) => !v)}
+                title={gitStatus.ahead_count === 0 && gitStatus.remote_branch ? 'Nothing to push' : 'Push to remote'}
+                aria-label="Push to remote"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M8 12V3" /><path d="M4 7l4-4 4 4" /><path d="M3 14h10" /></svg>
+                {pushInProgress && <span className="git-push-spinner" />}
+              </button>
+              {pushPopoverOpen && (
+                <div className="push-popover">
+                  <div className="push-popover-header">{gitStatus.branch}</div>
+                    {gitStatus.ahead_count > 0 && gitStatus.commits.length > 0 && (
+                      <div className="push-commit-list">
+                        {gitStatus.commits.slice(0, 5).map((c) => (
+                          <div key={c.sha} className="push-commit-item" title={c.sha}>
+                            <code>{c.sha.slice(0, 7)}</code> {c.message}
+                          </div>
+                        ))}
+                        {gitStatus.commits.length > 5 && (
+                          <div className="push-commit-item push-commit-more">...and {gitStatus.commits.length - 5} more</div>
+                        )}
+                      </div>
+                    )}
+                    {gitStatus.remote_branch ? (
+                      <button
+                        className="push-option-btn"
+                        disabled={pushInProgress || gitStatus.ahead_count === 0}
+                        onClick={() => void handleGitPush()}
+                      >
+                        Push to {gitStatus.remote_branch}
+                      </button>
+                    ) : (
+                      <button
+                        className="push-option-btn"
+                        disabled={pushInProgress}
+                        onClick={() => void handleGitPush()}
+                      >
+                        Push to origin/{gitStatus.branch}
+                      </button>
+                    )}
+                    <div className="push-popover-divider" />
+                    <div className="push-new-branch-section">
+                      <label className="push-new-branch-label">Push to new branch</label>
+                      <div className="push-new-branch-row">
+                        <input
+                          className="push-branch-input"
+                          type="text"
+                          placeholder="branch-name"
+                          value={pushTargetBranch}
+                          onChange={(e) => setPushTargetBranch(e.target.value)}
+                          disabled={pushInProgress}
+                        />
+                        <button
+                          className="push-auto-btn"
+                          disabled={pushInProgress}
+                          onClick={() => void handleGitPush(undefined, true)}
+                          title="Auto-generate branch name"
+                        >
+                          Auto
+                        </button>
+                      </div>
+                      {pushTargetBranch.trim() && (
+                        <button
+                          className="push-option-btn"
+                          disabled={pushInProgress}
+                          onClick={() => void handleGitPush(pushTargetBranch.trim())}
+                        >
+                          Push to origin/{pushTargetBranch.trim()}
+                        </button>
+                      )}
+                    </div>
+                    {pushError && <div className="push-error">{pushError}</div>}
+                </div>
+              )}
+              {pushMessage && <span className="git-push-message">{pushMessage}</span>}
+            </div>
+          )}
           <details className="board-more-menu">
             <summary className="board-more-btn" title="More actions">···</summary>
             <div className="board-more-dropdown">
@@ -7377,103 +7484,6 @@ export default function App() {
             ))}
             <option value={ADD_REPO_VALUE}>Add repo...</option>
           </select>
-          {gitStatus ? (
-            <div className="git-status-bar">
-              <span className="git-branch-label" title={gitStatus.branch}>
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="5" cy="4" r="2" /><circle cx="5" cy="12" r="2" /><circle cx="12" cy="6" r="2" /><path d="M5 6v4M10.2 6.8C9 8 7 8 5 8" /></svg>
-                {gitStatus.branch}
-              </span>
-              {gitStatus.ahead_count > 0 && (
-                <span className="git-ahead-badge" title={`${gitStatus.ahead_count} commit${gitStatus.ahead_count !== 1 ? 's' : ''} ahead of remote`}>
-                  {gitStatus.ahead_count} ahead
-                </span>
-              )}
-              {gitStatus.behind_count > 0 && (
-                <span className="git-behind-badge" title={`${gitStatus.behind_count} commit${gitStatus.behind_count !== 1 ? 's' : ''} behind remote`}>
-                  {gitStatus.behind_count} behind
-                </span>
-              )}
-              <div className="git-push-wrap">
-                <button
-                  className="topbar-icon-btn git-push-btn"
-                  disabled={pushInProgress || (gitStatus.ahead_count === 0 && !!gitStatus.remote_branch)}
-                  onClick={() => setPushPopoverOpen((v) => !v)}
-                  title={gitStatus.ahead_count === 0 && gitStatus.remote_branch ? 'Nothing to push' : 'Push to remote'}
-                  aria-label="Push to remote"
-                >
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M8 12V3" /><path d="M4 7l4-4 4 4" /><path d="M3 14h10" /></svg>
-                  {pushInProgress && <span className="git-push-spinner" />}
-                </button>
-                {pushPopoverOpen && (
-                  <div className="push-popover">
-                    <div className="push-popover-header">Push commits</div>
-                    {gitStatus.ahead_count > 0 && gitStatus.commits.length > 0 && (
-                      <div className="push-commit-list">
-                        {gitStatus.commits.slice(0, 5).map((c) => (
-                          <div key={c.sha} className="push-commit-item" title={c.sha}>
-                            <code>{c.sha.slice(0, 7)}</code> {c.message}
-                          </div>
-                        ))}
-                        {gitStatus.commits.length > 5 && (
-                          <div className="push-commit-item push-commit-more">...and {gitStatus.commits.length - 5} more</div>
-                        )}
-                      </div>
-                    )}
-                    {gitStatus.remote_branch ? (
-                      <button
-                        className="push-option-btn"
-                        disabled={pushInProgress || gitStatus.ahead_count === 0}
-                        onClick={() => void handleGitPush()}
-                      >
-                        Push to {gitStatus.remote_branch}
-                      </button>
-                    ) : (
-                      <button
-                        className="push-option-btn"
-                        disabled={pushInProgress}
-                        onClick={() => void handleGitPush()}
-                      >
-                        Push to origin/{gitStatus.branch}
-                      </button>
-                    )}
-                    <div className="push-popover-divider" />
-                    <div className="push-new-branch-section">
-                      <label className="push-new-branch-label">Push to new branch</label>
-                      <div className="push-new-branch-row">
-                        <input
-                          className="push-branch-input"
-                          type="text"
-                          placeholder="branch-name"
-                          value={pushTargetBranch}
-                          onChange={(e) => setPushTargetBranch(e.target.value)}
-                          disabled={pushInProgress}
-                        />
-                        <button
-                          className="push-auto-btn"
-                          disabled={pushInProgress}
-                          onClick={() => void handleGitPush(undefined, true)}
-                          title="Auto-generate branch name"
-                        >
-                          Auto
-                        </button>
-                      </div>
-                      {pushTargetBranch.trim() && (
-                        <button
-                          className="push-option-btn"
-                          disabled={pushInProgress}
-                          onClick={() => void handleGitPush(pushTargetBranch.trim())}
-                        >
-                          Push to origin/{pushTargetBranch.trim()}
-                        </button>
-                      )}
-                    </div>
-                    {pushError && <div className="push-error">{pushError}</div>}
-                  </div>
-                )}
-              </div>
-              {pushMessage && <span className="git-push-message">{pushMessage}</span>}
-            </div>
-          ) : null}
           <button className="topbar-icon-btn" onClick={() => void refreshWithSchedulerRepair()} disabled={loading} title="Refresh" aria-label="Refresh">
             <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M1.5 2v4.5H6" /><path d="M1.8 6.5A6.5 6.5 0 1 1 2.5 10" /></svg>
           </button>

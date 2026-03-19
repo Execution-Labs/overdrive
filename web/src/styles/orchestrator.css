@@ -212,6 +212,7 @@ a:focus-visible {
   align-items: center;
   gap: 0.5rem;
   margin-bottom: 0.5rem;
+  min-width: 0;
 }
 
 .board-icon-btn {
@@ -281,12 +282,16 @@ a:focus-visible {
   width: 1.75rem;
   height: 1.75rem;
   border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-primary);
   cursor: pointer;
   color: var(--color-text-muted);
   font-size: 1rem;
   font-weight: 700;
   letter-spacing: 0.1em;
-  line-height: 1;
+  padding-left: 0.1em;
+  line-height: 0;
+  padding-bottom: 0.2rem;
   list-style: none;
   user-select: none;
 }
@@ -2126,6 +2131,24 @@ textarea {
     padding: 1rem 0.85rem 1.2rem;
   }
 
+  .git-branch-label {
+    font-size: 0;
+    gap: 0;
+    max-width: none;
+  }
+
+  .git-branch-label svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .git-ahead-badge,
+  .git-behind-badge,
+  .git-push-message {
+    display: none;
+  }
+
+
   .topbar {
     flex-direction: column;
     align-items: stretch;
@@ -3745,6 +3768,8 @@ textarea {
   align-items: center;
   gap: 0.4rem;
   font-size: 0.8rem;
+  min-width: 0;
+  position: relative;
 }
 
 .git-branch-label {
@@ -3754,10 +3779,14 @@ textarea {
   color: var(--color-text-secondary);
   font-family: var(--font-mono, monospace);
   font-size: 0.78rem;
-  max-width: 180px;
+  max-width: clamp(0px, calc(100vw - 320px), 180px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
 }
 
 .git-ahead-badge {
@@ -3829,6 +3858,17 @@ textarea {
   border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
   padding: 0.6rem;
+}
+
+@media (max-width: 920px) {
+  .push-popover {
+    right: auto;
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 0;
+    width: calc(100vw - 1.7rem);
+    max-width: 340px;
+  }
 }
 
 .push-popover-header {
