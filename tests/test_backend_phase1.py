@@ -448,6 +448,32 @@ def test_manual_reconcile_repairs_invalid_queued_gate_state(tmp_path: Path) -> N
         assert updated.pending_gate is None
 
 
+def test_reconcile_does_not_block_pipeline_classify_gate(tmp_path: Path) -> None:
+    """pipeline_classify is a valid transient gate on queued tasks — reconciler must not block it."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        pause = client.post("/api/orchestrator/control", json={"action": "pause"})
+        assert pause.status_code == 200
+        # Create a regular task (not auto) to avoid triggering background classification
+        created = client.post("/api/tasks", json={"title": "Test task", "status": "queued"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+
+        for gate in ("pipeline_classify", "select_pipeline"):
+            task = container.tasks.get(created["id"])
+            assert task is not None
+            task.status = "queued"
+            task.pending_gate = gate
+            container.tasks.upsert(task)
+
+            resp = client.post("/api/orchestrator/reconcile")
+            assert resp.status_code == 200
+
+            updated = container.tasks.get(created["id"])
+            assert updated is not None
+            assert updated.status == "queued", f"gate={gate} status={updated.status} error={updated.error}"
+            assert updated.pending_gate == gate
+
+
 def test_classify_pipeline_endpoint_high_confidence(tmp_path: Path) -> None:
     app = create_app(
         project_dir=tmp_path,
