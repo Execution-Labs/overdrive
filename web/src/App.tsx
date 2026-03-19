@@ -7346,7 +7346,7 @@ export default function App() {
                 <h2>{selectedTaskView.title}</h2>
                 <span className={`status-pill status-pill-prominent ${statusPillClass(selectedTaskStatusDisplay.classStatus)}`}>{selectedTaskStatusDisplay.label}</span>
               </div>
-              {(selectedTaskView.pipeline_template || []).length > 0 ? (() => {
+              {(selectedTaskView.pipeline_template || []).length > 0 && selectedTaskView.pending_gate !== 'pipeline_classify' && selectedTaskView.pending_gate !== 'select_pipeline' ? (() => {
                 const pipelineSteps = selectedTaskView.pipeline_template!
                 const currentStep = selectedTaskView.current_step || null
                 const pipelinePhase = String(selectedTaskView.metadata?.pipeline_phase || '') || currentStep
@@ -7392,10 +7392,10 @@ export default function App() {
                       disabled={isTaskActionBusy || hasUnresolvedBlockers}
                     >
                       <option value="">From beginning</option>
-                      {(selectedTaskView.pipeline_template || []).map((step) => (
+                      {selectedTaskView.pending_gate !== 'pipeline_classify' && selectedTaskView.pending_gate !== 'select_pipeline' && (selectedTaskView.pipeline_template || []).map((step) => (
                         <option key={step} value={step}>{humanizeLabel(step)}</option>
                       ))}
-                      {selectedTaskView.current_step && !(selectedTaskView.pipeline_template || []).includes(selectedTaskView.current_step) && (
+                      {selectedTaskView.pending_gate !== 'pipeline_classify' && selectedTaskView.pending_gate !== 'select_pipeline' && selectedTaskView.current_step && !(selectedTaskView.pipeline_template || []).includes(selectedTaskView.current_step) && (
                         <option value={selectedTaskView.current_step}>{humanizeLabel(selectedTaskView.current_step)}</option>
                       )}
                     </select>
