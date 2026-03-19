@@ -370,6 +370,18 @@ def detect_project_languages(project_dir: Path) -> list[str]:
     return langs
 
 
+def _check_binary_available(cmd: str, project_dir: Path) -> bool:
+    """Check if the first token of a command is available on PATH or in project venv."""
+    first_token = cmd.split()[0] if cmd.strip() else ""
+    if not first_token:
+        return False
+    # Resolve relative paths against project dir
+    candidate = project_dir / first_token
+    if candidate.is_file():
+        return True
+    return shutil.which(first_token) is not None
+
+
 def get_auto_detected_defaults(
     project_dir: Path,
 ) -> dict[str, Any]:
@@ -379,7 +391,8 @@ def get_auto_detected_defaults(
     show users what the worker will use when no overrides are configured.
 
     Returns:
-        Dict with ``languages``, ``commands``, ``venv``, keys.
+        Dict with ``languages``, ``commands``, ``venv``,
+        ``binary_warnings`` keys.
     """
     langs = detect_project_languages(project_dir)
     venv_info = detect_python_venv(project_dir)
@@ -402,6 +415,16 @@ def get_auto_detected_defaults(
         if cmds:
             commands[lang] = cmds
 
+    # Check binary availability for each detected command
+    binary_warnings: dict[str, list[str]] = {}
+    for lang, cmds in commands.items():
+        missing: list[str] = []
+        for step, cmd in cmds.items():
+            if not _check_binary_available(cmd, project_dir):
+                missing.append(step)
+        if missing:
+            binary_warnings[lang] = missing
+
     venv_payload: dict[str, str] | None = None
     if venv_info is not None:
         venv_payload = {
@@ -413,6 +436,7 @@ def get_auto_detected_defaults(
         "languages": langs,
         "commands": commands,
         "venv": venv_payload,
+        "binary_warnings": binary_warnings,
     }
 
 
@@ -2155,6 +2179,40 @@ class LiveWorkerAdapter:
                             cmds = _filter_npm_commands_by_scripts(cmds, project_dir)
                         if cmds:
                             project_commands[lang] = cmds
+            if not project_commands:
+                project_commands = None
+        # Remove disabled auto-detected commands (user overrides are never filtered)
+        disabled_commands: list[str] = list((cfg.get("project") or {}).get("disabled_commands") or [])
+        if disabled_commands and project_commands:
+            disabled_set = {s.strip().lower() for s in disabled_commands if isinstance(s, str)}
+            user_configured_langs = set(raw_commands.keys())
+            for lang in list(project_commands.keys()):
+                if lang in user_configured_langs:
+                    continue  # user overrides are never filtered
+                filtered = {
+                    step: cmd for step, cmd in project_commands[lang].items()
+                    if f"{lang}.{step}" not in disabled_set
+                }
+                if filtered:
+                    project_commands[lang] = filtered
+                else:
+                    del project_commands[lang]
+            if not project_commands:
+                project_commands = None
+        # Drop auto-detected commands whose binary is not available
+        if project_commands:
+            user_configured_langs = set(raw_commands.keys())
+            for lang in list(project_commands.keys()):
+                if lang in user_configured_langs:
+                    continue  # user overrides are never filtered
+                filtered = {
+                    step_name: cmd for step_name, cmd in project_commands[lang].items()
+                    if _check_binary_available(cmd, project_dir)
+                }
+                if filtered:
+                    project_commands[lang] = filtered
+                else:
+                    del project_commands[lang]
             if not project_commands:
                 project_commands = None
         # Resolve relative executable paths against the *original* project dir

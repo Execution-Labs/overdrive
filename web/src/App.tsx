@@ -2058,7 +2058,9 @@ export default function App() {
     languages: string[]
     commands: Record<string, Record<string, string>>
     venv: { path: string; source: string } | null
+    binary_warnings: Record<string, string[]>
   } | null>(null)
+  const [disabledCommands, setDisabledCommands] = useState<Set<string>>(new Set())
   const [resolvedEnvVars, setResolvedEnvVars] = useState<{ key: string; source: string; has_value: boolean }[]>([])
   const settingsLoadedRef = useRef(false)
   const shouldPrefillTaskProjectCommandsRef = useRef(false)
@@ -2321,6 +2323,12 @@ export default function App() {
     setSettingsProjectCommands(
       Object.keys(projectCommands).length > 0 ? serializeProjectCommandsYaml(projectCommands) : ''
     )
+    const rawDisabled = (payload.project as Record<string, unknown>).disabled_commands
+    if (Array.isArray(rawDisabled)) {
+      setDisabledCommands(new Set(rawDisabled.filter((v): v is string => typeof v === 'string')))
+    } else {
+      setDisabledCommands(new Set())
+    }
     const promptOverrides = payload.project.prompt_overrides || {}
     const promptInjections = payload.project.prompt_injections || {}
     const promptDefaults = payload.project.prompt_defaults || {}
@@ -2361,6 +2369,8 @@ export default function App() {
           commands: (d.commands && typeof d.commands === 'object' && !Array.isArray(d.commands))
             ? d.commands as Record<string, Record<string, string>> : {},
           venv: (d.venv && typeof d.venv === 'object') ? d.venv as { path: string; source: string } : null,
+          binary_warnings: (d.binary_warnings && typeof d.binary_warnings === 'object' && !Array.isArray(d.binary_warnings))
+            ? d.binary_warnings as Record<string, string[]> : {},
         })
       } else {
         setAutoDetectedDefaults(null)
@@ -4363,6 +4373,26 @@ export default function App() {
       setSettingsError(`Failed to save settings (${detail})`)
     } finally {
       setSettingsSaving(false)
+    }
+  }
+
+  async function toggleDisabledCommand(key: string): Promise<void> {
+    const next = new Set(disabledCommands)
+    if (next.has(key)) {
+      next.delete(key)
+    } else {
+      next.add(key)
+    }
+    setDisabledCommands(next)
+    try {
+      await requestJson(buildApiUrl('/api/settings', projectDir), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: { disabled_commands: [...next] } }),
+      })
+    } catch {
+      // revert on failure
+      setDisabledCommands(disabledCommands)
     }
   }
 
@@ -6787,7 +6817,7 @@ export default function App() {
               <article className="settings-card">
                 <h3>Auto-detected Defaults</h3>
                 <p className="field-label" style={{ marginBottom: '0.75rem' }}>
-                  What workers will use when no overrides are configured. Override by editing Project Commands above.
+                  What workers will use when no overrides are configured. Toggle individual commands or override by editing Project Commands above.
                 </p>
 
                 {autoDetectedDefaults.languages.length > 0 && (
@@ -6816,12 +6846,28 @@ export default function App() {
                           <span style={{ fontSize: '0.85em', fontWeight: 600 }}>{lang}</span>
                           <table className="auto-detected-table">
                             <tbody>
-                              {Object.entries(cmds).map(([step, cmd]) => (
-                                <tr key={step}>
-                                  <td className="auto-detected-step">{step}</td>
-                                  <td><code style={{ fontSize: '0.85em' }}>{cmd}</code></td>
-                                </tr>
-                              ))}
+                              {Object.entries(cmds).map(([step, cmd]) => {
+                                const key = `${lang}.${step}`
+                                const isDisabled = disabledCommands.has(key)
+                                const hasBinaryWarning = (autoDetectedDefaults.binary_warnings[lang] || []).includes(step)
+                                return (
+                                  <tr key={step} style={isDisabled ? { opacity: 0.5 } : undefined}>
+                                    <td className="auto-detected-step" style={{ whiteSpace: 'nowrap' }}>
+                                      <label className="toggle-switch toggle-switch-sm" style={{ marginRight: '0.4rem', verticalAlign: 'middle' }}>
+                                        <input type="checkbox" checked={!isDisabled} onChange={() => void toggleDisabledCommand(key)} />
+                                        <span className="toggle-slider" />
+                                      </label>
+                                      {step}
+                                    </td>
+                                    <td>
+                                      <code style={{ fontSize: '0.85em' }}>{cmd}</code>
+                                      {hasBinaryWarning && !isDisabled && (
+                                        <span className="binary-warning" title="Binary not found on PATH">not found</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                )
+                              })}
                             </tbody>
                           </table>
                         </div>

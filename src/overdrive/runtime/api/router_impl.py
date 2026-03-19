@@ -303,6 +303,7 @@ class LanguageCommandsRequest(BaseModel):
 class ProjectSettingsRequest(BaseModel):
     """Patch payload for project-level lint/test/typecheck command overrides."""
     commands: Optional[dict[str, LanguageCommandsRequest]] = None
+    disabled_commands: Optional[list[str]] = None
     prompt_overrides: Optional[dict[str, str]] = None
     prompt_injections: Optional[dict[str, str]] = None
 
@@ -1121,6 +1122,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
         },
         "project": {
             "commands": dict(project_cfg.get("commands") or {}),
+            "disabled_commands": list(project_cfg.get("disabled_commands") or []),
             "prompt_overrides": prompt_overrides,
             "prompt_injections": prompt_injections,
             "prompt_defaults": prompt_defaults,
