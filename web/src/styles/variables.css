@@ -210,14 +210,21 @@
   /* Adjusted primary scale for dark backgrounds */
   --color-primary-50: rgba(74, 183, 127, 0.10);
   --color-primary-100: rgba(74, 183, 127, 0.16);
+  --color-primary-200: rgba(74, 183, 127, 0.28);
+  --color-primary-400: #6dd89e;
+  --color-primary-600: #5cc98e;
+  --color-primary-700: #4ab77f;
 
   /* Adjusted semantic color light tints for dark backgrounds */
   --color-success-50: rgba(34, 197, 94, 0.10);
   --color-success-100: rgba(34, 197, 94, 0.16);
+  --color-success-700: #4ade80;
   --color-error-50: rgba(239, 68, 68, 0.10);
   --color-error-100: rgba(239, 68, 68, 0.16);
+  --color-error-600: #f87171;
   --color-warning-50: rgba(245, 158, 11, 0.10);
   --color-warning-100: rgba(245, 158, 11, 0.16);
+  --color-warning-700: #fbbf24;
   --color-info-50: rgba(139, 92, 246, 0.10);
   --color-info-100: rgba(139, 92, 246, 0.16);
 
@@ -260,13 +267,20 @@
 
     --color-primary-50: rgba(74, 183, 127, 0.10);
     --color-primary-100: rgba(74, 183, 127, 0.16);
+    --color-primary-200: rgba(74, 183, 127, 0.28);
+    --color-primary-400: #6dd89e;
+    --color-primary-600: #5cc98e;
+    --color-primary-700: #4ab77f;
 
     --color-success-50: rgba(34, 197, 94, 0.10);
     --color-success-100: rgba(34, 197, 94, 0.16);
+    --color-success-700: #4ade80;
     --color-error-50: rgba(239, 68, 68, 0.10);
     --color-error-100: rgba(239, 68, 68, 0.16);
+    --color-error-600: #f87171;
     --color-warning-50: rgba(245, 158, 11, 0.10);
     --color-warning-100: rgba(245, 158, 11, 0.16);
+    --color-warning-700: #fbbf24;
     --color-info-50: rgba(139, 92, 246, 0.10);
     --color-info-100: rgba(139, 92, 246, 0.16);
 

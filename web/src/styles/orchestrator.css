@@ -3949,8 +3949,8 @@ textarea {
   right: 0;
   z-index: 100;
   min-width: 280px;
-  background: var(--color-bg-card, #fff);
-  border: 1px solid var(--color-border, #e2e8f0);
+  background: var(--color-bg-secondary, #fff);
+  border: 1px solid var(--color-border-default, #e2e8f0);
   border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
   padding: 0.6rem;
@@ -3978,7 +3978,7 @@ textarea {
   max-height: 120px;
   overflow-y: auto;
   margin-bottom: 0.4rem;
-  border: 1px solid var(--color-border, #e2e8f0);
+  border: 1px solid var(--color-border-default, #e2e8f0);
   border-radius: 4px;
   padding: 0.3rem;
 }
@@ -4025,7 +4025,7 @@ textarea {
 }
 
 .push-popover-divider {
-  border-top: 1px solid var(--color-border, #e2e8f0);
+  border-top: 1px solid var(--color-border-default, #e2e8f0);
   margin: 0.4rem 0;
 }
 
@@ -4052,7 +4052,7 @@ textarea {
   padding: 0.25rem 0.4rem;
   font-size: 0.78rem;
   font-family: var(--font-mono, monospace);
-  border: 1px solid var(--color-border, #e2e8f0);
+  border: 1px solid var(--color-border-default, #e2e8f0);
   border-radius: 4px;
   background: var(--color-bg-primary, #fff);
   color: var(--color-text-primary);
@@ -4068,14 +4068,14 @@ textarea {
   font-size: 0.72rem;
   font-weight: 500;
   background: var(--color-bg-hover, #f1f5f9);
-  border: 1px solid var(--color-border, #e2e8f0);
+  border: 1px solid var(--color-border-default, #e2e8f0);
   border-radius: 4px;
   cursor: pointer;
   color: var(--color-text-secondary);
 }
 
 .push-auto-btn:hover:not(:disabled) {
-  background: var(--color-bg-active, #e2e8f0);
+  background: var(--color-bg-tertiary, #e2e8f0);
 }
 
 .push-auto-btn:disabled {
@@ -4085,7 +4085,7 @@ textarea {
 
 .push-error {
   font-size: 0.72rem;
-  color: var(--color-danger-600, #dc2626);
+  color: var(--color-error-600, #dc2626);
   margin-top: 0.3rem;
   word-break: break-word;
 }
