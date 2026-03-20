@@ -4083,6 +4083,43 @@ textarea {
   cursor: default;
 }
 
+.push-output-log {
+  margin-top: 0.3rem;
+  max-height: 120px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border-default, #e2e8f0);
+  border-radius: 4px;
+  padding: 0.3rem;
+  background: var(--color-bg-primary, #fff);
+}
+
+.push-output-line {
+  font-size: 0.7rem;
+  font-family: var(--font-mono, monospace);
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.push-cancel-btn {
+  display: block;
+  width: 100%;
+  margin-top: 0.3rem;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 500;
+  background: var(--color-error-50, #fef2f2);
+  color: var(--color-error-600, #dc2626);
+  border: 1px solid var(--color-error-100, #fee2e2);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.push-cancel-btn:hover {
+  background: var(--color-error-100, #fee2e2);
+}
+
 .push-error {
   font-size: 0.72rem;
   color: var(--color-error-600, #dc2626);

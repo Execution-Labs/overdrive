@@ -57,6 +57,7 @@ EXPECTED_API_ROUTE_TABLE: set[tuple[str, str]] = {
     ("POST", "/api/agents/{agent_id}/resume"),
     ("POST", "/api/agents/{agent_id}/terminate"),
     ("POST", "/api/git/push"),
+    ("POST", "/api/git/push/cancel"),
     ("POST", "/api/git/suggest-branch-name"),
     ("POST", "/api/collaboration/comments"),
     ("POST", "/api/collaboration/comments/{comment_id}/resolve"),

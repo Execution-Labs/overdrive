@@ -222,6 +222,7 @@ class OrchestratorSettingsRequest(BaseModel):
     lease_ttl_seconds: int = Field(120, ge=15, le=86400)
     tick_stale_seconds: int = Field(15, ge=5, le=3600)
     tick_failure_threshold: int = Field(5, ge=1, le=1000)
+    auto_fix_push: bool = False
 
 
 class AgentRoutingSettingsRequest(BaseModel):
@@ -1090,6 +1091,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
             "tick_failure_threshold": _coerce_int(
                 orchestrator.get("tick_failure_threshold"), 5, minimum=1, maximum=1000
             ),
+            "auto_fix_push": _coerce_bool(orchestrator.get("auto_fix_push"), False),
         },
         "agent_routing": {
             "default_role": str(routing.get("default_role") or "general"),

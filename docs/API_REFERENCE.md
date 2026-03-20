@@ -583,6 +583,13 @@ Errors:
 
 On success, emits a `git.pushed` WebSocket event on the `system` channel.
 
+### `POST /api/git/push/cancel`
+Cancel a running push operation.
+
+Response:
+- `cancelled` (bool) — whether a push was cancelled
+- `detail` (string | null) — explanation when no push was in progress
+
 ### `POST /api/git/suggest-branch-name`
 Use an LLM worker to suggest a branch name from commits ahead of the remote.
 

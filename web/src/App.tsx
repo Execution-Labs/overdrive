@@ -303,6 +303,7 @@ type SystemSettings = {
   orchestrator: {
     concurrency: number
     auto_deps: boolean
+    auto_fix_push: boolean
     max_review_attempts: number
     max_merge_conflict_attempts: number
     step_timeout_seconds: number
@@ -568,6 +569,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
   orchestrator: {
     concurrency: 2,
     auto_deps: true,
+    auto_fix_push: false,
     max_review_attempts: 10,
     max_merge_conflict_attempts: 3,
     step_timeout_seconds: 0,
@@ -1166,6 +1168,7 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
     orchestrator: {
       concurrency: Number.isFinite(maybeConcurrency) ? Math.max(1, Math.floor(maybeConcurrency)) : DEFAULT_SETTINGS.orchestrator.concurrency,
       auto_deps: typeof orchestrator.auto_deps === 'boolean' ? orchestrator.auto_deps : DEFAULT_SETTINGS.orchestrator.auto_deps,
+      auto_fix_push: typeof orchestrator.auto_fix_push === 'boolean' ? orchestrator.auto_fix_push : DEFAULT_SETTINGS.orchestrator.auto_fix_push,
       max_review_attempts: Number.isFinite(maybeMaxReviewAttempts) ? Math.max(1, Math.floor(maybeMaxReviewAttempts)) : DEFAULT_SETTINGS.orchestrator.max_review_attempts,
       max_merge_conflict_attempts: Number.isFinite(maybeMaxMergeConflictAttempts)
         ? Math.min(10, Math.max(1, Math.floor(maybeMaxMergeConflictAttempts)))
@@ -1781,6 +1784,7 @@ export default function App() {
   const [pushInProgress, setPushInProgress] = useState(false)
   const [pushMessage, setPushMessage] = useState('')
   const [pushError, setPushError] = useState('')
+  const [pushOutputLines, setPushOutputLines] = useState<string[]>([])
   const [autoNameInProgress, setAutoNameInProgress] = useState(false)
 
   const [workOpen, setWorkOpen] = useState(false)
@@ -2037,6 +2041,7 @@ export default function App() {
   }, [settingsSuccess])
   const [settingsConcurrency, setSettingsConcurrency] = useState(String(DEFAULT_SETTINGS.orchestrator.concurrency))
   const [settingsAutoDeps, setSettingsAutoDeps] = useState(DEFAULT_SETTINGS.orchestrator.auto_deps)
+  const [settingsAutoFixPush, setSettingsAutoFixPush] = useState(DEFAULT_SETTINGS.orchestrator.auto_fix_push)
   const [settingsMaxReviewAttempts, setSettingsMaxReviewAttempts] = useState(String(DEFAULT_SETTINGS.orchestrator.max_review_attempts))
   const [settingsMaxMergeConflictAttempts, setSettingsMaxMergeConflictAttempts] = useState(
     String(DEFAULT_SETTINGS.orchestrator.max_merge_conflict_attempts)
@@ -2267,6 +2272,7 @@ export default function App() {
   function applySettings(payload: SystemSettings): void {
     setSettingsConcurrency(String(payload.orchestrator.concurrency))
     setSettingsAutoDeps(payload.orchestrator.auto_deps)
+    setSettingsAutoFixPush(payload.orchestrator.auto_fix_push)
     setSettingsMaxReviewAttempts(String(payload.orchestrator.max_review_attempts))
     setSettingsMaxMergeConflictAttempts(String(payload.orchestrator.max_merge_conflict_attempts))
     setSettingsStepTimeoutSeconds(String(payload.orchestrator.step_timeout_seconds))
@@ -3290,12 +3296,14 @@ export default function App() {
     setPushInProgress(true)
     setPushError('')
     setPushMessage('')
+    setPushOutputLines([])
     try {
       const result = await requestJson<{
         success: boolean
         error: string | null
         remote_branch: string
         pushed_commits: number
+        auto_fix?: boolean
       }>(buildApiUrl('/api/git/push', projectDirRef.current), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3304,6 +3312,11 @@ export default function App() {
           auto_name: autoName || false,
         }),
       })
+      if (result.auto_fix) {
+        // Worker is running in background — keep pushInProgress true.
+        // WebSocket git.pushed / git.push_output events will update the UI.
+        return
+      }
       setPushMessage(
         result.pushed_commits === 0
           ? `Set upstream tracking to ${result.remote_branch}`
@@ -3314,9 +3327,23 @@ export default function App() {
       void fetchGitStatus()
       window.setTimeout(() => setPushMessage(''), 6000)
     } catch (err) {
-      setPushError(err instanceof Error ? err.message : 'Push failed')
+      const msg = err instanceof Error ? err.message : 'Push failed'
+      if (msg !== 'Push cancelled') {
+        setPushError(msg)
+      }
     } finally {
       setPushInProgress(false)
+    }
+  }
+
+  async function handleCancelPush(): Promise<void> {
+    try {
+      await requestJson<{ cancelled: boolean }>(
+        buildApiUrl('/api/git/push/cancel', projectDirRef.current),
+        { method: 'POST' },
+      )
+    } catch {
+      // best-effort
     }
   }
 
@@ -3489,8 +3516,27 @@ export default function App() {
         return
       }
       if (channel === 'system') {
-        if (String(data.event_type || '') === 'git.pushed') {
+        const eventType = String(data.event_type || '')
+        if (eventType === 'git.pushed') {
           void fetchGitStatus()
+          // Auto-fix worker completed — clear in-progress state
+          const payload = data.payload as Record<string, unknown> | undefined
+          if (payload?.auto_fix) {
+            setPushInProgress(false)
+            setPushMessage(String(payload.detail ?? 'Push succeeded (auto-fix)'))
+            setPushPopoverOpen(false)
+            window.setTimeout(() => setPushMessage(''), 6000)
+          }
+        }
+        if (eventType === 'git.push_output') {
+          const payload = data.payload as Record<string, unknown> | undefined
+          const line = String(payload?.line ?? '')
+          setPushOutputLines((prev) => [...prev, line])
+        }
+        if (eventType === 'git.auto_fix_done') {
+          const payload = data.payload as Record<string, unknown> | undefined
+          setPushInProgress(false)
+          setPushError(String(payload?.detail ?? 'Auto-fix failed'))
         }
         return
       }
@@ -4451,6 +4497,7 @@ export default function App() {
         orchestrator: {
           concurrency: Math.max(1, parseNonNegativeInt(settingsConcurrency, DEFAULT_SETTINGS.orchestrator.concurrency)),
           auto_deps: settingsAutoDeps,
+          auto_fix_push: settingsAutoFixPush,
           max_review_attempts: Math.max(1, parseNonNegativeInt(settingsMaxReviewAttempts, DEFAULT_SETTINGS.orchestrator.max_review_attempts)),
           max_merge_conflict_attempts: Math.min(
             10,
@@ -6352,6 +6399,23 @@ export default function App() {
                         </button>
                       )}
                     </div>
+                    {pushInProgress && (
+                      <>
+                        {pushOutputLines.length > 0 && (
+                          <div className="push-output-log" ref={(el) => { if (el) el.scrollTop = el.scrollHeight }}>
+                            {pushOutputLines.map((line, i) => (
+                              <div key={i} className="push-output-line">{line}</div>
+                            ))}
+                          </div>
+                        )}
+                        <button
+                          className="push-cancel-btn"
+                          onClick={() => void handleCancelPush()}
+                        >
+                          Cancel push
+                        </button>
+                      </>
+                    )}
                     {pushError && <div className="push-error">{pushError}</div>}
                 </div>
               )}
@@ -7273,6 +7337,14 @@ export default function App() {
                       onChange={(event) => { setSettingsAutoDeps(event.target.checked); setExecutionFormDirty(true) }}
                     />
                     Auto dependency analysis
+                  </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={settingsAutoFixPush}
+                      onChange={(event) => { setSettingsAutoFixPush(event.target.checked); setExecutionFormDirty(true) }}
+                    />
+                    Auto-fix push errors (use worker to fix pre-push hook failures and retry)
                   </label>
                 </div>
                 <div className="inline-actions" style={{ marginTop: '0.5rem' }}>
