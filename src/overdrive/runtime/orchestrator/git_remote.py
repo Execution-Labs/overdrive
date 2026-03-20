@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ...workers.config import WorkerProviderSpec
 
 logger = logging.getLogger(__name__)
 
@@ -246,3 +254,83 @@ def generate_branch_name(project_dir: Path) -> str:
     safe_base = base.replace("/", "-").replace(" ", "-")
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return f"push/{safe_base}-{ts}"
+
+
+def generate_branch_name_llm(
+    project_dir: Path,
+    commits: list[CommitInfo],
+    worker_spec: WorkerProviderSpec,
+    state_root: Path,
+) -> str:
+    """Use an LLM worker to suggest a branch name from commit messages.
+
+    Args:
+        project_dir: Root of the git repository.
+        commits: List of ahead-of-remote commits.
+        worker_spec: Resolved worker provider specification.
+        state_root: Directory for temporary run artifacts.
+
+    Returns:
+        A branch name like ``push/fix-auth-token-expiry``.
+
+    Raises:
+        ValueError: If the worker fails or returns an unparseable/empty name.
+    """
+    from ...prompts import load as load_prompt
+    from ...workers.run import run_worker
+
+    template = load_prompt("formatters/branch_name.md")
+    commits_text = "\n".join(
+        f"{c.sha[:7]} {c.message}" for c in commits
+    )[:4000]
+    formatted_prompt = template.format(commits=commits_text)
+
+    run_dir = Path(tempfile.mkdtemp(dir=str(state_root)))
+    progress_path = run_dir / "progress.json"
+    try:
+        result = run_worker(
+            spec=worker_spec,
+            prompt=formatted_prompt,
+            project_dir=project_dir,
+            run_dir=run_dir,
+            timeout_seconds=60,
+            heartbeat_seconds=30,
+            heartbeat_grace_seconds=60,
+            progress_path=progress_path,
+        )
+    except Exception as exc:
+        raise ValueError(f"Branch name worker failed: {exc}") from exc
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+    response_text = result.response_text or ""
+
+    # Try JSON parse, then regex fallback
+    branch_name: str | None = None
+    try:
+        parsed = json.loads(response_text)
+        if isinstance(parsed, dict):
+            branch_name = parsed.get("branch_name")
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    if not branch_name:
+        match = re.search(r'\{"branch_name"\s*:\s*"([^"]+)"\}', response_text)
+        if match:
+            branch_name = match.group(1)
+
+    if not branch_name:
+        raise ValueError("Failed to parse branch name from worker response")
+
+    # Sanitize
+    sanitized = branch_name.lower()
+    sanitized = re.sub(r"[\s/]+", "-", sanitized)
+    sanitized = re.sub(r"[^a-z0-9._-]", "", sanitized)
+    sanitized = re.sub(r"-{2,}", "-", sanitized)
+    sanitized = sanitized.strip("-")
+    sanitized = sanitized[:50]
+
+    if not sanitized:
+        raise ValueError("Worker returned an empty branch name after sanitization")
+
+    return f"push/{sanitized}"

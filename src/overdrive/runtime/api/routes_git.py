@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from ..orchestrator.git_remote import (
     generate_branch_name,
+    generate_branch_name_llm,
     get_branch_status,
     push_to_remote,
 )
@@ -98,3 +99,51 @@ def register_git_routes(router: APIRouter, deps: RouteDeps) -> None:
             "remote_branch": result.remote_branch,
             "pushed_commits": result.pushed_commits,
         }
+
+    @router.post("/git/suggest-branch-name")
+    async def suggest_branch_name(
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        """Use an LLM worker to suggest a branch name from ahead-of-remote commits.
+
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+
+        Returns:
+            Object with ``branch_name`` (string or null) and ``error`` (string or null).
+        """
+        container, _, _ = deps.ctx(project_dir)
+
+        status = await asyncio.to_thread(get_branch_status, container.project_dir)
+        if status.ahead_count == 0 or not status.commits:
+            return {"branch_name": None, "error": "No commits ahead of remote"}
+
+        try:
+            from ...workers.config import (
+                get_workers_runtime_config,
+                resolve_worker_for_step,
+            )
+
+            cfg = container.config.load()
+            runtime = get_workers_runtime_config(
+                config=cfg, codex_command_fallback="codex exec",
+            )
+            spec = resolve_worker_for_step(runtime, "summarize")
+        except (ValueError, KeyError) as exc:
+            return {
+                "branch_name": None,
+                "error": f"No worker configured for branch name generation: {exc}",
+            }
+
+        try:
+            name = await asyncio.to_thread(
+                generate_branch_name_llm,
+                container.project_dir,
+                status.commits,
+                spec,
+                container.state_root,
+            )
+        except Exception as exc:
+            return {"branch_name": None, "error": str(exc)}
+
+        return {"branch_name": name, "error": None}
