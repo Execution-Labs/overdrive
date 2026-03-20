@@ -115,6 +115,30 @@ pre {
   color: var(--color-gray-100);
 }
 
+/* Dark mode: gray-scale semantics are inverted, so override with
+   theme-aware semantic tokens that guarantee readable contrast. */
+[data-theme="dark"] pre {
+  background-color: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+}
+
+[data-theme="dark"] code {
+  background-color: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-theme="system"] pre {
+    background-color: var(--color-bg-tertiary);
+    color: var(--color-text-primary);
+  }
+
+  [data-theme="system"] code {
+    background-color: var(--color-bg-secondary);
+    color: var(--color-text-secondary);
+  }
+}
+
 pre code {
   padding: 0;
   background: none;
