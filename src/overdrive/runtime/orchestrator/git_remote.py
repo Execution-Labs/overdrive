@@ -10,7 +10,6 @@ import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -476,22 +475,6 @@ def run_fix_and_push_worker(
         if on_done:
             on_done(False, result.error or "Push failed")
 
-
-def generate_branch_name(project_dir: Path) -> str:
-    """Auto-generate a push target branch name based on current branch and timestamp.
-
-    Args:
-        project_dir: Root of the git repository.
-
-    Returns:
-        A branch name like ``push/main-20260319-091742``.
-    """
-    result = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=project_dir)
-    base = result.stdout.strip() if result.returncode == 0 else "HEAD"
-    # Sanitize base for use in branch names
-    safe_base = base.replace("/", "-").replace(" ", "-")
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    return f"push/{safe_base}-{ts}"
 
 
 def generate_branch_name_llm(

@@ -12,7 +12,6 @@ from pydantic import BaseModel
 
 from ..orchestrator.git_remote import (
     PushCancelledError,
-    generate_branch_name,
     generate_branch_name_llm,
     get_branch_status,
     push_to_remote,
@@ -60,8 +59,23 @@ def register_git_routes(router: APIRouter, deps: RouteDeps) -> None:
         # Resolve target branch
         target = body.target_branch
         if body.auto_name and not target:
+            from ...workers.config import (
+                get_workers_runtime_config,
+                resolve_worker_for_step,
+            )
+
+            status = await asyncio.to_thread(get_branch_status, container.project_dir)
+            cfg = container.config.load()
+            runtime = get_workers_runtime_config(
+                config=cfg, codex_command_fallback="codex exec",
+            )
+            spec = resolve_worker_for_step(runtime, "summarize")
             target = await asyncio.to_thread(
-                generate_branch_name, container.project_dir,
+                generate_branch_name_llm,
+                container.project_dir,
+                status.commits,
+                spec,
+                container.state_root,
             )
 
         cancel_event = threading.Event()
