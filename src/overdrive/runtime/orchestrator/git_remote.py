@@ -298,6 +298,12 @@ def generate_branch_name_llm(
             heartbeat_grace_seconds=60,
             progress_path=progress_path,
         )
+    except FileNotFoundError as exc:
+        binary = getattr(exc, "filename", None) or "worker"
+        raise ValueError(
+            f"'{binary}' is not installed or not on PATH. "
+            f"Install it or configure a different worker provider."
+        ) from exc
     except Exception as exc:
         raise ValueError(f"Branch name worker failed: {exc}") from exc
     finally:
