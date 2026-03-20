@@ -122,10 +122,14 @@ class TestPostReviewComments:
             CommentPostResult(success=False, error="rate limited"),
         ]
 
+        mock_auth = subprocess.CompletedProcess(args=["gh", "auth", "status"], returncode=0)
         with patch(
             "overdrive.comments.writer.post_comments_batch",
             return_value=mock_results,
-        ), patch("shutil.which", return_value="/usr/bin/gh"):
+        ), patch("shutil.which", return_value="/usr/bin/gh"), patch(
+            "overdrive.runtime.api.routes_tasks.subprocess.run",
+            return_value=mock_auth,
+        ):
             resp = client.post(f"/api/tasks/{task.id}/post-review-comments")
 
         assert resp.status_code == 200
