@@ -3324,6 +3324,7 @@ export default function App() {
 
   async function refreshWithSchedulerRepair(): Promise<void> {
     await reloadAll()
+    void fetchGitStatus()
     const refreshProjectDir = projectDirRef.current
     try {
       const status = await requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/status', refreshProjectDir))
@@ -6210,7 +6211,7 @@ export default function App() {
           <div className="board-toolbar-spacer" />
           {gitStatus && (
             <div className="git-status-bar git-push-wrap">
-              <button className="git-branch-label" title={gitStatus.branch} onClick={() => setPushPopoverOpen((v) => !v)}>
+              <button className="git-branch-label" title={gitStatus.branch} onClick={() => { const opening = !pushPopoverOpen; setPushPopoverOpen(opening); if (opening) void fetchGitStatus() }}>
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="5" cy="4" r="2" /><circle cx="5" cy="12" r="2" /><circle cx="12" cy="6" r="2" /><path d="M5 6v4M10.2 6.8C9 8 7 8 5 8" /></svg>
                 {gitStatus.branch}
               </button>
@@ -6227,7 +6228,7 @@ export default function App() {
               <button
                 className="board-icon-btn git-push-btn"
                 disabled={pushInProgress || (gitStatus.ahead_count === 0 && !!gitStatus.remote_branch)}
-                onClick={() => setPushPopoverOpen((v) => !v)}
+                onClick={() => { const opening = !pushPopoverOpen; setPushPopoverOpen(opening); if (opening) void fetchGitStatus() }}
                 title={gitStatus.ahead_count === 0 && gitStatus.remote_branch ? 'Nothing to push' : 'Push to remote'}
                 aria-label="Push to remote"
               >

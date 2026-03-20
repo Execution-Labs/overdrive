@@ -86,6 +86,11 @@ def get_branch_status(project_dir: Path) -> BranchStatus:
     remotes = [r.strip() for r in remote_result.stdout.splitlines() if r.strip()]
     has_remote = "origin" in remotes
 
+    if has_remote:
+        fetch_result = _run_git(["fetch", "origin"], cwd=project_dir, timeout=_SUBPROCESS_TIMEOUT)
+        if fetch_result.returncode != 0:
+            logger.warning("git fetch origin failed: %s", fetch_result.stderr.strip())
+
     # Upstream tracking branch
     upstream_result = _run_git(
         ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
