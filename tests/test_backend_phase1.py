@@ -347,10 +347,13 @@ def test_execution_leases_use_dedicated_sqlite_table(tmp_path: Path) -> None:
 
         removed = orchestrator._release_execution_lease(task)
         assert removed is True
-        lease_row_after = container.db.fetch_one(
-            "SELECT task_id FROM execution_leases WHERE task_id = ?",
-            (task.id,),
-        )
+        # Use a write transaction for the read to ensure WAL visibility
+        # after the delete (avoids stale reads under pytest-xdist).
+        with container.db.transaction() as conn:
+            lease_row_after = conn.execute(
+                "SELECT task_id FROM execution_leases WHERE task_id = ?",
+                (task.id,),
+            ).fetchone()
         assert lease_row_after is None
 
 
