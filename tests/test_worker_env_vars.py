@@ -35,26 +35,25 @@ from overdrive.runtime.api.router_impl import (
 
 def test_run_codex_worker_passes_env_to_popen(tmp_path: Path) -> None:
     """Verify that _run_codex_worker passes env= to subprocess.Popen."""
+    import overdrive.worker as worker_mod
+
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     progress = run_dir / "progress.json"
 
     custom_env = {**os.environ, "MY_CUSTOM_VAR": "hello"}
 
-    with patch("overdrive.worker.subprocess.Popen") as mock_popen:
-        mock_proc = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout.readline = MagicMock(return_value="")
-        mock_proc.stderr.readline = MagicMock(return_value="")
-        mock_proc.poll.return_value = 0
-        mock_proc.wait.return_value = 0
-        mock_popen.return_value = mock_proc
+    mock_proc = MagicMock()
+    mock_proc.stdout = MagicMock()
+    mock_proc.stderr = MagicMock()
+    mock_proc.stdin = MagicMock()
+    mock_proc.stdout.readline = MagicMock(return_value="")
+    mock_proc.stderr.readline = MagicMock(return_value="")
+    mock_proc.poll.return_value = 0
+    mock_proc.wait.return_value = 0
 
-        from overdrive.worker import _run_codex_worker
-
-        _run_codex_worker(
+    with patch.object(worker_mod.subprocess, "Popen", return_value=mock_proc) as mock_popen:
+        worker_mod._run_codex_worker(
             command="echo test",
             prompt="test prompt",
             project_dir=tmp_path,
@@ -73,24 +72,23 @@ def test_run_codex_worker_passes_env_to_popen(tmp_path: Path) -> None:
 
 def test_run_codex_worker_none_env_inherits(tmp_path: Path) -> None:
     """Verify that env=None causes Popen to inherit the parent env."""
+    import overdrive.worker as worker_mod
+
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     progress = run_dir / "progress.json"
 
-    with patch("overdrive.worker.subprocess.Popen") as mock_popen:
-        mock_proc = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout.readline = MagicMock(return_value="")
-        mock_proc.stderr.readline = MagicMock(return_value="")
-        mock_proc.poll.return_value = 0
-        mock_proc.wait.return_value = 0
-        mock_popen.return_value = mock_proc
+    mock_proc = MagicMock()
+    mock_proc.stdout = MagicMock()
+    mock_proc.stderr = MagicMock()
+    mock_proc.stdin = MagicMock()
+    mock_proc.stdout.readline = MagicMock(return_value="")
+    mock_proc.stderr.readline = MagicMock(return_value="")
+    mock_proc.poll.return_value = 0
+    mock_proc.wait.return_value = 0
 
-        from overdrive.worker import _run_codex_worker
-
-        _run_codex_worker(
+    with patch.object(worker_mod.subprocess, "Popen", return_value=mock_proc) as mock_popen:
+        worker_mod._run_codex_worker(
             command="echo test",
             prompt="test prompt",
             project_dir=tmp_path,
