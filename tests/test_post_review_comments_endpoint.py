@@ -125,7 +125,7 @@ class TestPostReviewComments:
         with patch(
             "overdrive.comments.writer.post_comments_batch",
             return_value=mock_results,
-        ):
+        ), patch("shutil.which", return_value="/usr/bin/gh"):
             resp = client.post(f"/api/tasks/{task.id}/post-review-comments")
 
         assert resp.status_code == 200
