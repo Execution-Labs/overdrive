@@ -520,8 +520,24 @@ task already exists.
 Response:
 - `platform` (`github`, `gitlab`, or `null`)
 - `error` (string or `null`)
+- `error_code` (`no_remote`, `cli_not_installed`, `cli_not_authenticated`, `cli_error`, or `null`)
 - `items[]` — each with `number`, `title`, `author`, `head_ref`, `base_ref`,
   `url`, `has_review_task`, `review_task_id`
+
+### `GET /api/git-platform-status`
+Check GitHub/GitLab integration status in a single call.
+
+Reports whether a git remote is configured, the platform CLI is installed,
+and the CLI is authenticated. Used by the frontend to show a setup checklist
+proactively before errors occur.
+
+Response:
+- `platform` (`github`, `gitlab`, or `null`)
+- `remote_url` (string or `null`)
+- `cli_installed` (boolean)
+- `cli_authenticated` (boolean)
+- `cli_name` (`gh`, `glab`, or `null`)
+- `setup_steps[]` — each with `step` (number), `label` (string), `done` (boolean)
 
 ### `POST /api/pull-requests/{number}/review`
 Create a review task for a pull request or merge request.

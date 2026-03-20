@@ -30,6 +30,7 @@ EXPECTED_API_ROUTE_TABLE: set[tuple[str, str]] = {
     ("GET", "/api/projects"),
     ("GET", "/api/projects/browse"),
     ("GET", "/api/projects/pinned"),
+    ("GET", "/api/git-platform-status"),
     ("GET", "/api/pull-requests"),
     ("GET", "/api/review-queue"),
     ("GET", "/api/settings"),
