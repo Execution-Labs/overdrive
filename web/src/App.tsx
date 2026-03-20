@@ -1781,6 +1781,7 @@ export default function App() {
   const [pushInProgress, setPushInProgress] = useState(false)
   const [pushMessage, setPushMessage] = useState('')
   const [pushError, setPushError] = useState('')
+  const [autoNameInProgress, setAutoNameInProgress] = useState(false)
 
   const [workOpen, setWorkOpen] = useState(false)
   const [createTab, setCreateTab] = useState<CreateTab>('task')
@@ -3316,6 +3317,30 @@ export default function App() {
       setPushError(err instanceof Error ? err.message : 'Push failed')
     } finally {
       setPushInProgress(false)
+    }
+  }
+
+  async function handleAutoNamePush(): Promise<void> {
+    setAutoNameInProgress(true)
+    setPushError('')
+    setPushMessage('')
+    try {
+      const suggestion = await requestJson<{
+        branch_name: string | null
+        error: string | null
+      }>(buildApiUrl('/api/git/suggest-branch-name', projectDirRef.current), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      if (suggestion.error || !suggestion.branch_name) {
+        setPushError(suggestion.error || 'Failed to generate branch name')
+        return
+      }
+      await handleGitPush(suggestion.branch_name)
+    } catch (err) {
+      setPushError(err instanceof Error ? err.message : 'Auto name generation failed')
+    } finally {
+      setAutoNameInProgress(false)
     }
   }
 
@@ -6256,7 +6281,7 @@ export default function App() {
               )}
               <button
                 className="board-icon-btn git-push-btn"
-                disabled={pushInProgress || (gitStatus.ahead_count === 0 && !!gitStatus.remote_branch)}
+                disabled={pushInProgress || autoNameInProgress || (gitStatus.ahead_count === 0 && !!gitStatus.remote_branch)}
                 onClick={() => { const opening = !pushPopoverOpen; setPushPopoverOpen(opening); if (opening) void fetchGitStatus() }}
                 title={gitStatus.ahead_count === 0 && gitStatus.remote_branch ? 'Nothing to push' : 'Push to remote'}
                 aria-label="Push to remote"
@@ -6282,7 +6307,7 @@ export default function App() {
                     {gitStatus.remote_branch ? (
                       <button
                         className="push-option-btn"
-                        disabled={pushInProgress || gitStatus.ahead_count === 0}
+                        disabled={pushInProgress || autoNameInProgress || gitStatus.ahead_count === 0}
                         onClick={() => void handleGitPush()}
                       >
                         Push to {gitStatus.remote_branch}
@@ -6290,7 +6315,7 @@ export default function App() {
                     ) : (
                       <button
                         className="push-option-btn"
-                        disabled={pushInProgress}
+                        disabled={pushInProgress || autoNameInProgress}
                         onClick={() => void handleGitPush()}
                       >
                         Push to origin/{gitStatus.branch}
@@ -6306,21 +6331,21 @@ export default function App() {
                           placeholder="branch-name"
                           value={pushTargetBranch}
                           onChange={(e) => setPushTargetBranch(e.target.value)}
-                          disabled={pushInProgress}
+                          disabled={pushInProgress || autoNameInProgress}
                         />
                         <button
                           className="push-auto-btn"
-                          disabled={pushInProgress}
-                          onClick={() => void handleGitPush(undefined, true)}
+                          disabled={pushInProgress || autoNameInProgress}
+                          onClick={() => void handleAutoNamePush()}
                           title="Auto-generate branch name"
                         >
-                          Auto
+                          {autoNameInProgress ? <span className="spinner" /> : 'Auto'}
                         </button>
                       </div>
                       {pushTargetBranch.trim() && (
                         <button
                           className="push-option-btn"
-                          disabled={pushInProgress}
+                          disabled={pushInProgress || autoNameInProgress}
                           onClick={() => void handleGitPush(pushTargetBranch.trim())}
                         >
                           Push to origin/{pushTargetBranch.trim()}

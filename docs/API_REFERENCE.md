@@ -583,6 +583,18 @@ Errors:
 
 On success, emits a `git.pushed` WebSocket event on the `system` channel.
 
+### `POST /api/git/suggest-branch-name`
+Use an LLM worker to suggest a branch name from commits ahead of the remote.
+
+Query parameters:
+- `project_dir` (string, optional) — project directory override
+
+Response:
+- `branch_name` (string | null) — suggested branch name prefixed with `push/`, or null on failure
+- `error` (string | null) — error description when branch name generation fails
+
+Never raises HTTP errors; all failure modes return `branch_name: null` with an `error` message.
+
 ## Review and Collaboration
 
 ### `GET /api/review-queue`
