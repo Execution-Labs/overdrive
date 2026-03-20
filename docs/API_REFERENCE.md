@@ -505,6 +505,11 @@ Fetch stored import job state.
 
 ## Pull Requests
 
+> **Prerequisites:** These endpoints require the `gh` CLI (GitHub) or `glab` CLI
+> (GitLab) to be installed and authenticated, and an `origin` remote pointing to
+> GitHub or GitLab. See [USER_GUIDE.md — GitHub & GitLab Integration](USER_GUIDE.md#github--gitlab-integration)
+> for setup instructions.
+
 ### `GET /api/pull-requests`
 List open pull requests (GitHub) or merge requests (GitLab).
 
@@ -531,25 +536,7 @@ Errors:
 - `400` if platform detection or CLI check fails
 - `409` if a review task already exists for this PR/MR number
 
-## Review and Collaboration
-
-### `GET /api/review-queue`
-List tasks in `in_review`.
-
-### `POST /api/review/{task_id}/approve`
-Approve review; marks task `done` (and merges preserved branch when applicable).
-
-Body:
-- `guidance` (optional)
-
-### `POST /api/review/{task_id}/request-changes`
-Send task back to `queued` with review guidance.
-
-Body:
-- `guidance` (optional)
-
-### `GET /api/collaboration/modes`
-Returns available HITL mode definitions.
+## Git
 
 ### `GET /api/git/status`
 Returns current branch name, remote tracking info, ahead/behind counts, and commit list.
@@ -579,6 +566,26 @@ Errors:
 - `400` — no remote configured, or push rejected by remote (e.g. non-fast-forward)
 
 On success, emits a `git.pushed` WebSocket event on the `system` channel.
+
+## Review and Collaboration
+
+### `GET /api/review-queue`
+List tasks in `in_review`.
+
+### `POST /api/review/{task_id}/approve`
+Approve review; marks task `done` (and merges preserved branch when applicable).
+
+Body:
+- `guidance` (optional)
+
+### `POST /api/review/{task_id}/request-changes`
+Send task back to `queued` with review guidance.
+
+Body:
+- `guidance` (optional)
+
+### `GET /api/collaboration/modes`
+Returns available HITL mode definitions.
 
 ### `GET /api/collaboration/presence`
 Presence feed (currently empty list).
