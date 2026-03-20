@@ -3597,8 +3597,10 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                         "url": raw.get("url", ""),
                     })
             else:
+                # Note: --state flag was removed in glab ~1.80; omit it since
+                # `glab mr list` defaults to open MRs.
                 result = subprocess.run(
-                    ["glab", "mr", "list", "--output", "json", "--state", "opened"],
+                    ["glab", "mr", "list", "--output", "json"],
                     cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
                 )
                 raw_items = json.loads(result.stdout)
