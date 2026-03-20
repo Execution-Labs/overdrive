@@ -1782,6 +1782,7 @@ export default function App() {
   const [pushPopoverOpen, setPushPopoverOpen] = useState(false)
   const [pushTargetBranch, setPushTargetBranch] = useState('')
   const [pushInProgress, setPushInProgress] = useState(false)
+  const [pushAutoFixRunning, setPushAutoFixRunning] = useState(false)
   const [pushMessage, setPushMessage] = useState('')
   const [pushError, setPushError] = useState('')
   const [pushOutputLines, setPushOutputLines] = useState<string[]>([])
@@ -3294,9 +3295,11 @@ export default function App() {
 
   async function handleGitPush(targetBranch?: string, autoName?: boolean): Promise<void> {
     setPushInProgress(true)
+    setPushAutoFixRunning(false)
     setPushError('')
     setPushMessage('')
     setPushOutputLines([])
+    let autoFixStarted = false
     try {
       const result = await requestJson<{
         success: boolean
@@ -3315,6 +3318,8 @@ export default function App() {
       if (result.auto_fix) {
         // Worker is running in background — keep pushInProgress true.
         // WebSocket git.pushed / git.push_output events will update the UI.
+        autoFixStarted = true
+        setPushAutoFixRunning(true)
         return
       }
       setPushMessage(
@@ -3332,7 +3337,9 @@ export default function App() {
         setPushError(msg)
       }
     } finally {
-      setPushInProgress(false)
+      if (!autoFixStarted) {
+        setPushInProgress(false)
+      }
     }
   }
 
@@ -3523,9 +3530,9 @@ export default function App() {
           const payload = data.payload as Record<string, unknown> | undefined
           if (payload?.auto_fix) {
             setPushInProgress(false)
+            setPushAutoFixRunning(false)
             setPushMessage(String(payload.detail ?? 'Push succeeded (auto-fix)'))
-            setPushPopoverOpen(false)
-            window.setTimeout(() => setPushMessage(''), 6000)
+            window.setTimeout(() => setPushMessage(''), 8000)
           }
         }
         if (eventType === 'git.push_output') {
@@ -3536,6 +3543,7 @@ export default function App() {
         if (eventType === 'git.auto_fix_done') {
           const payload = data.payload as Record<string, unknown> | undefined
           setPushInProgress(false)
+          setPushAutoFixRunning(false)
           setPushError(String(payload?.detail ?? 'Auto-fix failed'))
         }
         return
@@ -6401,6 +6409,12 @@ export default function App() {
                     </div>
                     {pushInProgress && (
                       <>
+                        {pushAutoFixRunning && (
+                          <div className="push-autofix-status">
+                            <span className="push-autofix-spinner" />
+                            Auto-fix worker is analyzing and fixing the issue...
+                          </div>
+                        )}
                         {pushOutputLines.length > 0 && (
                           <div className="push-output-log" ref={(el) => { if (el) el.scrollTop = el.scrollHeight }}>
                             {pushOutputLines.map((line, i) => (
@@ -6412,9 +6426,12 @@ export default function App() {
                           className="push-cancel-btn"
                           onClick={() => void handleCancelPush()}
                         >
-                          Cancel push
+                          {pushAutoFixRunning ? 'Cancel auto-fix' : 'Cancel push'}
                         </button>
                       </>
+                    )}
+                    {pushMessage && !pushInProgress && (
+                      <div className="push-success-msg">{pushMessage}</div>
                     )}
                     {pushError && <div className="push-error">{pushError}</div>}
                 </div>
