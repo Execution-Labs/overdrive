@@ -1039,7 +1039,7 @@ _Pending: will be populated by the generate_tasks step._
         changed = False
         sync_mode: str | None = None
         sync_reason: str | None = None
-        orchestrator_managed_steps = {"verify", "benchmark", "implement_fix", "report", "profile"}
+        orchestrator_managed_steps = {"report", "profile"}
         allow_worker_workdoc_write = step not in orchestrator_managed_steps
         if worktree_text != canonical_text and allow_worker_workdoc_write:
             section = self.workdoc_section_for_step(task, step)

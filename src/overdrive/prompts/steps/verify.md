@@ -28,9 +28,11 @@ Execution rules:
 
 Workdoc requirements:
 - Update `## Verification Results` in `.workdoc.md` with:
+  - use a sub-heading `### Attempt N` where N is the attempt number from the prompt header (default to 1 if not present),
   - each command attempted, its exit code, and outcome (`pass|fail|skip|environment`),
   - brief evidence (key error lines) for any failures,
   - what was fixed (if any test failures were resolved) and how.
+- Preserve prior attempt entries — append your entry, do not overwrite earlier attempts.
 
 Scope boundary:
 - Verify execution outcomes only.

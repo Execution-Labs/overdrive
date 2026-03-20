@@ -578,16 +578,16 @@ _WORKDOC_STEP_INSTRUCTIONS: dict[str, str] = {
     "fix": (
         "## Working Document\n"
         "A working document is available at `.workdoc.md` in the project root.\n"
-        "Read the full document for context on prior work.\n"
-        "Do NOT modify `.workdoc.md` in this step — the orchestrator appends\n"
-        "structured fix-cycle entries to `## Fix Log`."
+        "Read the full document for context on prior work. As you work,\n"
+        "update the `## Fix Log` section with which issues were fixed,\n"
+        "what changed, and key decisions. Write the file back when done."
     ),
     "verification": (
         "## Working Document\n"
         "A working document is available at `.workdoc.md` in the project root.\n"
-        "Read the implementation context for what was changed.\n"
-        "Do NOT modify `.workdoc.md` in this step — the orchestrator writes\n"
-        "normalized verification results after classification."
+        "Read the implementation context for what was changed. As you work,\n"
+        "update the `## Verification Results` section with commands run,\n"
+        "outcomes, and any fixes applied. Write the file back when done."
     ),
     "review": (
         "## Working Document\n"
