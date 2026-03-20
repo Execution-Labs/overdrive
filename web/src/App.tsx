@@ -1787,7 +1787,11 @@ export default function App() {
   const [prList, setPrList] = useState<PullRequestItem[]>([])
   const [prListLoading, setPrListLoading] = useState(false)
   const [prListError, setPrListError] = useState('')
+  const [prErrorCode, setPrErrorCode] = useState<string | null>(null)
   const [prPlatform, setPrPlatform] = useState<string | null>(null)
+  const [postCommentsError, setPostCommentsError] = useState<string | null>(null)
+  const [postCommentsErrorCode, setPostCommentsErrorCode] = useState<string | null>(null)
+  const [platformStatus, setPlatformStatus] = useState<{ platform: string | null; cli_installed: boolean; cli_authenticated: boolean; cli_name: string | null; setup_steps: { step: number; label: string; done: boolean }[] } | null>(null)
   const [selectedPrNumber, setSelectedPrNumber] = useState<number | null>(null)
   const [prReviewGuidance, setPrReviewGuidance] = useState('')
   const [prReviewMode, setPrReviewMode] = useState<ReviewMode>(ReviewMode.FixOnly)
@@ -3652,22 +3656,36 @@ export default function App() {
   async function fetchPullRequests(): Promise<void> {
     setPrListLoading(true)
     setPrListError('')
+    setPrErrorCode(null)
     try {
-      const data = await requestJson<{ platform: string | null; error: string | null; items: PullRequestItem[] }>(
+      const data = await requestJson<{ platform: string | null; error: string | null; error_code: string | null; items: PullRequestItem[] }>(
         buildApiUrl('/api/pull-requests', projectDir),
       )
       setPrPlatform(data.platform)
       if (data.error) {
         setPrListError(data.error)
+        setPrErrorCode(data.error_code ?? null)
         setPrList([])
       } else {
         setPrList(data.items)
       }
     } catch (err) {
       setPrListError(err instanceof Error ? err.message : 'Failed to load pull requests')
+      setPrErrorCode('cli_error')
       setPrList([])
     } finally {
       setPrListLoading(false)
+    }
+  }
+
+  async function fetchPlatformStatus(): Promise<void> {
+    try {
+      const data = await requestJson<{ platform: string | null; cli_installed: boolean; cli_authenticated: boolean; cli_name: string | null; setup_steps: { step: number; label: string; done: boolean }[] }>(
+        buildApiUrl('/api/git-platform-status', projectDir),
+      )
+      setPlatformStatus(data)
+    } catch {
+      // Non-critical — silently ignore
     }
   }
 
@@ -4675,20 +4693,31 @@ export default function App() {
   }
 
   async function postReviewComments(taskId: string): Promise<void> {
-    await runTaskMutation(
-      'post_review_comments',
-      async () => {
-        await requestJson<{ posted_count: number; failed_count: number }>(
-          buildApiUrl(`/api/tasks/${taskId}/post-review-comments`, projectDir),
-          { method: 'POST' },
-        )
-        await loadTaskDetail(taskId)
-      },
-      {
-        successMessage: 'Review comments posted.',
-        errorPrefix: 'Failed to post review comments',
-      },
-    )
+    setPostCommentsError(null)
+    setPostCommentsErrorCode(null)
+    setTaskActionPending('post_review_comments')
+    setTaskActionDetail('')
+    setTaskActionError('')
+    setTaskActionMessage('')
+    try {
+      await requestJson<{ posted_count: number; failed_count: number }>(
+        buildApiUrl(`/api/tasks/${taskId}/post-review-comments`, projectDir),
+        { method: 'POST' },
+      )
+      await loadTaskDetail(taskId)
+      setTaskActionMessage('Review comments posted.')
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to post review comments'
+      setTaskActionError(toErrorMessage('Failed to post review comments', err))
+      // Use structured error_code from backend when available.
+      const apiErr = err as Partial<ApiRequestError>
+      const code = apiErr.code ?? 'cli_error'
+      setPostCommentsError(errorMsg)
+      setPostCommentsErrorCode(code)
+    } finally {
+      setTaskActionPending(null)
+      setTaskActionDetail('')
+    }
   }
 
   async function skipToPrecommit(taskId: string): Promise<void> {
@@ -7448,8 +7477,84 @@ export default function App() {
       setPrReviewGuidance('')
       setPrReviewMode(ReviewMode.FixOnly)
       void fetchPullRequests()
+      void fetchPlatformStatus()
     }
     setWorkOpen(true)
+  }
+
+  function renderPlatformSetupGuidance(errorCode: string | null, platform: string | null): JSX.Element {
+    const platformLabel = platform === 'gitlab' ? 'GitLab' : 'GitHub'
+    const cliName = platform === 'gitlab' ? 'glab' : 'gh'
+    const prLabel = platform === 'gitlab' ? 'merge requests' : 'pull requests'
+
+    if (errorCode === 'no_remote' || !platform) {
+      return (
+        <div className="pr-review-setup-help">
+          <p className="pr-review-setup-help-title">Set up a git remote</p>
+          <p>This project does not appear to have a GitHub or GitLab remote configured. To use {prLabel} features, connect your repository:</p>
+          <ol className="pr-review-setup-steps">
+            <li><span className="pr-review-step-label">Check your current remotes:</span><pre>git remote -v</pre></li>
+            <li><span className="pr-review-step-label">Add a remote if none exists:</span><pre>git remote add origin https://github.com/your-org/your-repo.git</pre></li>
+            <li><span className="pr-review-step-label">Verify the remote is configured:</span><pre>git remote -v</pre></li>
+          </ol>
+        </div>
+      )
+    }
+
+    if (errorCode === 'cli_not_installed') {
+      return (
+        <div className="pr-review-setup-help">
+          <p className="pr-review-setup-help-title">Install the {platformLabel} CLI</p>
+          <p>The <code>{cliName}</code> command-line tool is required to list and review {prLabel}.</p>
+          <ol className="pr-review-setup-steps">
+            <li>
+              <span className="pr-review-step-label">Install <code>{cliName}</code>:</span>
+              <div className="pr-review-setup-os-tabs">
+                {platform === 'github' ? (
+                  <>
+                    <div><span className="pr-review-os-label">macOS</span><pre>brew install gh</pre></div>
+                    <div><span className="pr-review-os-label">Linux</span><pre>sudo apt install gh{'\n'}# or: sudo dnf install gh</pre></div>
+                    <div><span className="pr-review-os-label">Windows</span><pre>winget install GitHub.cli{'\n'}# or: scoop install gh</pre></div>
+                  </>
+                ) : (
+                  <>
+                    <div><span className="pr-review-os-label">macOS</span><pre>brew install glab</pre></div>
+                    <div><span className="pr-review-os-label">Linux</span><pre>sudo apt install glab</pre></div>
+                    <div><span className="pr-review-os-label">Windows</span><pre>winget install GLab.GLab{'\n'}# or: scoop install glab</pre></div>
+                  </>
+                )}
+              </div>
+            </li>
+            <li><span className="pr-review-step-label">Authenticate:</span><pre>{cliName} auth login</pre></li>
+            <li><span className="pr-review-step-label">Verify it works:</span><pre>{platform === 'github' ? 'gh pr list' : 'glab mr list'}</pre></li>
+          </ol>
+        </div>
+      )
+    }
+
+    if (errorCode === 'cli_not_authenticated') {
+      return (
+        <div className="pr-review-setup-help">
+          <p className="pr-review-setup-help-title">Authenticate the {platformLabel} CLI</p>
+          <p>The <code>{cliName}</code> CLI is installed but does not appear to be authenticated.</p>
+          <ol className="pr-review-setup-steps">
+            <li><span className="pr-review-step-label">Log in:</span><pre>{cliName} auth login</pre></li>
+            <li><span className="pr-review-step-label">Verify authentication:</span><pre>{cliName} auth status</pre></li>
+            <li><span className="pr-review-step-label">Test access to this repo:</span><pre>{platform === 'github' ? 'gh pr list' : 'glab mr list'}</pre></li>
+          </ol>
+        </div>
+      )
+    }
+
+    // cli_error or unknown
+    return (
+      <div className="pr-review-setup-help">
+        <p>Check that the {platformLabel} CLI is installed, authenticated, and can access this repository:</p>
+        <pre>{platform === 'github' ? 'gh pr list' : 'glab mr list'}</pre>
+        <p>If the issue persists, try re-authenticating:</p>
+        <pre>{cliName} auth login</pre>
+      </div>
+    )
   }
 
   function renderRoute(): JSX.Element {
@@ -7681,7 +7786,14 @@ export default function App() {
                  Array.isArray(selectedTaskView.metadata?.generated_review_comments) &&
                  (selectedTaskView.metadata.generated_review_comments as unknown[]).length > 0 &&
                  (taskStatus === 'done' || taskStatus === 'in_review') ? (
-                  <button className="button button-primary" onClick={() => void postReviewComments(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'post_review_comments' ? 'Posting...' : 'Post Comments'}</button>
+                  <>
+                    <button className="button button-primary" onClick={() => { setPostCommentsError(null); setPostCommentsErrorCode(null); void postReviewComments(selectedTaskView.id) }} disabled={isTaskActionBusy}>{taskActionPending === 'post_review_comments' ? 'Posting...' : 'Post Comments'}</button>
+                    {postCommentsError && (postCommentsErrorCode === 'cli_not_installed' || postCommentsErrorCode === 'cli_not_authenticated') ? (
+                      <div className="pr-review-setup pr-review-setup-inline">
+                        {renderPlatformSetupGuidance(postCommentsErrorCode, (selectedTaskView.metadata?.comment_platform as Record<string, string> | undefined)?.platform ?? platformStatus?.platform ?? prPlatform ?? null)}
+                      </div>
+                    ) : null}
+                  </>
                 ) : null}
                 {taskSupportsPostCompletionGeneration(selectedTaskView) ? (
                   <button className="button button-primary" onClick={() => void generateFollowUpTasks(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'generate_follow_ups' ? 'Generating...' : 'Generate Follow-Up Tasks'}</button>
@@ -7733,7 +7845,7 @@ export default function App() {
               <div className="tab-row">
                 <button className={`tab ${createTab === 'task' ? 'is-active' : ''}`} onClick={() => setCreateTab('task')}>Create Task</button>
                 <button className={`tab ${createTab === 'import' ? 'is-active' : ''}`} onClick={() => setCreateTab('import')}>Import PRD</button>
-                <button className={`tab ${createTab === 'review' ? 'is-active' : ''}`} onClick={() => { setCreateTab('review'); void fetchPullRequests() }}>Review PR/MR</button>
+                <button className={`tab ${createTab === 'review' ? 'is-active' : ''}`} onClick={() => { setCreateTab('review'); void fetchPullRequests(); void fetchPlatformStatus() }}>Review PR/MR</button>
               </div>
             </div>
 
@@ -7903,44 +8015,21 @@ export default function App() {
 
               {createTab === 'review' ? (
                 <div className="form-stack">
+                  {platformStatus?.setup_steps && !platformStatus.setup_steps.every((s) => s.done) ? (
+                    <div className="pr-review-status-checklist">
+                      {platformStatus.setup_steps.map((s) => (
+                        <span key={s.step} className={`pr-review-status-item ${s.done ? 'is-done' : 'is-pending'}`}>
+                          <span className="pr-review-status-icon">{s.done ? '\u2713' : '\u2022'}</span>
+                          {s.label}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
                   {prListLoading ? <p className="text-muted">Loading open pull requests…</p> : null}
                   {prListError ? (
                     <div className="pr-review-setup">
                       <p className="pr-review-setup-error">{prListError}</p>
-                      {!prPlatform ? (
-                        <div className="pr-review-setup-help">
-                          <p>This project does not appear to have a GitHub or GitLab remote configured.</p>
-                          <p>Make sure your <code>origin</code> remote points to a GitHub or GitLab repository:</p>
-                          <pre>git remote -v</pre>
-                        </div>
-                      ) : prListError.toLowerCase().includes('not installed') ? (
-                        <div className="pr-review-setup-help">
-                          <p>To list and review {prPlatform === 'gitlab' ? 'merge requests' : 'pull requests'}, install the {prPlatform === 'gitlab' ? 'GitLab' : 'GitHub'} CLI:</p>
-                          {prPlatform === 'github' ? (
-                            <>
-                              <pre>brew install gh</pre>
-                              <p>Then authenticate:</p>
-                              <pre>gh auth login</pre>
-                            </>
-                          ) : (
-                            <>
-                              <pre>brew install glab</pre>
-                              <p>Then authenticate:</p>
-                              <pre>glab auth login</pre>
-                            </>
-                          )}
-                        </div>
-                      ) : prListError.toLowerCase().includes('auth') || prListError.toLowerCase().includes('login') || prListError.toLowerCase().includes('401') || prListError.toLowerCase().includes('403') ? (
-                        <div className="pr-review-setup-help">
-                          <p>The {prPlatform === 'gitlab' ? 'GitLab' : 'GitHub'} CLI does not appear to be authenticated. Run:</p>
-                          <pre>{prPlatform === 'github' ? 'gh auth login' : 'glab auth login'}</pre>
-                        </div>
-                      ) : (
-                        <div className="pr-review-setup-help">
-                          <p>Check that the {prPlatform === 'gitlab' ? 'GitLab' : 'GitHub'} CLI is authenticated and can access this repository:</p>
-                          <pre>{prPlatform === 'github' ? 'gh pr list' : 'glab mr list'}</pre>
-                        </div>
-                      )}
+                      {renderPlatformSetupGuidance(prErrorCode, prPlatform)}
                     </div>
                   ) : null}
                   {!prListLoading && !prListError && prList.length === 0 ? (
