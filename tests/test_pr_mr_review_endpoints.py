@@ -65,6 +65,73 @@ class TestDiffTruncation:
 
 
 # ---------------------------------------------------------------------------
+# List pull requests (GitLab path)
+# ---------------------------------------------------------------------------
+
+
+class TestListPullRequestsGitlab:
+    """Tests for GET /pull-requests with a GitLab remote."""
+
+    def test_glab_mr_list_no_state_flag(self, tmp_path: Path):
+        """glab mr list must be called without --state (removed in glab ~1.80)."""
+        client, _container = _client_and_container(tmp_path)
+
+        mr_json = json.dumps([
+            {
+                "iid": 7,
+                "title": "Fix login",
+                "author": {"username": "alice"},
+                "source_branch": "fix-login",
+                "target_branch": "main",
+                "web_url": "https://gitlab.com/org/repo/-/merge_requests/7",
+            },
+        ])
+
+        captured_cmds: list[list[str]] = []
+
+        def mock_run(cmd, **kwargs):
+            captured_cmds.append(list(cmd))
+
+            class Result:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            r = Result()
+            if cmd[0] == "glab":
+                r.stdout = mr_json
+            return r
+
+        with (
+            patch(
+                "overdrive.runtime.api.routes_tasks._detect_git_platform",
+                return_value="gitlab",
+            ),
+            patch(
+                "overdrive.runtime.api.routes_tasks.shutil.which",
+                return_value="/usr/bin/glab",
+            ),
+            patch(
+                "overdrive.runtime.api.routes_tasks.subprocess.run",
+                side_effect=mock_run,
+            ),
+        ):
+            resp = client.get("/api/pull-requests")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["platform"] == "gitlab"
+        assert data.get("error") is None
+        assert len(data["items"]) == 1
+        assert data["items"][0]["number"] == 7
+        assert data["items"][0]["author"] == "alice"
+
+        # Verify --state is NOT in the glab command.
+        glab_cmds = [c for c in captured_cmds if c[0] == "glab"]
+        assert len(glab_cmds) == 1
+        assert "--state" not in glab_cmds[0]
+
+
+# ---------------------------------------------------------------------------
 # PR review endpoint
 # ---------------------------------------------------------------------------
 
