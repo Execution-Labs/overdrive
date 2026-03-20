@@ -28,7 +28,10 @@ def _client_and_container(tmp_path: Path) -> tuple[TestClient, Container]:
     _git_init(tmp_path)
     app = create_app(project_dir=str(tmp_path))
     client = TestClient(app)
-    container = Container(tmp_path)
+    # Trigger lazy container init by hitting any endpoint
+    client.get("/api/settings")
+    key = str(tmp_path.resolve())
+    container = app.state.containers[key]
     return client, container
 
 
