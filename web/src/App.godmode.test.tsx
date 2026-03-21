@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import App from './App'
 
 class MockWebSocket {
@@ -152,10 +152,8 @@ function installFetchMock(overseerState?: OverseerPayload) {
 }
 
 async function navigateToGodMode(): Promise<void> {
-  await waitFor(() => {
-    expect(screen.getByRole('button', { name: /God Mode/i })).toBeInTheDocument()
-  })
-  fireEvent.click(screen.getByRole('button', { name: /God Mode/i }))
+  const nav = await waitFor(() => screen.getByRole('navigation', { name: /main navigation/i }))
+  fireEvent.click(within(nav).getByRole('button', { name: /God Mode/i }))
 }
 
 describe('God Mode tab', () => {

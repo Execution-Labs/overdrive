@@ -1777,6 +1777,12 @@ export default function App() {
   const [overseerUnblockInput, setOverseerUnblockInput] = useState('')
   const [overseerBusy, setOverseerBusy] = useState(false)
   const [overseerError, setOverseerError] = useState('')
+  const [overseerLog, setOverseerLog] = useState('')
+  const [overseerLogIteration, setOverseerLogIteration] = useState(0)
+  const overseerLogOffsetRef = useRef({ stdout: 0, stderr: 0 })
+  const overseerLogRef = useRef<HTMLPreElement>(null)
+  const overseerLogAutoScroll = useRef(true)
+  const [overseerLogRaw, setOverseerLogRaw] = useState(false)
   const [_agents, setAgents] = useState<AgentRecord[]>([])
   const [workerHealth, setWorkerHealth] = useState<WorkerHealthRecord[]>([])
   const [workerRoutingRows, setWorkerRoutingRows] = useState<WorkerRoutingRow[]>([])
@@ -4811,6 +4817,131 @@ export default function App() {
       setOverseerBusy(false)
     }
   }
+
+  function formatOverseerLog(raw: string): string {
+    const lines = raw.split('\n')
+    const parts: string[] = []
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      let obj: Record<string, unknown>
+      try { obj = JSON.parse(trimmed) } catch { parts.push(line); continue }
+
+      const type = obj.type as string | undefined
+
+      // Assistant text or tool use
+      if (type === 'assistant' && typeof obj.message === 'object' && obj.message !== null) {
+        const msg = obj.message as Record<string, unknown>
+        const content = msg.content as Array<Record<string, unknown>> | undefined
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block.type === 'text' && typeof block.text === 'string') {
+              parts.push(`💬 ${block.text}`)
+            } else if (block.type === 'tool_use') {
+              const name = block.name as string || 'unknown'
+              const input = block.input as Record<string, unknown> | undefined
+              if (name === 'Bash' && input?.command) {
+                parts.push(`🔧 ${name}: ${input.description || input.command}`)
+              } else if (name === 'Read' && input?.file_path) {
+                parts.push(`🔧 ${name}: ${input.file_path}`)
+              } else if (name === 'Edit' && input?.file_path) {
+                parts.push(`🔧 ${name}: ${input.file_path}`)
+              } else if (name === 'Write' && input?.file_path) {
+                parts.push(`🔧 ${name}: ${input.file_path}`)
+              } else if ((name === 'Grep' || name === 'Glob') && input?.pattern) {
+                parts.push(`🔧 ${name}: ${input.pattern}`)
+              } else {
+                parts.push(`🔧 ${name}`)
+              }
+            }
+          }
+        }
+        continue
+      }
+
+      // Tool result
+      if (type === 'tool_result') {
+        const content = obj.content as string | undefined
+        if (content && content.length > 200) {
+          parts.push(`  ↳ (${content.length} chars)`)
+        } else if (content) {
+          parts.push(`  ↳ ${content}`)
+        }
+        continue
+      }
+
+      // Result / final message
+      if (type === 'result') {
+        const result = obj.result as Record<string, unknown> | undefined
+        if (result && Array.isArray(result.content)) {
+          for (const block of result.content as Array<Record<string, unknown>>) {
+            if (block.type === 'text' && typeof block.text === 'string') {
+              parts.push(`✅ ${block.text}`)
+            }
+          }
+        }
+        continue
+      }
+
+      // System messages
+      if (type === 'system' && typeof obj.message === 'string') {
+        parts.push(`⚙️ ${obj.message}`)
+        continue
+      }
+
+      // Skip other internal event types silently
+    }
+    return parts.join('\n')
+  }
+
+  // Overseer log polling
+  useEffect(() => {
+    const isActive = overseer?.status === 'running' || overseer?.status === 'blocked'
+    if (!isActive || route !== 'godmode') return
+    const currentIteration = overseer?.iteration ?? 0
+    if (currentIteration !== overseerLogIteration) {
+      setOverseerLog('')
+      overseerLogOffsetRef.current = { stdout: 0, stderr: 0 }
+      overseerLogAutoScroll.current = true
+      setOverseerLogIteration(currentIteration)
+    }
+    let stopped = false
+    const poll = async () => {
+      if (stopped) return
+      try {
+        const offsets = overseerLogOffsetRef.current
+        const data = await requestJson<{
+          stdout: string
+          stderr: string
+          stdout_offset: number
+          stderr_offset: number
+          iteration: number
+        }>(buildApiUrl('/api/overseer/logs', projectDir, {
+          stdout_offset: offsets.stdout,
+          stderr_offset: offsets.stderr,
+        }))
+        if (stopped) return
+        if (data.stdout || data.stderr) {
+          const chunk = data.stdout + (data.stderr ? '\n[stderr] ' + data.stderr : '')
+          setOverseerLog((prev) => prev + chunk)
+          overseerLogOffsetRef.current = { stdout: data.stdout_offset, stderr: data.stderr_offset }
+        }
+      } catch {
+        // Silently ignore — logs are optional
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 2_000)
+    return () => { stopped = true; window.clearInterval(timer) }
+  }, [overseer?.status, overseer?.iteration, route, projectDir]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-scroll overseer log to bottom unless user scrolled up
+  useEffect(() => {
+    const el = overseerLogRef.current
+    if (el && overseerLogAutoScroll.current) {
+      el.scrollTop = el.scrollHeight
+    }
+  }, [overseerLog])
 
   async function retryTask(taskId: string, startFromStep?: string): Promise<void> {
     await runTaskMutation(
@@ -7919,6 +8050,29 @@ export default function App() {
               </div>
             ) : null}
 
+            {(isRunning || isBlocked) && overseerLog ? (
+              <div className="godmode-log-section">
+                <div className="godmode-log-header">
+                  <label className="field-label">Agent Log (iteration {overseerLogIteration})</label>
+                  <button
+                    className="godmode-log-toggle"
+                    onClick={() => setOverseerLogRaw((v) => !v)}
+                    title={overseerLogRaw ? 'Show formatted' : 'Show raw'}
+                  >{overseerLogRaw ? 'Formatted' : 'Raw'}</button>
+                </div>
+                <pre
+                  ref={overseerLogRef}
+                  className="godmode-log-output"
+                  onScroll={() => {
+                    const el = overseerLogRef.current
+                    if (!el) return
+                    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+                    overseerLogAutoScroll.current = atBottom
+                  }}
+                >{overseerLogRaw ? overseerLog : formatOverseerLog(overseerLog)}</pre>
+              </div>
+            ) : null}
+
             {st.last_handover ? (
               <details className="godmode-handover">
                 <summary className="field-label">Last Handover</summary>
@@ -7942,8 +8096,17 @@ export default function App() {
     <div className="orchestrator-app">
       <div className="bg-layer" aria-hidden="true" />
       <header className="topbar">
-        <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <h1>Overdrive</h1>
+          {overseer && (overseer.status === 'running' || overseer.status === 'blocked') ? (
+            <button
+              className={`godmode-topbar-indicator ${overseer.status === 'blocked' ? 'godmode-topbar-blocked' : ''}`}
+              onClick={() => setRoute('godmode')}
+              title="God Mode is active — click to view"
+            >
+              God Mode ON
+            </button>
+          ) : null}
         </div>
         <div className="topbar-actions">
           <select

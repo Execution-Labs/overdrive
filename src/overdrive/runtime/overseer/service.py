@@ -91,6 +91,7 @@ class OverseerService:
         self._unblock = threading.Event()
         self._process: Optional[subprocess.Popen[str]] = None
         self._process_lock = threading.Lock()
+        self._current_run_dir: Optional[Path] = None
 
         # Load persisted state if any
         self._load_state()
@@ -148,6 +149,15 @@ class OverseerService:
     def get_state(self) -> OverseerState:
         """Return current state."""
         return self._state
+
+    def get_log_paths(self) -> tuple[Path | None, Path | None]:
+        """Return (stdout_path, stderr_path) for the current or latest iteration."""
+        run_dir = self._current_run_dir
+        if run_dir is None and self._state.iteration > 0:
+            run_dir = self._runs_dir / f"iteration-{self._state.iteration}"
+        if run_dir is None or not run_dir.exists():
+            return None, None
+        return run_dir / "stdout.log", run_dir / "stderr.log"
 
     def add_advice(self, text: str) -> OverseerState:
         """Add advice for the agent."""
@@ -270,6 +280,7 @@ class OverseerService:
 
         run_dir = self._runs_dir / f"iteration-{self._state.iteration}"
         run_dir.mkdir(parents=True, exist_ok=True)
+        self._current_run_dir = run_dir
 
         # Persist prompt for debugging
         (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
@@ -376,12 +387,17 @@ class OverseerService:
         else:
             handover_section = "(First launch — no previous context.)"
 
+        project_dir = str(self._container.project_dir)
+        base_url = f"http://localhost:{port}"
+
         return template.format(
             objective=self._state.objective,
             advice_section=advice_section,
             handover_section=handover_section,
             memory_dir=str(self._memory_dir),
             port=port,
+            project_dir=project_dir,
+            base_url=base_url,
         )
 
     # ------------------------------------------------------------------

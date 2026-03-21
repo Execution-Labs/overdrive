@@ -11,6 +11,7 @@ from ..events.bus import EventBus
 from ..overseer.service import OverseerService
 from ..storage.container import Container
 from .deps import RouteDeps
+from .logs_io import read_from_offset, read_tail
 
 
 # ---------------------------------------------------------------------------
@@ -116,3 +117,33 @@ def register_overseer_routes(router: APIRouter, deps: RouteDeps) -> None:
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"overseer": state.to_dict()}
+
+    @router.get("/overseer/logs")
+    async def overseer_logs(
+        project_dir: Optional[str] = Query(None),
+        stdout_offset: int = Query(0),
+        stderr_offset: int = Query(0),
+        max_chars: int = Query(12_000),
+    ) -> dict[str, Any]:
+        _container, _bus, service = _ctx(project_dir)
+        stdout_path, stderr_path = service.get_log_paths()
+        if stdout_offset == 0 and stderr_offset == 0:
+            stdout_text, stdout_tail = read_tail(stdout_path, max_chars)
+            stderr_text, stderr_tail = read_tail(stderr_path, max_chars)
+            return {
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+                "stdout_offset": stdout_tail + len(stdout_text.encode("utf-8")),
+                "stderr_offset": stderr_tail + len(stderr_text.encode("utf-8")),
+                "iteration": service.get_state().iteration,
+            }
+        max_bytes = max_chars * 4
+        stdout_text, new_stdout_offset, _ = read_from_offset(stdout_path, stdout_offset, max_bytes)
+        stderr_text, new_stderr_offset, _ = read_from_offset(stderr_path, stderr_offset, max_bytes)
+        return {
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "stdout_offset": new_stdout_offset,
+            "stderr_offset": new_stderr_offset,
+            "iteration": service.get_state().iteration,
+        }

@@ -860,6 +860,16 @@ Stop the overseer.
 ### `GET /api/overseer/status`
 Return current overseer state (status, objective, iteration, etc.).
 
+### `GET /api/overseer/logs`
+Stream overseer agent logs for the current iteration.
+
+Query parameters:
+- `stdout_offset` (int, default 0) — byte offset for incremental stdout reads
+- `stderr_offset` (int, default 0) — byte offset for incremental stderr reads
+- `max_chars` (int, default 12000) — max characters to return
+
+Response: `{ stdout, stderr, stdout_offset, stderr_offset, iteration }`
+
 ### `POST /api/overseer/advice`
 Add advice for the overseer agent.
 

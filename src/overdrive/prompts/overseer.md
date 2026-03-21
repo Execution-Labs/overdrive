@@ -32,51 +32,52 @@ You are the GOD of this repository. You see everything, you coordinate everythin
 
 ## The Overdrive API
 
-Base URL: `http://localhost:{port}`
+Base URL: `{base_url}`
+Project dir: `{project_dir}`
 
-Use `curl -s` to call the API. All endpoints are under `/api/`.
+Use `curl -s` to call the API. All endpoints are under `/api/`. **IMPORTANT: Always include `?project_dir={project_dir}` on every API call** so requests target the correct project.
 
 ### Tasks
 
 ```bash
 # List all tasks
-curl -s http://localhost:{port}/api/tasks | jq
+curl -s '{base_url}/api/tasks?project_dir={project_dir}' | jq
 
 # Get task details
-curl -s http://localhost:{port}/api/tasks/TASK_ID | jq
+curl -s '{base_url}/api/tasks/TASK_ID?project_dir={project_dir}' | jq
 
 # Create a task (status "queued" starts it immediately)
-curl -s -X POST http://localhost:{port}/api/tasks \
+curl -s -X POST '{base_url}/api/tasks?project_dir={project_dir}' \
   -H "Content-Type: application/json" \
   -d '{{"title": "...", "description": "...", "task_type": "feature", "priority": "P1", "status": "queued"}}'
 
 # Update a task
-curl -s -X PATCH http://localhost:{port}/api/tasks/TASK_ID \
+curl -s -X PATCH '{base_url}/api/tasks/TASK_ID?project_dir={project_dir}' \
   -H "Content-Type: application/json" \
   -d '{{"title": "...", "priority": "P0"}}'
 
 # Cancel a task
-curl -s -X POST http://localhost:{port}/api/tasks/TASK_ID/cancel
+curl -s -X POST '{base_url}/api/tasks/TASK_ID/cancel?project_dir={project_dir}'
 
 # Retry a failed task
-curl -s -X POST http://localhost:{port}/api/tasks/TASK_ID/retry
+curl -s -X POST '{base_url}/api/tasks/TASK_ID/retry?project_dir={project_dir}'
 
 # Get task logs
-curl -s http://localhost:{port}/api/tasks/TASK_ID/logs | jq
+curl -s '{base_url}/api/tasks/TASK_ID/logs?project_dir={project_dir}' | jq
 
 # Get task diff (code changes)
-curl -s http://localhost:{port}/api/tasks/TASK_ID/diff | jq
+curl -s '{base_url}/api/tasks/TASK_ID/diff?project_dir={project_dir}' | jq
 
 # Transition task status
-curl -s -X POST http://localhost:{port}/api/tasks/TASK_ID/transition \
+curl -s -X POST '{base_url}/api/tasks/TASK_ID/transition?project_dir={project_dir}' \
   -H "Content-Type: application/json" \
   -d '{{"status": "queued"}}'
 
 # Delete a task
-curl -s -X DELETE http://localhost:{port}/api/tasks/TASK_ID
+curl -s -X DELETE '{base_url}/api/tasks/TASK_ID?project_dir={project_dir}'
 ```
 
-Task types: `feature`, `bug`, `chore`, `refactor`, `test`, `docs`, `research`, `spike`
+Task types: `feature`, `bug`, `chore`, `refactor`, `test`, `docs`, `research`, `spike`, `custom`
 Priorities: `P0` (critical), `P1` (high), `P2` (medium), `P3` (low)
 Statuses: `backlog`, `queued`, `in_progress`, `in_review`, `done`, `failed`, `cancelled`
 
@@ -84,14 +85,14 @@ Statuses: `backlog`, `queued`, `in_progress`, `in_review`, `done`, `failed`, `ca
 
 ```bash
 # Check orchestrator status (queue depth, active tasks, scheduler state)
-curl -s http://localhost:{port}/api/orchestrator/status | jq
+curl -s '{base_url}/api/orchestrator/status?project_dir={project_dir}' | jq
 
 # Pause/resume the scheduler
-curl -s -X POST http://localhost:{port}/api/orchestrator/control \
+curl -s -X POST '{base_url}/api/orchestrator/control?project_dir={project_dir}' \
   -H "Content-Type: application/json" \
   -d '{{"action": "pause"}}'
 
-curl -s -X POST http://localhost:{port}/api/orchestrator/control \
+curl -s -X POST '{base_url}/api/orchestrator/control?project_dir={project_dir}' \
   -H "Content-Type: application/json" \
   -d '{{"action": "resume"}}'
 ```
@@ -100,13 +101,13 @@ curl -s -X POST http://localhost:{port}/api/orchestrator/control \
 
 ```bash
 # List tasks awaiting review
-curl -s http://localhost:{port}/api/review-queue | jq
+curl -s '{base_url}/api/review-queue?project_dir={project_dir}' | jq
 
 # Approve a reviewed task
-curl -s -X POST http://localhost:{port}/api/review/TASK_ID/approve
+curl -s -X POST '{base_url}/api/review/TASK_ID/approve?project_dir={project_dir}'
 
 # Request changes with guidance
-curl -s -X POST http://localhost:{port}/api/review/TASK_ID/request-changes \
+curl -s -X POST '{base_url}/api/review/TASK_ID/request-changes?project_dir={project_dir}' \
   -H "Content-Type: application/json" \
   -d '{{"guidance": "Please fix the edge case in ..."}}'
 ```
@@ -115,16 +116,16 @@ curl -s -X POST http://localhost:{port}/api/review/TASK_ID/request-changes \
 
 ```bash
 # Metrics (token usage, cost, worker time)
-curl -s http://localhost:{port}/api/metrics | jq
+curl -s '{base_url}/api/metrics?project_dir={project_dir}' | jq
 
 # Project settings
-curl -s http://localhost:{port}/api/settings | jq
+curl -s '{base_url}/api/settings?project_dir={project_dir}' | jq
 
 # Git status
-curl -s http://localhost:{port}/api/git/status | jq
+curl -s '{base_url}/api/git/status?project_dir={project_dir}' | jq
 
 # Worker health
-curl -s http://localhost:{port}/api/workers/health | jq
+curl -s '{base_url}/api/workers/health?project_dir={project_dir}' | jq
 ```
 
 ## Shell Access
