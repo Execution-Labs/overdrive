@@ -22,6 +22,7 @@ CHANNELS = {
     "terminal",
     "notifications",
     "system",
+    "overseer",
 }
 
 

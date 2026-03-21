@@ -139,6 +139,37 @@ class SQLiteDB:
                     (normalized_key, json.dumps(value, separators=(",", ":"), sort_keys=False)),
                 )
 
+    def load_overseer_state(self) -> dict[str, Any]:
+        """Load persisted overseer state from the dedicated table."""
+
+        rows = self.fetch_all("SELECT key, value FROM overseer_state")
+        state: dict[str, Any] = {}
+        for row in rows:
+            key = str(row["key"] or "").strip()
+            if not key:
+                continue
+            raw_value = str(row["value"] or "")
+            try:
+                parsed = json.loads(raw_value)
+            except json.JSONDecodeError:
+                parsed = raw_value
+            state[key] = parsed
+        return state
+
+    def save_overseer_state(self, state: dict[str, Any]) -> None:
+        """Replace overseer state rows atomically."""
+
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM overseer_state")
+            for key, value in state.items():
+                normalized_key = str(key or "").strip()
+                if not normalized_key:
+                    continue
+                conn.execute(
+                    "INSERT INTO overseer_state(key, value) VALUES(?, ?)",
+                    (normalized_key, json.dumps(value, separators=(",", ":"), sort_keys=False)),
+                )
+
     def load_execution_lease(self, task_id: str) -> dict[str, Any] | None:
         """Load one task execution lease payload from the dedicated lease table."""
 
@@ -338,6 +369,15 @@ class SQLiteDB:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS orchestrator_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS overseer_state (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             )

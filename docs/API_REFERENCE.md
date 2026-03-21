@@ -845,6 +845,36 @@ Remove agent record.
 ### `POST /api/agents/{agent_id}/remove`
 Legacy-compatible remove endpoint (same behavior as `DELETE`).
 
+## Overseer (God Mode)
+
+### `POST /api/overseer/start`
+Start God Mode with an objective.
+
+Request:
+- `objective` (string, required)
+- `advice` (list of strings, optional)
+
+### `POST /api/overseer/stop`
+Stop the overseer.
+
+### `GET /api/overseer/status`
+Return current overseer state (status, objective, iteration, etc.).
+
+### `POST /api/overseer/advice`
+Add advice for the overseer agent.
+
+Request:
+- `text` (string, required)
+
+### `DELETE /api/overseer/advice/{index}`
+Remove advice by index.
+
+### `POST /api/overseer/unblock`
+Provide a human response to unblock the overseer.
+
+Request:
+- `response` (string, required)
+
 ## WebSocket
 
 Endpoint: `/ws`
@@ -857,6 +887,7 @@ Channels used by UI:
 - `terminal`
 - `notifications`
 - `system`
+- `overseer`
 
 Event envelope fields:
 - `id`

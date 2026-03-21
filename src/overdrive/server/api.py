@@ -78,6 +78,12 @@ def create_app(
                     ts.shutdown()
                 except Exception:
                     pass
+            from ..runtime.api.routes_overseer import get_overseer_services
+            for svc in get_overseer_services().values():
+                try:
+                    svc.shutdown(timeout=10.0)
+                except Exception:
+                    pass
             app.state.orchestrators = {}
             app.state.containers = {}
             app.state.import_jobs = {}

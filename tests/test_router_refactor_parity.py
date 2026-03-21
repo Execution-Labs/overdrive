@@ -98,6 +98,12 @@ EXPECTED_API_ROUTE_TABLE: set[tuple[str, str]] = {
     ("POST", "/api/terminal/session/{session_id}/input"),
     ("POST", "/api/terminal/session/{session_id}/resize"),
     ("POST", "/api/terminal/session/{session_id}/stop"),
+    ("DELETE", "/api/overseer/advice/{index}"),
+    ("GET", "/api/overseer/status"),
+    ("POST", "/api/overseer/advice"),
+    ("POST", "/api/overseer/start"),
+    ("POST", "/api/overseer/stop"),
+    ("POST", "/api/overseer/unblock"),
 }
 
 
