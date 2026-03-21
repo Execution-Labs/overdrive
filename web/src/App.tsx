@@ -10,7 +10,7 @@ import { ReviewMode, ReviewDecisionType, REVIEW_MODE_OPTIONS, REVIEW_DECISION_OP
 import './styles/orchestrator.css'
 
 type ThemeMode = 'light' | 'dark' | 'system'
-type RouteKey = 'board' | 'execution' | 'settings'
+type RouteKey = 'board' | 'execution' | 'godmode' | 'settings'
 type SettingsTab = 'providers' | 'execution' | 'advanced'
 type CreateTab = 'task' | 'import' | 'review'
 type PullRequestItem = {
@@ -142,6 +142,20 @@ type PrdPreview = {
   chunk_count?: number
   strategy?: string
   ambiguity_warnings?: string[]
+}
+
+type OverseerState = {
+  id: string
+  status: string  // idle | running | completed | blocked | stopped
+  objective: string
+  advice: string[]
+  last_handover: Record<string, unknown> | null
+  iteration: number
+  started_at: string | null
+  finished_at: string | null
+  blocked_reason: string | null
+  human_response: string | null
+  error: string | null
 }
 
 type OrchestratorStatus = {
@@ -425,7 +439,7 @@ type TaskWorkdocDocument = {
 const STORAGE_PROJECT = 'overdrive-project'
 const STORAGE_ROUTE = 'overdrive-route'
 const ADD_REPO_VALUE = '__add_new_repo__'
-const WS_RELOAD_CHANNELS = new Set(['tasks', 'queue', 'agents', 'review', 'terminal', 'notifications'])
+const WS_RELOAD_CHANNELS = new Set(['tasks', 'queue', 'agents', 'review', 'terminal', 'notifications', 'overseer'])
 const LOG_CHUNK_CHARS = 200_000
 const LOG_HISTORY_MAX_CHARS = 5_000_000
 const LOG_NEAR_BOTTOM_PX = 120
@@ -457,6 +471,7 @@ function createEmptyLogAccum(taskId = ''): LogAccumState {
 const ROUTES: Array<{ key: RouteKey; label: string }> = [
   { key: 'board', label: 'Board' },
   { key: 'execution', label: 'Execution' },
+  { key: 'godmode', label: 'God Mode' },
   { key: 'settings', label: 'Settings' },
 ]
 
@@ -1756,6 +1771,12 @@ export default function App() {
   const [projectDir, setProjectDir] = useState<string>(() => localStorage.getItem(STORAGE_PROJECT) || '')
   const [board, setBoard] = useState<BoardResponse>({ columns: {} })
   const [orchestrator, setOrchestrator] = useState<OrchestratorStatus | null>(null)
+  const [overseer, setOverseer] = useState<OverseerState | null>(null)
+  const [overseerObjective, setOverseerObjective] = useState('')
+  const [overseerAdviceInput, setOverseerAdviceInput] = useState('')
+  const [overseerUnblockInput, setOverseerUnblockInput] = useState('')
+  const [overseerBusy, setOverseerBusy] = useState(false)
+  const [overseerError, setOverseerError] = useState('')
   const [_agents, setAgents] = useState<AgentRecord[]>([])
   const [workerHealth, setWorkerHealth] = useState<WorkerHealthRecord[]>([])
   const [workerRoutingRows, setWorkerRoutingRows] = useState<WorkerRoutingRow[]>([])
@@ -3239,6 +3260,7 @@ export default function App() {
         metricsData,
         workerHealthData,
         workerRoutingData,
+        overseerData,
       ] = await Promise.all([
         requestJson<BoardResponse>(buildApiUrl('/api/tasks/board', projectDir)),
         requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/status', projectDir)),
@@ -3249,12 +3271,14 @@ export default function App() {
         requestJson<unknown>(buildApiUrl('/api/metrics', projectDir)).catch(() => null),
         requestJson<unknown>(buildApiUrl('/api/workers/health', projectDir)).catch(() => ({ providers: [] })),
         requestJson<unknown>(buildApiUrl('/api/workers/routing', projectDir)).catch(() => ({ default: 'codex', rows: [] })),
+        requestJson<{ overseer: OverseerState }>(buildApiUrl('/api/overseer/status', projectDir)).catch(() => null),
       ])
       if (requestSeq !== reloadAllSeqRef.current) {
         return
       }
       setBoard(normalizeBoard(boardData))
       setOrchestrator(orchestratorData)
+      setOverseer(overseerData?.overseer ?? null)
       setAgents(agentData.agents || [])
       setProjects(projectData.projects || [])
       setPinnedProjects(pinnedData.items || [])
@@ -3493,7 +3517,7 @@ export default function App() {
     let reconnectTimer: number | null = null
     let reconnectAttempts = 0
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`
-    const subscribedChannels = ['tasks', 'queue', 'agents', 'review', 'terminal', 'notifications', 'system']
+    const subscribedChannels = ['tasks', 'queue', 'agents', 'review', 'terminal', 'notifications', 'overseer', 'system']
 
     const scheduleReconnect = (): void => {
       if (stopped || reconnectTimer !== null) return
@@ -4699,6 +4723,92 @@ export default function App() {
       await reloadAll()
     } catch (err) {
       setError(err instanceof Error ? err.message : `Failed to ${action} orchestrator`)
+    }
+  }
+
+  async function overseerStart(): Promise<void> {
+    if (!overseerObjective.trim()) return
+    setOverseerBusy(true)
+    setOverseerError('')
+    try {
+      const advice = overseer?.advice ?? []
+      const data = await requestJson<{ overseer: OverseerState }>(buildApiUrl('/api/overseer/start', projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ objective: overseerObjective.trim(), advice }),
+      })
+      setOverseer(data.overseer)
+      setOverseerObjective('')
+    } catch (err) {
+      setOverseerError(err instanceof Error ? err.message : 'Failed to start God Mode')
+    } finally {
+      setOverseerBusy(false)
+    }
+  }
+
+  async function overseerStop(): Promise<void> {
+    setOverseerBusy(true)
+    setOverseerError('')
+    try {
+      const data = await requestJson<{ overseer: OverseerState }>(buildApiUrl('/api/overseer/stop', projectDir), {
+        method: 'POST',
+      })
+      setOverseer(data.overseer)
+    } catch (err) {
+      setOverseerError(err instanceof Error ? err.message : 'Failed to stop God Mode')
+    } finally {
+      setOverseerBusy(false)
+    }
+  }
+
+  async function overseerAddAdvice(): Promise<void> {
+    if (!overseerAdviceInput.trim()) return
+    setOverseerBusy(true)
+    try {
+      const data = await requestJson<{ overseer: OverseerState }>(buildApiUrl('/api/overseer/advice', projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: overseerAdviceInput.trim() }),
+      })
+      setOverseer(data.overseer)
+      setOverseerAdviceInput('')
+    } catch (err) {
+      setOverseerError(err instanceof Error ? err.message : 'Failed to add advice')
+    } finally {
+      setOverseerBusy(false)
+    }
+  }
+
+  async function overseerRemoveAdvice(index: number): Promise<void> {
+    setOverseerBusy(true)
+    try {
+      const data = await requestJson<{ overseer: OverseerState }>(buildApiUrl(`/api/overseer/advice/${index}`, projectDir), {
+        method: 'DELETE',
+      })
+      setOverseer(data.overseer)
+    } catch (err) {
+      setOverseerError(err instanceof Error ? err.message : 'Failed to remove advice')
+    } finally {
+      setOverseerBusy(false)
+    }
+  }
+
+  async function overseerUnblock(): Promise<void> {
+    if (!overseerUnblockInput.trim()) return
+    setOverseerBusy(true)
+    setOverseerError('')
+    try {
+      const data = await requestJson<{ overseer: OverseerState }>(buildApiUrl('/api/overseer/unblock', projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response: overseerUnblockInput.trim() }),
+      })
+      setOverseer(data.overseer)
+      setOverseerUnblockInput('')
+    } catch (err) {
+      setOverseerError(err instanceof Error ? err.message : 'Failed to unblock')
+    } finally {
+      setOverseerBusy(false)
     }
   }
 
@@ -7671,8 +7781,159 @@ export default function App() {
     )
   }
 
+  function renderGodMode(): JSX.Element {
+    const st = overseer
+    const isRunning = st?.status === 'running'
+    const isBlocked = st?.status === 'blocked'
+    const isIdle = !st || st.status === 'idle' || st.status === 'stopped' || st.status === 'completed'
+
+    return (
+      <section className="panel godmode-panel">
+        <header className="execution-header">
+          <span className="godmode-title">God Mode</span>
+          {st && st.status !== 'idle' ? (
+            <span className={`status-pill status-pill-prominent ${st.status === 'running' ? 'status-running' : st.status === 'blocked' ? 'status-blocked' : st.status === 'completed' ? 'status-done' : 'status-failed'}`}>
+              {humanizeLabel(st.status)}
+            </span>
+          ) : null}
+          <div className="execution-actions">
+            {isRunning || isBlocked ? (
+              <button className="button button-danger" onClick={() => void overseerStop()} disabled={overseerBusy}>Stop</button>
+            ) : null}
+          </div>
+        </header>
+
+        {overseerError ? (
+          <div className="error-banner">
+            <span>{overseerError}</span>
+            <button type="button" className="error-banner-dismiss" onClick={() => setOverseerError('')} aria-label="Dismiss">&times;</button>
+          </div>
+        ) : null}
+
+        {isIdle ? (
+          <div className="godmode-start-form">
+            <label className="field-label" htmlFor="godmode-objective">Objective</label>
+            <textarea
+              id="godmode-objective"
+              className="godmode-objective-input"
+              rows={3}
+              value={overseerObjective}
+              onChange={(e) => setOverseerObjective(e.target.value)}
+              placeholder="Describe what God Mode should achieve..."
+              disabled={overseerBusy}
+            />
+            <div className="godmode-advice-section">
+              <label className="field-label">Advice (optional guidance for the agent)</label>
+              {(st?.advice ?? []).map((a, i) => (
+                <div key={i} className="godmode-advice-item">
+                  <span>{a}</span>
+                  <button className="godmode-advice-remove" onClick={() => void overseerRemoveAdvice(i)} disabled={overseerBusy} title="Remove">&times;</button>
+                </div>
+              ))}
+              <div className="godmode-advice-add">
+                <input
+                  className="godmode-advice-input"
+                  value={overseerAdviceInput}
+                  onChange={(e) => setOverseerAdviceInput(e.target.value)}
+                  placeholder="Add advice..."
+                  disabled={overseerBusy}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void overseerAddAdvice() } }}
+                />
+                <button className="button" onClick={() => void overseerAddAdvice()} disabled={overseerBusy || !overseerAdviceInput.trim()}>Add</button>
+              </div>
+            </div>
+            <button className="button button-primary godmode-start-btn" onClick={() => void overseerStart()} disabled={overseerBusy || !overseerObjective.trim()}>
+              Activate God Mode
+            </button>
+          </div>
+        ) : null}
+
+        {!isIdle && st ? (
+          <div className="godmode-status">
+            <div className="godmode-info-grid">
+              <div className="godmode-info-item">
+                <span className="field-label">Objective</span>
+                <p>{st.objective}</p>
+              </div>
+              <div className="godmode-info-row">
+                <div className="godmode-info-item">
+                  <span className="field-label">Iteration</span>
+                  <strong>{st.iteration}</strong>
+                </div>
+                <div className="godmode-info-item">
+                  <span className="field-label">Started</span>
+                  <span>{st.started_at ? new Date(st.started_at).toLocaleString() : '-'}</span>
+                </div>
+                {st.finished_at ? (
+                  <div className="godmode-info-item">
+                    <span className="field-label">Finished</span>
+                    <span>{new Date(st.finished_at).toLocaleString()}</span>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            {st.error ? (
+              <div className="error-banner"><span>{st.error}</span></div>
+            ) : null}
+
+            {st.advice.length > 0 ? (
+              <div className="godmode-advice-section">
+                <label className="field-label">Active Advice</label>
+                {st.advice.map((a, i) => (
+                  <div key={i} className="godmode-advice-item">
+                    <span>{a}</span>
+                    <button className="godmode-advice-remove" onClick={() => void overseerRemoveAdvice(i)} disabled={overseerBusy} title="Remove">&times;</button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {isRunning ? (
+              <div className="godmode-advice-add">
+                <input
+                  className="godmode-advice-input"
+                  value={overseerAdviceInput}
+                  onChange={(e) => setOverseerAdviceInput(e.target.value)}
+                  placeholder="Add advice..."
+                  disabled={overseerBusy}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void overseerAddAdvice() } }}
+                />
+                <button className="button" onClick={() => void overseerAddAdvice()} disabled={overseerBusy || !overseerAdviceInput.trim()}>Add</button>
+              </div>
+            ) : null}
+
+            {isBlocked ? (
+              <div className="godmode-blocked">
+                <p className="godmode-blocked-reason"><strong>Blocked:</strong> {st.blocked_reason ?? 'Unknown reason'}</p>
+                <div className="godmode-unblock-form">
+                  <textarea
+                    className="godmode-unblock-input"
+                    rows={2}
+                    value={overseerUnblockInput}
+                    onChange={(e) => setOverseerUnblockInput(e.target.value)}
+                    placeholder="Provide information to unblock..."
+                    disabled={overseerBusy}
+                  />
+                  <button className="button button-primary" onClick={() => void overseerUnblock()} disabled={overseerBusy || !overseerUnblockInput.trim()}>Unblock</button>
+                </div>
+              </div>
+            ) : null}
+
+            {st.last_handover ? (
+              <details className="godmode-handover">
+                <summary className="field-label">Last Handover</summary>
+                <pre className="godmode-handover-json">{JSON.stringify(st.last_handover, null, 2)}</pre>
+              </details>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+    )
+  }
+
   function renderRoute(): JSX.Element {
     if (route === 'execution') return renderExecution()
+    if (route === 'godmode') return renderGodMode()
     if (route === 'settings') return renderSettings()
     return renderBoard()
   }

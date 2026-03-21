@@ -3729,6 +3729,12 @@ textarea {
   color: #fff;
 }
 
+/* God Mode dark */
+[data-theme="dark"] .godmode-advice-item { background: var(--color-bg-tertiary); border-color: var(--color-border-default); }
+[data-theme="dark"] .godmode-blocked { background: #28220a; border-color: #7a6828; }
+[data-theme="dark"] .godmode-blocked-reason { color: #e0cc70; }
+[data-theme="dark"] .godmode-handover-json { background: var(--color-bg-tertiary); border-color: var(--color-border-default); }
+
 /* ── System-auto dark: mirror all [data-theme="dark"] overrides ── */
 @media (prefers-color-scheme: dark) {
   [data-theme="system"] .orchestrator-app,
@@ -3834,6 +3840,12 @@ textarea {
   [data-theme="system"] .toggle-button.is-active { background: rgba(74, 183, 127, 0.14); color: #4ade80; }
   [data-theme="system"] .button-primary { background: var(--color-primary-600); color: #fff; }
   [data-theme="system"] .board-icon-btn-primary { background: var(--color-primary-600); color: #fff; }
+
+  /* God Mode */
+  [data-theme="system"] .godmode-advice-item { background: var(--color-bg-tertiary); border-color: var(--color-border-default); }
+  [data-theme="system"] .godmode-blocked { background: #28220a; border-color: #7a6828; }
+  [data-theme="system"] .godmode-blocked-reason { color: #e0cc70; }
+  [data-theme="system"] .godmode-handover-json { background: var(--color-bg-tertiary); border-color: var(--color-border-default); }
 }
 
 /* ------------------------------------------------------------------ */
@@ -4160,5 +4172,144 @@ textarea {
   font-size: 0.72rem;
   color: var(--color-error-600, #dc2626);
   margin-top: 0.3rem;
+  word-break: break-word;
+}
+
+/* God Mode */
+.godmode-panel {
+  max-width: 720px;
+}
+
+.godmode-title {
+  font-weight: var(--font-bold);
+  font-size: var(--text-base);
+}
+
+.godmode-start-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.godmode-objective-input {
+  resize: vertical;
+}
+
+.godmode-start-btn {
+  align-self: flex-start;
+}
+
+.godmode-advice-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.godmode-advice-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.5rem;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  font-size: 0.8rem;
+}
+
+.godmode-advice-item span {
+  flex: 1;
+}
+
+.godmode-advice-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 0.2rem;
+  transition: color var(--transition-fast);
+}
+
+.godmode-advice-remove:hover {
+  color: var(--color-error-600);
+}
+
+.godmode-advice-add {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.godmode-advice-input {
+  flex: 1;
+}
+
+.godmode-status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.godmode-info-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.godmode-info-row {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.godmode-info-item p {
+  margin: 0.2rem 0 0 0;
+  font-size: var(--text-sm);
+}
+
+.godmode-blocked {
+  padding: 0.6rem;
+  background: var(--color-warning-50);
+  border: 1px solid var(--color-warning-200);
+  border-radius: var(--radius-md);
+}
+
+.godmode-blocked-reason {
+  margin: 0 0 0.5rem 0;
+  font-size: var(--text-sm);
+}
+
+.godmode-unblock-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.godmode-unblock-input {
+  resize: vertical;
+}
+
+.godmode-unblock-form .button {
+  align-self: flex-start;
+}
+
+.godmode-handover {
+  margin-top: 0.25rem;
+}
+
+.godmode-handover summary {
+  cursor: pointer;
+}
+
+.godmode-handover-json {
+  max-height: 300px;
+  overflow: auto;
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  padding: 0.5rem;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
   word-break: break-word;
 }
