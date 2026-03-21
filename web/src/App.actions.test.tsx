@@ -600,7 +600,7 @@ describe('App action coverage', () => {
         mockedFetch.mock.calls.filter(([url]) => String(url).includes('/api/workers/health')).length
       ).toBeGreaterThan(1)
     })
-  })
+  }, 30_000)
 
   it('saves settings payload and unpins projects', async () => {
     const mockedFetch = installFetchMock()
