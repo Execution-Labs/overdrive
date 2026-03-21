@@ -14,6 +14,11 @@ Non-negotiable rules:
 - Do not re-open issues already resolved in earlier cycles.
 - Do not leave stubs, TODOs, placeholders, empty bodies, or pass-through no-ops.
 
+Workdoc requirements:
+- Update `## Fix Log` in `.workdoc.md` with which issues were fixed, what changed, and key decisions.
+- Use a sub-heading `### Fix cycle N` where N is the attempt number from the prompt header (default to 1 if not present).
+- Preserve prior fix cycle entries — append your entry, do not overwrite earlier cycles.
+
 Validation requirements (targeted scope only):
 - Run tests directly related to the files you changed. Do NOT run the full test suite.
 - Run lint and typecheck on changed files only.

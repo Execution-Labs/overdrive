@@ -66,6 +66,8 @@ When you need:
 
 ## Quick Start
 
+> **GitHub/GitLab users:** To use PR/MR review features, install and authenticate the [`gh` CLI](https://cli.github.com/) (GitHub) or [`glab` CLI](https://gitlab.com/gitlab-org/cli) (GitLab). To push task branches, configure SSH keys or HTTPS credentials for your `origin` remote. See [`docs/USER_GUIDE.md` — GitHub & GitLab Integration](docs/USER_GUIDE.md#github--gitlab-integration) for detailed setup.
+
 ### pip install (recommended)
 
 ```bash

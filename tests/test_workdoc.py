@@ -926,29 +926,26 @@ def test_shared_verification_section_appends_attempt_numbering_across_steps(
     assert "benchmark attempt two" in content
 
 
-def test_sync_verify_ignores_worker_changes_and_uses_summary(
+def test_sync_verify_accepts_worker_changes(
     service: OrchestratorService, task: Task, project_dir: Path
 ) -> None:
-    """Verify step should not accept worker edits to workdoc; orchestrator writes summary."""
+    """Verify step should accept worker edits to workdoc (worker writes results directly)."""
     service._init_workdoc(task, project_dir)
     canonical = service._workdoc_canonical_path(task.id)
     worktree = service._workdoc_worktree_path(project_dir)
-    before = canonical.read_text()
 
-    # Worker attempts to mutate verification section directly.
+    # Worker writes verification results directly.
     modified = worktree.read_text().replace(
         "_Pending: will be populated by the verify step._",
-        "worker-edited verification text",
+        "### Attempt 1\nAll tests passed (exit code 0)",
     )
     worktree.write_text(modified, encoding="utf-8")
 
     service._sync_workdoc(task, "verify", project_dir, "orchestrator verify summary")
 
     content = canonical.read_text()
-    assert content != modified
-    assert "orchestrator verify summary" in content
-    assert "worker-edited verification text" not in content
-    assert content != before
+    assert "### Attempt 1" in content
+    assert "All tests passed (exit code 0)" in content
 
 
 def test_sync_orchestrator_summary_clears_stale_sync_diagnostics(
@@ -961,6 +958,8 @@ def test_sync_orchestrator_summary_clears_stale_sync_diagnostics(
     task.metadata["workdoc_sync_step"] = "plan"
     task.metadata["workdoc_sync_attempt"] = 9
 
+    # Use verify step — when worker doesn't modify the file, the orchestrator
+    # fallback-appends the summary and should clear stale diagnostics.
     service._sync_workdoc(task, "verify", project_dir, "orchestrator verify summary", attempt=1)
 
     assert task.metadata.get("workdoc_sync_error_type") is None
@@ -969,30 +968,26 @@ def test_sync_orchestrator_summary_clears_stale_sync_diagnostics(
     assert task.metadata.get("workdoc_sync_attempt") is None
 
 
-def test_sync_implement_fix_ignores_worker_changes_and_formats_cycles(
+def test_sync_implement_fix_accepts_worker_changes(
     service: OrchestratorService, task: Task, project_dir: Path
 ) -> None:
-    """implement_fix writes should be orchestrator-managed with cycle headings."""
+    """implement_fix should accept worker edits to workdoc (worker writes fix log directly)."""
     service._init_workdoc(task, project_dir)
     canonical = service._workdoc_canonical_path(task.id)
     worktree = service._workdoc_worktree_path(project_dir)
 
-    # Worker tries to write directly to Fix Log; should be ignored.
+    # Worker writes fix log directly.
     modified = worktree.read_text().replace(
         "_Pending: will be populated as needed._",
-        "worker-edited fix log",
+        "### Fix cycle 2\nFixed null check in parser.",
     )
     worktree.write_text(modified, encoding="utf-8")
 
     service._sync_workdoc(task, "implement_fix", project_dir, "Fixed null check in parser.", attempt=2)
-    service._sync_workdoc(task, "implement_fix", project_dir, "Adjusted edge-case tests.", attempt=3)
 
     content = canonical.read_text()
-    assert "worker-edited fix log" not in content
-    assert "### Fix Cycle 2" in content
+    assert "### Fix cycle 2" in content
     assert "Fixed null check in parser." in content
-    assert "### Fix Cycle 3" in content
-    assert "Adjusted edge-case tests." in content
 
 
 def test_sync_report_ignores_worker_changes_and_uses_summary(

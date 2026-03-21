@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Optional, cast
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, model_validator
 
 from ...collaboration.modes import normalize_hitl_mode
@@ -3564,13 +3565,13 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         platform = _detect_git_platform(git_dir)
 
         if platform is None:
-            return {"platform": None, "error": "Could not detect GitHub or GitLab remote", "items": []}
+            return {"platform": None, "error": "Could not detect GitHub or GitLab remote", "error_code": "no_remote", "items": []}
 
         # Check CLI availability.
         if platform == "github" and not shutil.which("gh"):
-            return {"platform": platform, "error": "GitHub CLI (gh) is not installed. Install it from https://cli.github.com/", "items": []}
+            return {"platform": platform, "error": "GitHub CLI (gh) is not installed. Install it from https://cli.github.com/", "error_code": "cli_not_installed", "items": []}
         if platform == "gitlab" and not shutil.which("glab"):
-            return {"platform": platform, "error": "GitLab CLI (glab) is not installed. Install it from https://gitlab.com/gitlab-org/cli", "items": []}
+            return {"platform": platform, "error": "GitLab CLI (glab) is not installed. Install it from https://gitlab.com/gitlab-org/cli", "error_code": "cli_not_installed", "items": []}
 
         # Fetch open PRs/MRs.
         items: list[dict[str, Any]] = []
@@ -3596,8 +3597,10 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                         "url": raw.get("url", ""),
                     })
             else:
+                # Note: --state flag was removed in glab ~1.80; omit it since
+                # `glab mr list` defaults to open MRs.
                 result = subprocess.run(
-                    ["glab", "mr", "list", "--output", "json", "--state", "opened"],
+                    ["glab", "mr", "list", "--output", "json"],
                     cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
                 )
                 raw_items = json.loads(result.stdout)
@@ -3616,7 +3619,19 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                         "url": raw.get("web_url", ""),
                     })
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
-            return {"platform": platform, "error": f"Failed to list pull requests: {exc}", "items": []}
+            stderr_text = ""
+            if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+                stderr_text = exc.stderr.strip()
+            auth_keywords = ("401", "403", "auth", "login", "token", "credential", "permission")
+            if stderr_text and any(kw in stderr_text.lower() for kw in auth_keywords):
+                error_code = "cli_not_authenticated"
+                error_msg = f"CLI authentication issue: {stderr_text}"
+            else:
+                error_code = "cli_error"
+                error_msg = f"Failed to list pull requests: {exc}"
+                if stderr_text:
+                    error_msg += f"\n{stderr_text}"
+            return {"platform": platform, "error": error_msg, "error_code": error_code, "items": []}
 
         # Annotate with existing review tasks.
         task_type_key = "pr_review" if platform == "github" else "mr_review"
@@ -3639,7 +3654,77 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             item["has_review_task"] = existing_task_id is not None
             item["review_task_id"] = existing_task_id
 
-        return {"platform": platform, "error": None, "items": items}
+        return {"platform": platform, "error": None, "error_code": None, "items": items}
+
+    # ------------------------------------------------------------------
+    # GET /git-platform-status
+    # ------------------------------------------------------------------
+
+    @router.get("/git-platform-status")
+    async def git_platform_status(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Check GitHub/GitLab integration status: remote, CLI installed, CLI authenticated.
+
+        Args:
+            project_dir: Optional project directory for runtime state resolution.
+
+        Returns:
+            A dict with platform, remote_url, cli_installed, cli_authenticated,
+            cli_name, and setup_steps.
+        """
+        container, _bus, _orchestrator = deps.ctx(project_dir)
+        git_dir = container.project_dir
+
+        # Step 1: Check remote.
+        remote_url: str | None = None
+        try:
+            result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=git_dir, capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                remote_url = result.stdout.strip()
+        except Exception:
+            pass
+
+        platform = _detect_git_platform(git_dir)
+        cli_name: str | None = None
+        cli_installed = False
+        cli_authenticated = False
+
+        if platform == "github":
+            cli_name = "gh"
+        elif platform == "gitlab":
+            cli_name = "glab"
+
+        # Step 2: Check CLI installed.
+        if cli_name:
+            cli_installed = shutil.which(cli_name) is not None
+
+        # Step 3: Check CLI authenticated.
+        if cli_installed and cli_name:
+            try:
+                auth_result = subprocess.run(
+                    [cli_name, "auth", "status"],
+                    cwd=git_dir, capture_output=True, text=True, timeout=10,
+                )
+                cli_authenticated = auth_result.returncode == 0
+            except Exception:
+                cli_authenticated = False
+
+        setup_steps = [
+            {"step": 1, "label": "Configure git remote", "done": remote_url is not None},
+            {"step": 2, "label": f"Install {cli_name or 'CLI'}", "done": cli_installed},
+            {"step": 3, "label": f"Authenticate {cli_name or 'CLI'}", "done": cli_authenticated},
+        ]
+
+        return {
+            "platform": platform,
+            "remote_url": remote_url,
+            "cli_installed": cli_installed,
+            "cli_authenticated": cli_authenticated,
+            "cli_name": cli_name,
+            "setup_steps": setup_steps,
+        }
 
     # ------------------------------------------------------------------
     # POST /pull-requests/{number}/review
@@ -3751,8 +3836,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         bus.emit(channel="tasks", event_type="task.created", entity_id=review_task.id, payload={"status": review_task.status})
         return {"task": _task_payload(review_task, orchestrator=orchestrator)}
 
-    @router.post("/tasks/{task_id}/post-review-comments")
-    async def post_review_comments(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+    @router.post("/tasks/{task_id}/post-review-comments", response_model=None)
+    async def post_review_comments(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any] | JSONResponse:
         """Publish review comments that were previously generated in dry-run mode.
 
         Args:
@@ -3791,6 +3876,38 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             raise HTTPException(status_code=409, detail="Missing comment platform info")
 
         git_dir = Path(orchestrator.step_project_dir(task))
+
+        # Pre-check CLI availability so we can return a structured error_code.
+        platform = str(platform_info.get("platform", ""))
+        cli_name = "gh" if platform == "github" else "glab" if platform == "gitlab" else None
+        if cli_name and not shutil.which(cli_name):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": f"{cli_name} CLI is not installed. Install it to post review comments.",
+                    "code": "cli_not_installed",
+                },
+            )
+        if cli_name:
+            try:
+                auth_result = await asyncio.to_thread(
+                    subprocess.run,
+                    [cli_name, "auth", "status"],
+                    cwd=str(git_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if auth_result.returncode != 0:
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "detail": f"{cli_name} CLI is not authenticated. Run '{cli_name} auth login' to authenticate.",
+                            "code": "cli_not_authenticated",
+                        },
+                    )
+            except Exception:
+                pass  # If auth check itself fails, proceed and let post_comments_batch report errors.
 
         post_results = await asyncio.to_thread(
             post_comments_batch,

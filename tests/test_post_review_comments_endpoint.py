@@ -28,7 +28,10 @@ def _client_and_container(tmp_path: Path) -> tuple[TestClient, Container]:
     _git_init(tmp_path)
     app = create_app(project_dir=str(tmp_path))
     client = TestClient(app)
-    container = Container(tmp_path)
+    # Trigger lazy container init by hitting any endpoint
+    client.get("/api/settings")
+    key = str(tmp_path.resolve())
+    container = app.state.containers[key]
     return client, container
 
 
@@ -119,9 +122,13 @@ class TestPostReviewComments:
             CommentPostResult(success=False, error="rate limited"),
         ]
 
+        mock_auth = subprocess.CompletedProcess(args=["gh", "auth", "status"], returncode=0)
         with patch(
             "overdrive.comments.writer.post_comments_batch",
             return_value=mock_results,
+        ), patch("shutil.which", return_value="/usr/bin/gh"), patch(
+            "overdrive.runtime.api.routes_tasks.subprocess.run",
+            return_value=mock_auth,
         ):
             resp = client.post(f"/api/tasks/{task.id}/post-review-comments")
 

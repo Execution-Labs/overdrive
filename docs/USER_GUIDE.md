@@ -211,7 +211,8 @@ handling in the auth module"), and click **Create Review** to generate a review
 task.
 
 Requires the `gh` CLI (GitHub) or `glab` CLI (GitLab) to be installed and
-authenticated.
+authenticated. See [GitHub & GitLab Integration](#github--gitlab-integration)
+for setup instructions.
 
 ---
 
@@ -758,6 +759,221 @@ Routing behavior:
 
 Check provider health at any time with the **Recheck providers** button in
 Settings → Providers, or via `GET /api/workers/health`.
+
+---
+
+## GitHub & GitLab Integration
+
+Overdrive integrates with GitHub and GitLab for two purposes:
+
+1. **PR/MR review** — listing, reviewing, and commenting on pull requests (GitHub) or merge requests (GitLab). Requires the platform CLI (`gh` or `glab`).
+2. **Git push** — pushing task branches to your remote. Requires standard git authentication (SSH or HTTPS).
+
+### Prerequisites
+
+| Feature | Requires | Why |
+|---|---|---|
+| PR/MR review (GitHub) | `gh` CLI installed and authenticated | Overdrive calls `gh pr list`, `gh pr view`, `gh pr diff`, and `gh api` |
+| PR/MR review (GitLab) | `glab` CLI installed and authenticated | Overdrive calls `glab mr list`, `glab mr view`, `glab mr diff`, and `glab api` |
+| Git push | A configured `origin` remote with valid credentials | Overdrive runs `git push` via your local git configuration |
+| Platform detection | An `origin` remote URL pointing to GitHub or GitLab | Overdrive parses `git remote get-url origin` to determine the platform |
+
+### Setting up GitHub CLI (`gh`)
+
+#### Install
+
+| Platform | Command |
+|---|---|
+| macOS (Homebrew) | `brew install gh` |
+| Linux (apt) | `sudo apt install gh` |
+| Linux (dnf) | `sudo dnf install gh` |
+| Windows (winget) | `winget install GitHub.cli` |
+| Windows (scoop) | `scoop install gh` |
+| Other | See https://cli.github.com/ |
+
+#### Authenticate
+
+```bash
+gh auth login
+```
+
+Follow the interactive prompts. Choose HTTPS or SSH depending on how your git
+remote is configured. When prompted for scopes, accept the defaults — Overdrive
+needs `repo` scope for private repositories.
+
+For non-interactive environments (CI, containers), use a personal access token:
+
+```bash
+gh auth login --with-token < token.txt
+```
+
+The token needs `repo` scope (or `public_repo` for public-only repositories).
+
+#### Verify
+
+```bash
+# Confirm authentication status
+gh auth status
+
+# Test that PR listing works from your project directory
+cd /path/to/your/repo
+gh pr list
+```
+
+If `gh auth status` shows "not logged in", re-run `gh auth login`.
+
+### Setting up GitLab CLI (`glab`)
+
+#### Install
+
+| Platform | Command |
+|---|---|
+| macOS (Homebrew) | `brew install glab` |
+| Linux (apt) | See https://gitlab.com/gitlab-org/cli#installation |
+| Linux (snap) | `sudo snap install glab` |
+| Windows (winget) | `winget install GLab.GLab` |
+| Other | See https://gitlab.com/gitlab-org/cli |
+
+> **Note:** `pip install python-gitlab` installs the Python API library, not the `glab` CLI.
+
+#### Authenticate
+
+```bash
+glab auth login
+```
+
+Follow the prompts to select your GitLab instance (gitlab.com or self-hosted)
+and authentication method.
+
+For self-hosted GitLab instances, specify the hostname:
+
+```bash
+glab auth login --hostname gitlab.example.com
+```
+
+For non-interactive environments, use a personal access token:
+
+```bash
+glab auth login --hostname gitlab.com --token <your-token>
+```
+
+The token needs `api` scope.
+
+#### Verify
+
+```bash
+# Confirm authentication status
+glab auth status
+
+# Test that MR listing works from your project directory
+cd /path/to/your/repo
+glab mr list
+```
+
+### Setting up git push (SSH)
+
+If your `origin` remote uses an SSH URL (e.g., `git@github.com:org/repo.git`):
+
+1. **Generate an SSH key** (if you don't have one):
+   ```bash
+   ssh-keygen -t ed25519 -C "your_email@example.com"
+   ```
+
+2. **Add the key to your SSH agent**:
+   ```bash
+   eval "$(ssh-agent -s)"
+   ssh-add ~/.ssh/id_ed25519
+   ```
+
+3. **Add the public key to your platform**:
+   - GitHub: Settings → SSH and GPG keys → New SSH key. Paste contents of `~/.ssh/id_ed25519.pub`.
+   - GitLab: Preferences → SSH Keys → Add new key. Paste contents of `~/.ssh/id_ed25519.pub`.
+
+4. **Verify SSH connectivity**:
+   ```bash
+   # GitHub
+   ssh -T git@github.com
+
+   # GitLab (or your self-hosted hostname)
+   ssh -T git@gitlab.com
+   ```
+
+   A successful response includes your username (e.g., "Hi username! You've
+   successfully authenticated").
+
+### Setting up git push (HTTPS)
+
+If your `origin` remote uses an HTTPS URL (e.g., `https://github.com/org/repo.git`):
+
+1. **Configure a credential helper** so git caches your credentials:
+   ```bash
+   # macOS (uses Keychain)
+   git config --global credential.helper osxkeychain
+
+   # Linux (caches in memory for 1 hour)
+   git config --global credential.helper 'cache --timeout=3600'
+
+   # Windows (uses Windows Credential Manager)
+   git config --global credential.helper manager
+   ```
+
+2. **Authenticate via the platform CLI** (recommended — this configures git
+   credentials automatically):
+   ```bash
+   # GitHub — sets up HTTPS credentials for git
+   gh auth setup-git
+
+   # GitLab — glab configures credentials during `glab auth login`
+   ```
+
+3. **Verify push access**:
+   ```bash
+   cd /path/to/your/repo
+   git remote -v          # confirm origin points to your repo
+   git push --dry-run     # test push without actually pushing
+   ```
+
+### Configuring the origin remote
+
+If Overdrive reports "No origin remote configured", add one:
+
+```bash
+# SSH
+git remote add origin git@github.com:your-org/your-repo.git
+
+# HTTPS
+git remote add origin https://github.com/your-org/your-repo.git
+```
+
+To change an existing remote URL:
+
+```bash
+git remote set-url origin git@github.com:your-org/your-repo.git
+```
+
+Verify with:
+
+```bash
+git remote -v
+```
+
+The output should show `origin` with fetch and push URLs pointing to your
+GitHub or GitLab repository.
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| "gh: command not found" | `gh` CLI not installed | Install per the table above |
+| "glab: command not found" | `glab` CLI not installed | Install per the table above |
+| `gh pr list` returns auth error | Not authenticated or token expired | Run `gh auth login` |
+| `glab mr list` returns auth error | Not authenticated or token expired | Run `glab auth login` |
+| "No 'origin' remote configured" | Missing git remote | Run `git remote add origin <url>` |
+| "Permission denied (publickey)" | SSH key not configured or not added to platform | Add SSH key per the SSH setup section |
+| "Authentication failed for 'https://...'" | HTTPS credentials missing or expired | Run `gh auth setup-git` or configure a credential helper |
+| "remote rejected ... protected branch" | Branch protection rules prevent direct push | Push to a feature branch instead, then open a PR/MR |
+| PR/MR list is empty but PRs exist | `gh`/`glab` authenticated to a different account | Check `gh auth status` / `glab auth status` and re-login if needed |
+| Platform not detected | Origin URL doesn't match GitHub/GitLab patterns | Verify `git remote get-url origin` returns a GitHub or GitLab URL |
 
 ---
 

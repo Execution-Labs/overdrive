@@ -303,6 +303,7 @@ type SystemSettings = {
   orchestrator: {
     concurrency: number
     auto_deps: boolean
+    auto_fix_push: boolean
     max_review_attempts: number
     max_merge_conflict_attempts: number
     step_timeout_seconds: number
@@ -568,6 +569,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
   orchestrator: {
     concurrency: 2,
     auto_deps: true,
+    auto_fix_push: false,
     max_review_attempts: 10,
     max_merge_conflict_attempts: 3,
     step_timeout_seconds: 0,
@@ -1166,6 +1168,7 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
     orchestrator: {
       concurrency: Number.isFinite(maybeConcurrency) ? Math.max(1, Math.floor(maybeConcurrency)) : DEFAULT_SETTINGS.orchestrator.concurrency,
       auto_deps: typeof orchestrator.auto_deps === 'boolean' ? orchestrator.auto_deps : DEFAULT_SETTINGS.orchestrator.auto_deps,
+      auto_fix_push: typeof orchestrator.auto_fix_push === 'boolean' ? orchestrator.auto_fix_push : DEFAULT_SETTINGS.orchestrator.auto_fix_push,
       max_review_attempts: Number.isFinite(maybeMaxReviewAttempts) ? Math.max(1, Math.floor(maybeMaxReviewAttempts)) : DEFAULT_SETTINGS.orchestrator.max_review_attempts,
       max_merge_conflict_attempts: Number.isFinite(maybeMaxMergeConflictAttempts)
         ? Math.min(10, Math.max(1, Math.floor(maybeMaxMergeConflictAttempts)))
@@ -1779,15 +1782,22 @@ export default function App() {
   const [pushPopoverOpen, setPushPopoverOpen] = useState(false)
   const [pushTargetBranch, setPushTargetBranch] = useState('')
   const [pushInProgress, setPushInProgress] = useState(false)
+  const [pushAutoFixRunning, setPushAutoFixRunning] = useState(false)
   const [pushMessage, setPushMessage] = useState('')
   const [pushError, setPushError] = useState('')
+  const [pushOutputLines, setPushOutputLines] = useState<string[]>([])
+  const [autoNameInProgress, setAutoNameInProgress] = useState(false)
 
   const [workOpen, setWorkOpen] = useState(false)
   const [createTab, setCreateTab] = useState<CreateTab>('task')
   const [prList, setPrList] = useState<PullRequestItem[]>([])
   const [prListLoading, setPrListLoading] = useState(false)
   const [prListError, setPrListError] = useState('')
+  const [prErrorCode, setPrErrorCode] = useState<string | null>(null)
   const [prPlatform, setPrPlatform] = useState<string | null>(null)
+  const [postCommentsError, setPostCommentsError] = useState<string | null>(null)
+  const [postCommentsErrorCode, setPostCommentsErrorCode] = useState<string | null>(null)
+  const [platformStatus, setPlatformStatus] = useState<{ platform: string | null; cli_installed: boolean; cli_authenticated: boolean; cli_name: string | null; setup_steps: { step: number; label: string; done: boolean }[] } | null>(null)
   const [selectedPrNumber, setSelectedPrNumber] = useState<number | null>(null)
   const [prReviewGuidance, setPrReviewGuidance] = useState('')
   const [prReviewMode, setPrReviewMode] = useState<ReviewMode>(ReviewMode.FixOnly)
@@ -2032,6 +2042,7 @@ export default function App() {
   }, [settingsSuccess])
   const [settingsConcurrency, setSettingsConcurrency] = useState(String(DEFAULT_SETTINGS.orchestrator.concurrency))
   const [settingsAutoDeps, setSettingsAutoDeps] = useState(DEFAULT_SETTINGS.orchestrator.auto_deps)
+  const [settingsAutoFixPush, setSettingsAutoFixPush] = useState(DEFAULT_SETTINGS.orchestrator.auto_fix_push)
   const [settingsMaxReviewAttempts, setSettingsMaxReviewAttempts] = useState(String(DEFAULT_SETTINGS.orchestrator.max_review_attempts))
   const [settingsMaxMergeConflictAttempts, setSettingsMaxMergeConflictAttempts] = useState(
     String(DEFAULT_SETTINGS.orchestrator.max_merge_conflict_attempts)
@@ -2262,6 +2273,7 @@ export default function App() {
   function applySettings(payload: SystemSettings): void {
     setSettingsConcurrency(String(payload.orchestrator.concurrency))
     setSettingsAutoDeps(payload.orchestrator.auto_deps)
+    setSettingsAutoFixPush(payload.orchestrator.auto_fix_push)
     setSettingsMaxReviewAttempts(String(payload.orchestrator.max_review_attempts))
     setSettingsMaxMergeConflictAttempts(String(payload.orchestrator.max_merge_conflict_attempts))
     setSettingsStepTimeoutSeconds(String(payload.orchestrator.step_timeout_seconds))
@@ -3283,14 +3295,18 @@ export default function App() {
 
   async function handleGitPush(targetBranch?: string, autoName?: boolean): Promise<void> {
     setPushInProgress(true)
+    setPushAutoFixRunning(false)
     setPushError('')
     setPushMessage('')
+    setPushOutputLines([])
+    let autoFixStarted = false
     try {
       const result = await requestJson<{
         success: boolean
         error: string | null
         remote_branch: string
         pushed_commits: number
+        auto_fix?: boolean
       }>(buildApiUrl('/api/git/push', projectDirRef.current), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3299,6 +3315,13 @@ export default function App() {
           auto_name: autoName || false,
         }),
       })
+      if (result.auto_fix) {
+        // Worker is running in background — keep pushInProgress true.
+        // WebSocket git.pushed / git.push_output events will update the UI.
+        autoFixStarted = true
+        setPushAutoFixRunning(true)
+        return
+      }
       setPushMessage(
         result.pushed_commits === 0
           ? `Set upstream tracking to ${result.remote_branch}`
@@ -3309,9 +3332,49 @@ export default function App() {
       void fetchGitStatus()
       window.setTimeout(() => setPushMessage(''), 6000)
     } catch (err) {
-      setPushError(err instanceof Error ? err.message : 'Push failed')
+      const msg = err instanceof Error ? err.message : 'Push failed'
+      if (msg !== 'Push cancelled') {
+        setPushError(msg)
+      }
     } finally {
-      setPushInProgress(false)
+      if (!autoFixStarted) {
+        setPushInProgress(false)
+      }
+    }
+  }
+
+  async function handleCancelPush(): Promise<void> {
+    try {
+      await requestJson<{ cancelled: boolean }>(
+        buildApiUrl('/api/git/push/cancel', projectDirRef.current),
+        { method: 'POST' },
+      )
+    } catch {
+      // best-effort
+    }
+  }
+
+  async function handleAutoNamePush(): Promise<void> {
+    setAutoNameInProgress(true)
+    setPushError('')
+    setPushMessage('')
+    try {
+      const suggestion = await requestJson<{
+        branch_name: string | null
+        error: string | null
+      }>(buildApiUrl('/api/git/suggest-branch-name', projectDirRef.current), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      if (suggestion.error || !suggestion.branch_name) {
+        setPushError(suggestion.error || 'Failed to generate branch name')
+        return
+      }
+      await handleGitPush(suggestion.branch_name)
+    } catch (err) {
+      setPushError(err instanceof Error ? err.message : 'Auto name generation failed')
+    } finally {
+      setAutoNameInProgress(false)
     }
   }
 
@@ -3324,6 +3387,7 @@ export default function App() {
 
   async function refreshWithSchedulerRepair(): Promise<void> {
     await reloadAll()
+    void fetchGitStatus()
     const refreshProjectDir = projectDirRef.current
     try {
       const status = await requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/status', refreshProjectDir))
@@ -3459,8 +3523,28 @@ export default function App() {
         return
       }
       if (channel === 'system') {
-        if (String(data.event_type || '') === 'git.pushed') {
+        const eventType = String(data.event_type || '')
+        if (eventType === 'git.pushed') {
           void fetchGitStatus()
+          // Auto-fix worker completed — clear in-progress state
+          const payload = data.payload as Record<string, unknown> | undefined
+          if (payload?.auto_fix) {
+            setPushInProgress(false)
+            setPushAutoFixRunning(false)
+            setPushMessage(String(payload.detail ?? 'Push succeeded (auto-fix)'))
+            window.setTimeout(() => setPushMessage(''), 8000)
+          }
+        }
+        if (eventType === 'git.push_output') {
+          const payload = data.payload as Record<string, unknown> | undefined
+          const line = String(payload?.line ?? '')
+          setPushOutputLines((prev) => [...prev, line])
+        }
+        if (eventType === 'git.auto_fix_done') {
+          const payload = data.payload as Record<string, unknown> | undefined
+          setPushInProgress(false)
+          setPushAutoFixRunning(false)
+          setPushError(String(payload?.detail ?? 'Auto-fix failed'))
         }
         return
       }
@@ -3651,22 +3735,36 @@ export default function App() {
   async function fetchPullRequests(): Promise<void> {
     setPrListLoading(true)
     setPrListError('')
+    setPrErrorCode(null)
     try {
-      const data = await requestJson<{ platform: string | null; error: string | null; items: PullRequestItem[] }>(
+      const data = await requestJson<{ platform: string | null; error: string | null; error_code: string | null; items: PullRequestItem[] }>(
         buildApiUrl('/api/pull-requests', projectDir),
       )
       setPrPlatform(data.platform)
       if (data.error) {
         setPrListError(data.error)
+        setPrErrorCode(data.error_code ?? null)
         setPrList([])
       } else {
         setPrList(data.items)
       }
     } catch (err) {
       setPrListError(err instanceof Error ? err.message : 'Failed to load pull requests')
+      setPrErrorCode('cli_error')
       setPrList([])
     } finally {
       setPrListLoading(false)
+    }
+  }
+
+  async function fetchPlatformStatus(): Promise<void> {
+    try {
+      const data = await requestJson<{ platform: string | null; cli_installed: boolean; cli_authenticated: boolean; cli_name: string | null; setup_steps: { step: number; label: string; done: boolean }[] }>(
+        buildApiUrl('/api/git-platform-status', projectDir),
+      )
+      setPlatformStatus(data)
+    } catch {
+      // Non-critical — silently ignore
     }
   }
 
@@ -4407,6 +4505,7 @@ export default function App() {
         orchestrator: {
           concurrency: Math.max(1, parseNonNegativeInt(settingsConcurrency, DEFAULT_SETTINGS.orchestrator.concurrency)),
           auto_deps: settingsAutoDeps,
+          auto_fix_push: settingsAutoFixPush,
           max_review_attempts: Math.max(1, parseNonNegativeInt(settingsMaxReviewAttempts, DEFAULT_SETTINGS.orchestrator.max_review_attempts)),
           max_merge_conflict_attempts: Math.min(
             10,
@@ -4674,20 +4773,31 @@ export default function App() {
   }
 
   async function postReviewComments(taskId: string): Promise<void> {
-    await runTaskMutation(
-      'post_review_comments',
-      async () => {
-        await requestJson<{ posted_count: number; failed_count: number }>(
-          buildApiUrl(`/api/tasks/${taskId}/post-review-comments`, projectDir),
-          { method: 'POST' },
-        )
-        await loadTaskDetail(taskId)
-      },
-      {
-        successMessage: 'Review comments posted.',
-        errorPrefix: 'Failed to post review comments',
-      },
-    )
+    setPostCommentsError(null)
+    setPostCommentsErrorCode(null)
+    setTaskActionPending('post_review_comments')
+    setTaskActionDetail('')
+    setTaskActionError('')
+    setTaskActionMessage('')
+    try {
+      await requestJson<{ posted_count: number; failed_count: number }>(
+        buildApiUrl(`/api/tasks/${taskId}/post-review-comments`, projectDir),
+        { method: 'POST' },
+      )
+      await loadTaskDetail(taskId)
+      setTaskActionMessage('Review comments posted.')
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to post review comments'
+      setTaskActionError(toErrorMessage('Failed to post review comments', err))
+      // Use structured error_code from backend when available.
+      const apiErr = err as Partial<ApiRequestError>
+      const code = apiErr.code ?? 'cli_error'
+      setPostCommentsError(errorMsg)
+      setPostCommentsErrorCode(code)
+    } finally {
+      setTaskActionPending(null)
+      setTaskActionDetail('')
+    }
   }
 
   async function skipToPrecommit(taskId: string): Promise<void> {
@@ -6210,7 +6320,7 @@ export default function App() {
           <div className="board-toolbar-spacer" />
           {gitStatus && (
             <div className="git-status-bar git-push-wrap">
-              <button className="git-branch-label" title={gitStatus.branch} onClick={() => setPushPopoverOpen((v) => !v)}>
+              <button className="git-branch-label" title={gitStatus.branch} onClick={() => { const opening = !pushPopoverOpen; setPushPopoverOpen(opening); if (opening) void fetchGitStatus() }}>
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="5" cy="4" r="2" /><circle cx="5" cy="12" r="2" /><circle cx="12" cy="6" r="2" /><path d="M5 6v4M10.2 6.8C9 8 7 8 5 8" /></svg>
                 {gitStatus.branch}
               </button>
@@ -6226,8 +6336,8 @@ export default function App() {
               )}
               <button
                 className="board-icon-btn git-push-btn"
-                disabled={pushInProgress || (gitStatus.ahead_count === 0 && !!gitStatus.remote_branch)}
-                onClick={() => setPushPopoverOpen((v) => !v)}
+                disabled={pushInProgress || autoNameInProgress || (gitStatus.ahead_count === 0 && !!gitStatus.remote_branch)}
+                onClick={() => { const opening = !pushPopoverOpen; setPushPopoverOpen(opening); if (opening) void fetchGitStatus() }}
                 title={gitStatus.ahead_count === 0 && gitStatus.remote_branch ? 'Nothing to push' : 'Push to remote'}
                 aria-label="Push to remote"
               >
@@ -6252,7 +6362,7 @@ export default function App() {
                     {gitStatus.remote_branch ? (
                       <button
                         className="push-option-btn"
-                        disabled={pushInProgress || gitStatus.ahead_count === 0}
+                        disabled={pushInProgress || autoNameInProgress || gitStatus.ahead_count === 0}
                         onClick={() => void handleGitPush()}
                       >
                         Push to {gitStatus.remote_branch}
@@ -6260,7 +6370,7 @@ export default function App() {
                     ) : (
                       <button
                         className="push-option-btn"
-                        disabled={pushInProgress}
+                        disabled={pushInProgress || autoNameInProgress}
                         onClick={() => void handleGitPush()}
                       >
                         Push to origin/{gitStatus.branch}
@@ -6276,27 +6386,53 @@ export default function App() {
                           placeholder="branch-name"
                           value={pushTargetBranch}
                           onChange={(e) => setPushTargetBranch(e.target.value)}
-                          disabled={pushInProgress}
+                          disabled={pushInProgress || autoNameInProgress}
                         />
                         <button
                           className="push-auto-btn"
-                          disabled={pushInProgress}
-                          onClick={() => void handleGitPush(undefined, true)}
+                          disabled={pushInProgress || autoNameInProgress}
+                          onClick={() => void handleAutoNamePush()}
                           title="Auto-generate branch name"
                         >
-                          Auto
+                          {autoNameInProgress ? <span className="spinner" /> : 'Auto'}
                         </button>
                       </div>
                       {pushTargetBranch.trim() && (
                         <button
                           className="push-option-btn"
-                          disabled={pushInProgress}
+                          disabled={pushInProgress || autoNameInProgress}
                           onClick={() => void handleGitPush(pushTargetBranch.trim())}
                         >
                           Push to origin/{pushTargetBranch.trim()}
                         </button>
                       )}
                     </div>
+                    {pushInProgress && (
+                      <>
+                        {pushAutoFixRunning && (
+                          <div className="push-autofix-status">
+                            <span className="push-autofix-spinner" />
+                            Auto-fix worker is analyzing and fixing the issue...
+                          </div>
+                        )}
+                        {pushOutputLines.length > 0 && (
+                          <div className="push-output-log" ref={(el) => { if (el) el.scrollTop = el.scrollHeight }}>
+                            {pushOutputLines.map((line, i) => (
+                              <div key={i} className="push-output-line">{line}</div>
+                            ))}
+                          </div>
+                        )}
+                        <button
+                          className="push-cancel-btn"
+                          onClick={() => void handleCancelPush()}
+                        >
+                          {pushAutoFixRunning ? 'Cancel auto-fix' : 'Cancel push'}
+                        </button>
+                      </>
+                    )}
+                    {pushMessage && !pushInProgress && (
+                      <div className="push-success-msg">{pushMessage}</div>
+                    )}
                     {pushError && <div className="push-error">{pushError}</div>}
                 </div>
               )}
@@ -7219,6 +7355,14 @@ export default function App() {
                     />
                     Auto dependency analysis
                   </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={settingsAutoFixPush}
+                      onChange={(event) => { setSettingsAutoFixPush(event.target.checked); setExecutionFormDirty(true) }}
+                    />
+                    Auto-fix push errors (use worker to fix pre-push hook failures and retry)
+                  </label>
                 </div>
                 <div className="inline-actions" style={{ marginTop: '0.5rem' }}>
                   <button className="button button-primary button-sm" type="submit" disabled={settingsSaving || !executionFormDirty}>
@@ -7447,8 +7591,84 @@ export default function App() {
       setPrReviewGuidance('')
       setPrReviewMode(ReviewMode.FixOnly)
       void fetchPullRequests()
+      void fetchPlatformStatus()
     }
     setWorkOpen(true)
+  }
+
+  function renderPlatformSetupGuidance(errorCode: string | null, platform: string | null): JSX.Element {
+    const platformLabel = platform === 'gitlab' ? 'GitLab' : 'GitHub'
+    const cliName = platform === 'gitlab' ? 'glab' : 'gh'
+    const prLabel = platform === 'gitlab' ? 'merge requests' : 'pull requests'
+
+    if (errorCode === 'no_remote' || !platform) {
+      return (
+        <div className="pr-review-setup-help">
+          <p className="pr-review-setup-help-title">Set up a git remote</p>
+          <p>This project does not appear to have a GitHub or GitLab remote configured. To use {prLabel} features, connect your repository:</p>
+          <ol className="pr-review-setup-steps">
+            <li><span className="pr-review-step-label">Check your current remotes:</span><pre>git remote -v</pre></li>
+            <li><span className="pr-review-step-label">Add a remote if none exists:</span><pre>git remote add origin https://github.com/your-org/your-repo.git</pre></li>
+            <li><span className="pr-review-step-label">Verify the remote is configured:</span><pre>git remote -v</pre></li>
+          </ol>
+        </div>
+      )
+    }
+
+    if (errorCode === 'cli_not_installed') {
+      return (
+        <div className="pr-review-setup-help">
+          <p className="pr-review-setup-help-title">Install the {platformLabel} CLI</p>
+          <p>The <code>{cliName}</code> command-line tool is required to list and review {prLabel}.</p>
+          <ol className="pr-review-setup-steps">
+            <li>
+              <span className="pr-review-step-label">Install <code>{cliName}</code>:</span>
+              <div className="pr-review-setup-os-tabs">
+                {platform === 'github' ? (
+                  <>
+                    <div><span className="pr-review-os-label">macOS</span><pre>brew install gh</pre></div>
+                    <div><span className="pr-review-os-label">Linux</span><pre>sudo apt install gh{'\n'}# or: sudo dnf install gh</pre></div>
+                    <div><span className="pr-review-os-label">Windows</span><pre>winget install GitHub.cli{'\n'}# or: scoop install gh</pre></div>
+                  </>
+                ) : (
+                  <>
+                    <div><span className="pr-review-os-label">macOS</span><pre>brew install glab</pre></div>
+                    <div><span className="pr-review-os-label">Linux</span><pre>sudo apt install glab</pre></div>
+                    <div><span className="pr-review-os-label">Windows</span><pre>winget install GLab.GLab{'\n'}# or: scoop install glab</pre></div>
+                  </>
+                )}
+              </div>
+            </li>
+            <li><span className="pr-review-step-label">Authenticate:</span><pre>{cliName} auth login</pre></li>
+            <li><span className="pr-review-step-label">Verify it works:</span><pre>{platform === 'github' ? 'gh pr list' : 'glab mr list'}</pre></li>
+          </ol>
+        </div>
+      )
+    }
+
+    if (errorCode === 'cli_not_authenticated') {
+      return (
+        <div className="pr-review-setup-help">
+          <p className="pr-review-setup-help-title">Authenticate the {platformLabel} CLI</p>
+          <p>The <code>{cliName}</code> CLI is installed but does not appear to be authenticated.</p>
+          <ol className="pr-review-setup-steps">
+            <li><span className="pr-review-step-label">Log in:</span><pre>{cliName} auth login</pre></li>
+            <li><span className="pr-review-step-label">Verify authentication:</span><pre>{cliName} auth status</pre></li>
+            <li><span className="pr-review-step-label">Test access to this repo:</span><pre>{platform === 'github' ? 'gh pr list' : 'glab mr list'}</pre></li>
+          </ol>
+        </div>
+      )
+    }
+
+    // cli_error or unknown
+    return (
+      <div className="pr-review-setup-help">
+        <p>Check that the {platformLabel} CLI is installed, authenticated, and can access this repository:</p>
+        <pre>{platform === 'github' ? 'gh pr list' : 'glab mr list'}</pre>
+        <p>If the issue persists, try re-authenticating:</p>
+        <pre>{cliName} auth login</pre>
+      </div>
+    )
   }
 
   function renderRoute(): JSX.Element {
@@ -7680,7 +7900,14 @@ export default function App() {
                  Array.isArray(selectedTaskView.metadata?.generated_review_comments) &&
                  (selectedTaskView.metadata.generated_review_comments as unknown[]).length > 0 &&
                  (taskStatus === 'done' || taskStatus === 'in_review') ? (
-                  <button className="button button-primary" onClick={() => void postReviewComments(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'post_review_comments' ? 'Posting...' : 'Post Comments'}</button>
+                  <>
+                    <button className="button button-primary" onClick={() => { setPostCommentsError(null); setPostCommentsErrorCode(null); void postReviewComments(selectedTaskView.id) }} disabled={isTaskActionBusy}>{taskActionPending === 'post_review_comments' ? 'Posting...' : 'Post Comments'}</button>
+                    {postCommentsError && (postCommentsErrorCode === 'cli_not_installed' || postCommentsErrorCode === 'cli_not_authenticated') ? (
+                      <div className="pr-review-setup pr-review-setup-inline">
+                        {renderPlatformSetupGuidance(postCommentsErrorCode, (selectedTaskView.metadata?.comment_platform as Record<string, string> | undefined)?.platform ?? platformStatus?.platform ?? prPlatform ?? null)}
+                      </div>
+                    ) : null}
+                  </>
                 ) : null}
                 {taskSupportsPostCompletionGeneration(selectedTaskView) ? (
                   <button className="button button-primary" onClick={() => void generateFollowUpTasks(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'generate_follow_ups' ? 'Generating...' : 'Generate Follow-Up Tasks'}</button>
@@ -7732,7 +7959,7 @@ export default function App() {
               <div className="tab-row">
                 <button className={`tab ${createTab === 'task' ? 'is-active' : ''}`} onClick={() => setCreateTab('task')}>Create Task</button>
                 <button className={`tab ${createTab === 'import' ? 'is-active' : ''}`} onClick={() => setCreateTab('import')}>Import PRD</button>
-                <button className={`tab ${createTab === 'review' ? 'is-active' : ''}`} onClick={() => { setCreateTab('review'); void fetchPullRequests() }}>Review PR/MR</button>
+                <button className={`tab ${createTab === 'review' ? 'is-active' : ''}`} onClick={() => { setCreateTab('review'); void fetchPullRequests(); void fetchPlatformStatus() }}>Review PR/MR</button>
               </div>
             </div>
 
@@ -7902,44 +8129,21 @@ export default function App() {
 
               {createTab === 'review' ? (
                 <div className="form-stack">
+                  {platformStatus?.setup_steps && !platformStatus.setup_steps.every((s) => s.done) ? (
+                    <div className="pr-review-status-checklist">
+                      {platformStatus.setup_steps.map((s) => (
+                        <span key={s.step} className={`pr-review-status-item ${s.done ? 'is-done' : 'is-pending'}`}>
+                          <span className="pr-review-status-icon">{s.done ? '\u2713' : '\u2022'}</span>
+                          {s.label}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
                   {prListLoading ? <p className="text-muted">Loading open pull requests…</p> : null}
                   {prListError ? (
                     <div className="pr-review-setup">
                       <p className="pr-review-setup-error">{prListError}</p>
-                      {!prPlatform ? (
-                        <div className="pr-review-setup-help">
-                          <p>This project does not appear to have a GitHub or GitLab remote configured.</p>
-                          <p>Make sure your <code>origin</code> remote points to a GitHub or GitLab repository:</p>
-                          <pre>git remote -v</pre>
-                        </div>
-                      ) : prListError.toLowerCase().includes('not installed') ? (
-                        <div className="pr-review-setup-help">
-                          <p>To list and review {prPlatform === 'gitlab' ? 'merge requests' : 'pull requests'}, install the {prPlatform === 'gitlab' ? 'GitLab' : 'GitHub'} CLI:</p>
-                          {prPlatform === 'github' ? (
-                            <>
-                              <pre>brew install gh</pre>
-                              <p>Then authenticate:</p>
-                              <pre>gh auth login</pre>
-                            </>
-                          ) : (
-                            <>
-                              <pre>brew install glab</pre>
-                              <p>Then authenticate:</p>
-                              <pre>glab auth login</pre>
-                            </>
-                          )}
-                        </div>
-                      ) : prListError.toLowerCase().includes('auth') || prListError.toLowerCase().includes('login') || prListError.toLowerCase().includes('401') || prListError.toLowerCase().includes('403') ? (
-                        <div className="pr-review-setup-help">
-                          <p>The {prPlatform === 'gitlab' ? 'GitLab' : 'GitHub'} CLI does not appear to be authenticated. Run:</p>
-                          <pre>{prPlatform === 'github' ? 'gh auth login' : 'glab auth login'}</pre>
-                        </div>
-                      ) : (
-                        <div className="pr-review-setup-help">
-                          <p>Check that the {prPlatform === 'gitlab' ? 'GitLab' : 'GitHub'} CLI is authenticated and can access this repository:</p>
-                          <pre>{prPlatform === 'github' ? 'gh pr list' : 'glab mr list'}</pre>
-                        </div>
-                      )}
+                      {renderPlatformSetupGuidance(prErrorCode, prPlatform)}
                     </div>
                   ) : null}
                   {!prListLoading && !prListError && prList.length === 0 ? (

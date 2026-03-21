@@ -26,19 +26,21 @@ Execution rules:
   3. local toolchain missing (`tool_missing`)
   4. network registry unavailable (`infrastructure`)
 
-Reporting requirements:
-- For each command attempted, report:
-  - command,
-  - exit code,
-  - outcome hint (`pass|fail|skip|environment`),
-  - brief evidence (key error lines).
-- Keep output factual and concise.
+Workdoc requirements:
+- Update `## Verification Results` in `.workdoc.md` with:
+  - use a sub-heading `### Attempt N` where N is the attempt number from the prompt header (default to 1 if not present),
+  - each command attempted, its exit code, and outcome (`pass|fail|skip|environment`),
+  - brief evidence (key error lines) for any failures,
+  - what was fixed (if any test failures were resolved) and how.
+- Preserve prior attempt entries — append your entry, do not overwrite earlier attempts.
 
 Scope boundary:
 - Verify execution outcomes only.
 - Do NOT perform acceptance-criteria judgment or approval decisions; that belongs to review.
 
-Output requirements:
-- Return JSON only; no conversational text or markdown fences.
-- Respond with valid JSON matching this schema:
-  `{"status": "pass|fail|skip|environment", "reason_code": "assertion_failure|type_error|lint_violation|tool_missing|config_missing|no_tests|permission_denied|resource_limit|os_incompatibility|infrastructure|unknown", "summary": "one-line summary of results"}`
+Completion output:
+- Return only a concise verification summary:
+  - what commands were run and their results,
+  - what was fixed (if anything),
+  - any remaining failures or environment blockers.
+- Do not include conversational prefaces or follow-up questions.

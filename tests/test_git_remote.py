@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from overdrive.runtime.orchestrator.git_remote import (
-    generate_branch_name,
     get_branch_status,
     push_to_remote,
 )
@@ -156,15 +155,3 @@ class TestPushToRemote:
         assert "origin/main" in result.remote_branch
 
 
-class TestGenerateBranchName:
-    def test_format(self, git_repo: Path) -> None:
-        name = generate_branch_name(git_repo)
-        assert name.startswith("push/main-")
-        # Should contain date-time portion
-        parts = name.split("-")
-        assert len(parts) >= 3
-
-    def test_sanitizes_slashes(self, git_repo: Path) -> None:
-        _git(["checkout", "-b", "feature/test"], cwd=git_repo)
-        name = generate_branch_name(git_repo)
-        assert name.startswith("push/feature-test-")

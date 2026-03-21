@@ -2503,7 +2503,8 @@ class TestWorkdocPromptInstructions:
         task = _make_task()
         prompt = build_step_prompt(task=task, step="verify", attempt=1)
         assert "## Working Document" in prompt
-        assert "Do NOT modify `.workdoc.md`" in prompt
+        assert "## Verification Results" in prompt
+        assert "Write the file back when done" in prompt
 
     def test_prompt_includes_workdoc_instructions_for_implement_fix(self) -> None:
         """Test that prompt includes workdoc instructions for implement fix."""
@@ -2511,7 +2512,7 @@ class TestWorkdocPromptInstructions:
         prompt = build_step_prompt(task=task, step="implement_fix", attempt=1)
         assert "## Working Document" in prompt
         assert "## Fix Log" in prompt
-        assert "Do NOT modify `.workdoc.md`" in prompt
+        assert "Write the file back when done" in prompt
 
     def test_prompt_includes_workdoc_instructions_for_review(self) -> None:
         """Test that prompt includes workdoc instructions for review."""

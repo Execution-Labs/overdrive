@@ -505,6 +505,11 @@ Fetch stored import job state.
 
 ## Pull Requests
 
+> **Prerequisites:** These endpoints require the `gh` CLI (GitHub) or `glab` CLI
+> (GitLab) to be installed and authenticated, and an `origin` remote pointing to
+> GitHub or GitLab. See [USER_GUIDE.md — GitHub & GitLab Integration](USER_GUIDE.md#github--gitlab-integration)
+> for setup instructions.
+
 ### `GET /api/pull-requests`
 List open pull requests (GitHub) or merge requests (GitLab).
 
@@ -515,8 +520,24 @@ task already exists.
 Response:
 - `platform` (`github`, `gitlab`, or `null`)
 - `error` (string or `null`)
+- `error_code` (`no_remote`, `cli_not_installed`, `cli_not_authenticated`, `cli_error`, or `null`)
 - `items[]` — each with `number`, `title`, `author`, `head_ref`, `base_ref`,
   `url`, `has_review_task`, `review_task_id`
+
+### `GET /api/git-platform-status`
+Check GitHub/GitLab integration status in a single call.
+
+Reports whether a git remote is configured, the platform CLI is installed,
+and the CLI is authenticated. Used by the frontend to show a setup checklist
+proactively before errors occur.
+
+Response:
+- `platform` (`github`, `gitlab`, or `null`)
+- `remote_url` (string or `null`)
+- `cli_installed` (boolean)
+- `cli_authenticated` (boolean)
+- `cli_name` (`gh`, `glab`, or `null`)
+- `setup_steps[]` — each with `step` (number), `label` (string), `done` (boolean)
 
 ### `POST /api/pull-requests/{number}/review`
 Create a review task for a pull request or merge request.
@@ -530,6 +551,56 @@ Response:
 Errors:
 - `400` if platform detection or CLI check fails
 - `409` if a review task already exists for this PR/MR number
+
+## Git
+
+### `GET /api/git/status`
+Returns current branch name, remote tracking info, ahead/behind counts, and commit list.
+
+Response:
+- `branch` (string) — current branch name (or `"HEAD"` if detached)
+- `remote_branch` (string | null) — upstream tracking branch (e.g. `"origin/main"`) or `null` if none
+- `ahead_count` (int) — number of local commits not yet on the remote
+- `behind_count` (int) — number of remote commits not yet pulled locally
+- `commits` (array of `{sha, message}`) — list of ahead commits (newest first)
+- `has_remote` (bool) — whether an `origin` remote is configured
+
+### `POST /api/git/push`
+Push commits to the remote.
+
+Request:
+- `target_branch` (string, optional) — remote branch name to push to; omit to push to current upstream
+- `auto_name` (bool, default `false`) — auto-generate a remote branch name (e.g. `push/main-20260319-091742`)
+
+Response:
+- `success` (bool) — whether the push succeeded
+- `error` (string | null) — error message on failure
+- `remote_branch` (string) — the remote branch that was pushed to
+- `pushed_commits` (int) — number of commits pushed
+
+Errors:
+- `400` — no remote configured, or push rejected by remote (e.g. non-fast-forward)
+
+On success, emits a `git.pushed` WebSocket event on the `system` channel.
+
+### `POST /api/git/push/cancel`
+Cancel a running push operation.
+
+Response:
+- `cancelled` (bool) — whether a push was cancelled
+- `detail` (string | null) — explanation when no push was in progress
+
+### `POST /api/git/suggest-branch-name`
+Use an LLM worker to suggest a branch name from commits ahead of the remote.
+
+Query parameters:
+- `project_dir` (string, optional) — project directory override
+
+Response:
+- `branch_name` (string | null) — suggested branch name prefixed with `push/`, or null on failure
+- `error` (string | null) — error description when branch name generation fails
+
+Never raises HTTP errors; all failure modes return `branch_name: null` with an `error` message.
 
 ## Review and Collaboration
 
