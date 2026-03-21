@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.6] - 2026-03-21
+
+### Added
+- **Push output streaming**: Real-time display of push progress via WebSocket events
+- **Cancel push**: Abort long-running pushes with a cancel button and watchdog thread
+- **Auto-fix push errors**: Opt-in worker agent that fixes pre-push hook failures (lint, test errors), commits the fix, and re-pushes automatically
+- **LLM-powered branch name suggestions**: `POST /api/git/suggest-branch-name` generates descriptive branch names from commit history
+- **Git status in board toolbar**: Moved from topbar, shows ahead/behind counts
+
+### Changed
+- Prompt guidance for verify, implement, and fix steps now includes implementation awareness
+- Branch auto-naming requires LLM — removed timestamp-based fallback
+
+### Fixed
+- Dark mode contrast issues in push popover and git status bar
+- Flaky CI tests: mock `gh` auth check, `patch.object` for subprocess under xdist, SQLite WAL visibility in lease verification
+
 ## [0.3.5] - 2026-03-20
 
 ### Added
