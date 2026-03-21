@@ -1324,7 +1324,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         """
         container, bus, orchestrator = deps.ctx(project_dir)
         registry = PipelineRegistry()
-        allowed_pipelines = sorted(template.id for template in registry.list_templates())
+        allowed_pipelines = sorted(t.id for t in registry.list_templates() if t.id != "custom")
         classifier_pipeline_id = str(body.classifier_pipeline_id or "").strip()
         classifier_confidence = str(body.classifier_confidence or "").strip().lower()
         classifier_reason = str(body.classifier_reason or "").strip()
@@ -1425,7 +1425,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         """
         container, _, orchestrator = deps.ctx(project_dir)
         registry = PipelineRegistry()
-        allowed_pipelines = sorted(template.id for template in registry.list_templates())
+        allowed_pipelines = sorted(t.id for t in registry.list_templates() if t.id != "custom")
         synthetic = Task(
             title=str(body.title or "").strip(),
             description=str(body.description or "").strip(),
