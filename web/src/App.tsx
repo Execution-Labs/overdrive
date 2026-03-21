@@ -1778,6 +1778,7 @@ export default function App() {
   const [overseerBusy, setOverseerBusy] = useState(false)
   const [overseerError, setOverseerError] = useState('')
   const [overseerLog, setOverseerLog] = useState('')
+  const [overseerLogSession, setOverseerLogSession] = useState('')
   const [overseerLogIteration, setOverseerLogIteration] = useState(0)
   const overseerLogOffsetRef = useRef({ stdout: 0, stderr: 0 })
   const overseerLogRef = useRef<HTMLPreElement>(null)
@@ -4898,11 +4899,15 @@ export default function App() {
   useEffect(() => {
     const isActive = overseer?.status === 'running' || overseer?.status === 'blocked'
     if (!isActive || route !== 'godmode') return
+    const currentSession = overseer?.id ?? ''
     const currentIteration = overseer?.iteration ?? 0
-    if (currentIteration !== overseerLogIteration) {
+    const sessionKey = `${currentSession}:${currentIteration}`
+    const prevKey = `${overseerLogSession}:${overseerLogIteration}`
+    if (sessionKey !== prevKey) {
       setOverseerLog('')
       overseerLogOffsetRef.current = { stdout: 0, stderr: 0 }
       overseerLogAutoScroll.current = true
+      setOverseerLogSession(currentSession)
       setOverseerLogIteration(currentIteration)
     }
     let stopped = false
