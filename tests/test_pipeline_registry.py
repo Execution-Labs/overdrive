@@ -20,6 +20,7 @@ class TestPipelineTemplate:
             "pr_review_comment", "pr_review_summarize",
             "pr_review_fix_only", "pr_review_fix_respond",
             "performance", "hotfix", "spike", "chore", "plan_only", "verify_only",
+            "custom",
         }
         assert expected == set(BUILTIN_TEMPLATES.keys())
 
@@ -149,7 +150,7 @@ class TestPipelineRegistry:
         """Test that list templates."""
         reg = PipelineRegistry()
         templates = reg.list_templates()
-        assert len(templates) == 22
+        assert len(templates) == 23
 
     def test_get_template(self):
         """Test that get template."""

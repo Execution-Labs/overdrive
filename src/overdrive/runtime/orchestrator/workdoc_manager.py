@@ -219,6 +219,26 @@ _Pending: will be populated as needed._
 _Pending: will be populated by the verify step._
 """
 
+    _CUSTOM_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Execution Output
+
+_Pending: will be populated by the execute step._
+"""
+
     _SECURITY_AUDIT_WORKDOC_TEMPLATE = """\
 # Working Document: {title}
 
@@ -785,6 +805,7 @@ _Pending: will be populated by the generate_tasks step._
             "chore": self._CHORE_WORKDOC_TEMPLATE,
             "plan_only": self._PLAN_ONLY_WORKDOC_TEMPLATE,
             "verify_only": self._VERIFY_ONLY_WORKDOC_TEMPLATE,
+            "custom": self._CUSTOM_WORKDOC_TEMPLATE,
         }
         return template_by_pipeline.get(pipeline_id, self._GENERIC_WORKDOC_TEMPLATE)
 

@@ -426,6 +426,7 @@ def test_builtin_pipelines_use_dedicated_templates(service: OrchestratorService)
         "chore": "chore",
         "plan_only": "initiative_plan",
         "verify_only": "verify_only",
+        "custom": "custom",
     }
     assert set(representative_task_types.keys()) == set(BUILTIN_TEMPLATES.keys())
 

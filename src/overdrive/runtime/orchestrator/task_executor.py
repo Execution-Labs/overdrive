@@ -1013,7 +1013,10 @@ class TaskExecutor:
                             task.metadata.pop(key, None)
                         task.metadata.pop("merge_conflict", None)
                 elif not context_expected:
-                    worktree_dir = svc._create_worktree(task)
+                    # Skip worktree for pipelines that opt out (e.g. custom tasks).
+                    _tmpl = PipelineRegistry().resolve_for_task_type(task.task_type)
+                    if not _tmpl.metadata.get("skip_worktree"):
+                        worktree_dir = svc._create_worktree(task)
 
             if worktree_dir is None and context_expected:
                 task.status = "blocked"

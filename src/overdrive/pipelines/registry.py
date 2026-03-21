@@ -363,6 +363,17 @@ VERIFY_ONLY_PIPELINE = PipelineTemplate(
     ),
 )
 
+CUSTOM_PIPELINE = PipelineTemplate(
+    id="custom",
+    display_name="Custom Execution",
+    description="Execute a single flexible step defined entirely by the task description. No worktree, no review, no commit.",
+    task_types=("custom",),
+    steps=(
+        StepDef(name="execute", display_name="Execute"),
+    ),
+    metadata={"skip_worktree": True},
+)
+
 
 BUILTIN_TEMPLATES: dict[str, PipelineTemplate] = {
     t.id: t
@@ -389,6 +400,7 @@ BUILTIN_TEMPLATES: dict[str, PipelineTemplate] = {
         CHORE_PIPELINE,
         PLAN_ONLY_PIPELINE,
         VERIFY_ONLY_PIPELINE,
+        CUSTOM_PIPELINE,
     ]
 }
 

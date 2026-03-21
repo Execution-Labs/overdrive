@@ -48,6 +48,7 @@ _DIAGNOSIS_STEPS = {"diagnose"}
 _MERGE_RESOLVE_STEPS = {"resolve_merge"}
 _DEP_ANALYSIS_STEPS = {"analyze_deps"}
 _PIPELINE_CLASSIFICATION_STEPS = {"pipeline_classify"}
+_EXECUTE_STEPS = {"execute"}
 
 # Which prior step outputs each category should receive in its prompt.
 # None = inject all available outputs (for reporting/summarize steps).
@@ -89,6 +90,7 @@ _STEP_PROMPT_FILES: dict[str, str] = {
     "merge_resolution": "steps/merge_resolution.md",
     "dependency_analysis": "steps/dependency_analysis.md",
     "pipeline_classification": "steps/pipeline_classify.md",
+    "execution": "steps/execute.md",
     "general": "steps/general.md",
 }
 
@@ -243,6 +245,8 @@ def _instruction_prompt_name(step: str, task_type: str) -> str:
         return "steps/scan_code.md"
     if step == "summarize":
         return "steps/summarize.md"
+    if step == "execute":
+        return "steps/execute.md"
     return _STEP_PROMPT_FILES[category]
 
 
@@ -520,6 +524,8 @@ def _step_category(step: str) -> str:
         return "dependency_analysis"
     if step in _PIPELINE_CLASSIFICATION_STEPS:
         return "pipeline_classification"
+    if step in _EXECUTE_STEPS:
+        return "execution"
     return "general"
 
 
